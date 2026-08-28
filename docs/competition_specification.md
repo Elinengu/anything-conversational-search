@@ -74,8 +74,6 @@ Efficiency = clip((11 - MTTC) / 10, 0, 1)
 TechnicalScore = 0.50 × HitRate@10 + 0.30 × MRR + 0.20 × Efficiency
 ```
 
-`TechnicalScore` is an objective input to the `Technical Execution` assessment. It is not a separate judging criterion and does not represent the entire `Technical Execution` score.
-
 The same metrics are reported separately for Buying, Browsing, Intent Override, and Boundary sessions. Reported token use and latency are feasibility measures and do not change the core score.
 
 ## Innovation Directions
