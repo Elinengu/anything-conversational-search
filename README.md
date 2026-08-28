@@ -79,7 +79,10 @@ customer turn
 | `tools/sweep.py` | S0 | Experiment harness and the dev/holdout split |
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the data flow, the boundaries between
-stages, and the failure behaviour at each one.
+stages, and the failure behaviour at each one. See
+[IMPLEMENTATION.md](IMPLEMENTATION.md) for a full stage-by-stage account of what
+changed and why, written for readers new to search and recommender systems, with
+enhancement ideas at the end of each stage.
 
 ## Setup
 
