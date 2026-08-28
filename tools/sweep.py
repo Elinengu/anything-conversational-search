@@ -1,0 +1,148 @@
+"""S0 - experiment harness.
+
+Runs the official evaluator over several agent configurations in one process so
+that the 50,000-row catalog index is built once and shared (a full evaluation
+run drops from minutes to roughly twenty seconds).
+
+Also provides the dev/holdout split. The public set has 200 sessions but the
+final score is decided by 800 private ones, so every configuration is tuned on
+the 120-session dev split and confirmed on the 80-session holdout. Treat
+differences below ~0.02 on the holdout as noise.
+
+Usage:
+    python3 tools/sweep.py --split dev
+    python3 tools/sweep.py --split holdout --configs floor,phrase
+    python3 tools/sweep.py --split all
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import time
+from collections import defaultdict
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from evaluator.local_evaluator import catalog_index, evaluate, load_jsonl  # noqa: E402
+from src.facets import FacetStore  # noqa: E402
+from src.index import load_index  # noqa: E402
+from src.policy import FixedPolicy, InfoGainPolicy  # noqa: E402
+from src.rerank import RerankConfig  # noqa: E402
+from src.retrieval import RetrievalConfig  # noqa: E402
+from starter.agent import Agent, AgentConfig  # noqa: E402
+
+
+DEV_FRACTION = 0.6
+
+
+def split_samples(samples: list[dict], split: str) -> list[dict]:
+    """Deterministic split, stratified by scenario_type.
+
+    Sorting by sample_id inside each scenario keeps the split stable across runs
+    without needing a stored manifest.
+    """
+    if split == "all":
+        return samples
+    grouped: dict[str, list[dict]] = defaultdict(list)
+    for sample in samples:
+        grouped[sample["scenario_type"]].append(sample)
+    selected: list[dict] = []
+    for scenario in sorted(grouped):
+        rows = sorted(grouped[scenario], key=lambda item: item["sample_id"])
+        cut = round(len(rows) * DEV_FRACTION)
+        selected.extend(rows[:cut] if split == "dev" else rows[cut:])
+    return sorted(selected, key=lambda item: item["sample_id"])
+
+
+def build_configs(catalog: str) -> dict[str, AgentConfig]:
+    """Named configurations to compare. Add rows here when testing a change."""
+    facets = FacetStore(load_index(catalog).products)
+    return {
+        # The committed floor: terms-only retrieval, broadest question, hold
+        # recommendations until the customer has disclosed something.
+        "floor": AgentConfig(
+            retrieval=RetrievalConfig(use_focused=False),
+            rerank=RerankConfig(enabled=False),
+            policy=FixedPolicy(),
+            first_recommend_turn=3,
+        ),
+        # Adds the post-override focused route and verbatim span reranking.
+        "rerank": AgentConfig(
+            retrieval=RetrievalConfig(),
+            rerank=RerankConfig(enabled=True),
+            policy=FixedPolicy(),
+            first_recommend_turn=3,
+        ),
+        # Same pipeline, but the question is chosen by expected information gain
+        # over the live candidate pool instead of being fixed.
+        "infogain": AgentConfig(
+            retrieval=RetrievalConfig(),
+            rerank=RerankConfig(enabled=True),
+            policy=InfoGainPolicy(facets),
+            first_recommend_turn=3,
+        ),
+        # Information gain restricted to specific attributes - no broad questions.
+        "infogain_specific": AgentConfig(
+            retrieval=RetrievalConfig(),
+            rerank=RerankConfig(enabled=True),
+            policy=InfoGainPolicy(facets, allow_broad=False),
+            first_recommend_turn=3,
+        ),
+    }
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Configuration sweep over the public set")
+    parser.add_argument("--catalog", default="data/catalog.jsonl")
+    parser.add_argument("--dataset", default="data/public_set.jsonl")
+    parser.add_argument("--split", default="dev", choices=["dev", "holdout", "all"])
+    parser.add_argument("--configs", default="", help="comma-separated subset of config names")
+    parser.add_argument("--output", default="", help="optional path for the full JSON results")
+    args = parser.parse_args()
+
+    samples = split_samples(load_jsonl(args.dataset), args.split)
+    catalog_ids, categories, products = catalog_index(args.catalog)
+
+    configs = build_configs(args.catalog)
+    if args.configs:
+        wanted = [name.strip() for name in args.configs.split(",") if name.strip()]
+        missing = [name for name in wanted if name not in configs]
+        if missing:
+            parser.error(f"unknown config(s): {', '.join(missing)}")
+        configs = {name: configs[name] for name in wanted}
+
+    print(f"split={args.split}  sessions={len(samples)}\n")
+    header = f"{'config':<12} {'hit@10':>7} {'mrr':>7} {'mttc':>6} {'eff':>6} {'score':>7}  {'time':>6}"
+    print(header)
+    print("-" * len(header))
+
+    results: dict[str, dict] = {}
+    for name, config in configs.items():
+        started = time.time()
+        result = evaluate(Agent(args.catalog, config), samples, catalog_ids, categories, products)
+        results[name] = result
+        print(
+            f"{name:<12} {result['hit_rate_at_10']:>7.3f} {result['mrr']:>7.3f} "
+            f"{result['mttc']:>6.2f} {result['efficiency']:>6.3f} "
+            f"{result['recommended_technical_score']:>7.4f}  {time.time() - started:>5.0f}s",
+            flush=True,
+        )
+
+    print("\nper-scenario score components")
+    for name, result in results.items():
+        parts = " ".join(
+            f"{scenario[:4]}={metrics['hit_rate_at_10']:.2f}/{metrics['mrr']:.2f}"
+            for scenario, metrics in sorted(result["scenario_metrics"].items())
+        )
+        print(f"  {name:<12} {parts}   (hit/mrr)")
+
+    if args.output:
+        Path(args.output).write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
+        print(f"\nwrote {args.output}")
+
+
+if __name__ == "__main__":
+    main()
