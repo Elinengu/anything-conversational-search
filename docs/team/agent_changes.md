@@ -21,10 +21,10 @@ public labels and API contract were **not** touched.
 | + negative facet evidence | Elinengu | **0.9143** | **0.7917** | penalise contradiction of a stated facet; profile + budget signals measured and rejected — `docs/team/rerank_signals.md` |
 
 Net: **public 0.859 -> 0.9143, adversarial 0.684 -> 0.7917.** 51/51 tests pass.
-The six core-agent changes are detailed below; supporting tooling and docs follow.
+The seven core-agent changes are detailed below; supporting tooling and docs follow.
 
 Dashes mark changes that landed while several branches were merging in parallel, where
-no clean before/after was captured at the time. Changes 5 and 6 were measured in
+no clean before/after was captured at the time. Changes 5-7 were measured in
 isolation instead — toggling the one parameter in a single process — which is the
 method `.claude/skills/record-change/SKILL.md` now requires, precisely because
 differencing across merges attributed one teammate's gain to another's change.
@@ -305,6 +305,78 @@ rank; hit rate and MTTC are unchanged on both sets.
 It ships for auditability and for robustness on a catalog nobody has hand-inspected,
 not for points. `tests/test_stoplist.py` holds the invariants that keep a future
 regeneration honest.
+
+---
+
+## Change 7 — Negative facet evidence in the reranker (Elinengu)
+
+**Files:** `src/rerank.py`, `src/facets.py`, `src/policy.py`, `tools/sweep.py`,
+`tests/test_components.py` — full record with the two rejected sibling signals in
+`docs/team/rerank_signals.md`
+
+### Problem
+
+Every rerank term is positive evidence: span coverage, facet agreement, category
+and tail alignment. None can separate a candidate that *satisfies* "color: grey"
+from one that merely *doesn't contradict* it — a black-only shirt matches
+"cotton shirt" spans exactly as well as a grey one and loses nothing for being
+black. The customer's constraint rules products out; the scorer only ever ruled
+products in.
+
+### What changed
+
+`_facet_conflicts()` counts stated facet values the candidate contradicts, and
+the score subtracts `facet_conflict_weight (0.4) * conflicts`. A conflict
+requires all three of:
+
+1. the customer stated a value for the attribute (`extract_query_facets`);
+2. the candidate resolves that attribute too — **silence is never punished**,
+   missing data is not disagreement;
+3. the stated value (and every alias — `grey`/`gray` is the vocabulary's only
+   synonym pair) appears nowhere in the candidate's text as a word-bounded
+   substring. This guards against `extract()`'s first-match-wins: a
+   "black/grey reversible" belt extracts `color: black` but still contains
+   "grey" and must not be penalised.
+
+**The override fix the first version needed.** Judged against `full_text()`,
+the penalty punished the target for *obeying an intent override*: after
+"actually, ignore black — I need grey", the stale "black" was still extracted
+first and grey-only products were demoted for contradicting it — the adversarial
+`generic_override` bucket dropped 0.673 -> 0.626 MRR. Conflicts are therefore
+judged against `extract_query_facets(state.focused_text())` — the currently
+authoritative turns, identical to `full_text()` until an override fires — which
+restored the bucket to exactly 0.673. Positive terms still read `full_text()`
+deliberately: stale positive evidence mildly boosts wrong candidates, stale
+negative evidence actively demotes the right one.
+
+Weight 0.4 sits at the low end of the dev plateau (0.9224 at 0.4, 0.9226 at
+0.8): a penalty term gets the smallest weight that works, and at 0.4 one
+conflict can reorder saturated ties but cannot overturn a genuine span lead
+(each matched span is worth >= 1.12).
+
+### Effect
+
+Measured in one process by toggling `facet_conflict_weight` between 0.0 and 0.4:
+
+| | off | on |
+|---|---|---|
+| Public set | 0.912801 | **0.914287** (hit stays 200/200) |
+| Sweep dev / holdout | 0.9207 / 0.9010 | 0.9224 / 0.9021 |
+| Adversarial set | 0.791375 | 0.791697 — no bucket regresses |
+
+The signal was designed for the `homogeneous_cluster` bucket, and that
+hypothesis was wrong: bucketmates share the stated facets by construction, so
+there is nothing to contradict inside the cluster (+0.002 only). The gain is
+cross-cluster precision on the general distribution. Five unit tests hold the
+guards (multi-value products, silence, override staleness, weight-0 no-op).
+
+Two sibling signals were measured and **not** shipped, per the
+remove-dead-options convention: profile-weighted facet agreement (dev +0.0013
+does not reproduce on holdout, -0.0008 — the customer already discloses their
+profiled preferences verbatim, so the profile is redundant with the transcript)
+and budget/price closeness (rejected before implementation: 0 of 200 public
+intent cards contain a budget, 0.45% of the catalog can produce one).
+`docs/team/rerank_signals.md` carries both measurements.
 
 ---
 
