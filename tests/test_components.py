@@ -119,6 +119,79 @@ class RerankTests(unittest.TestCase):
         original = [("a", 1.0), ("b", 0.5)]
         self.assertEqual(rerank(index, state, original, RerankConfig()), original)
 
+    def test_conflicting_facet_is_demoted(self) -> None:
+        # Same span coverage; only "wrong" resolves a colour that contradicts
+        # the stated grey.
+        index = _StubIndex({
+            "wrong": {"text": "cotton shirt classic fit black only"},
+            "right": {"text": "cotton shirt classic fit heather grey"},
+        })
+        state = DialogState("s")
+        state.observe(1, "I'm looking for shirts")
+        state.observe(2, "For that, what matters is: cotton shirt; color: grey.")
+        ranked = rerank(index, state, [("wrong", 1.0), ("right", 0.9)], RerankConfig())
+        self.assertEqual(ranked[0][0], "right")
+
+    def test_multi_value_product_is_not_punished(self) -> None:
+        # extract() keeps only the first colour (black), but the text still
+        # contains grey - the substring guard must keep the penalty at zero.
+        multi = {"text": "reversible belt black grey two tone"}
+        plain = {"text": "reversible belt grey two tone"}
+        index = _StubIndex({"multi": multi, "plain": plain})
+        state = DialogState("s")
+        state.observe(1, "I'm looking for belts")
+        state.observe(2, "For that, what matters is: reversible belt; color: grey.")
+        with_conflict = RerankConfig(facet_conflict_weight=1.0)
+        without = RerankConfig(facet_conflict_weight=0.0)
+        pool = [("multi", 1.0), ("plain", 0.9)]
+        self.assertEqual(
+            rerank(index, state, pool, with_conflict),
+            rerank(index, state, pool, without),
+        )
+
+    def test_silence_about_a_facet_is_not_a_conflict(self) -> None:
+        # "mute" never mentions any colour, so it does not resolve the facet
+        # and must not be penalised relative to a colour-free config.
+        index = _StubIndex({
+            "mute": {"text": "cotton shirt classic fit"},
+            "match": {"text": "cotton shirt classic fit grey"},
+        })
+        state = DialogState("s")
+        state.observe(1, "I'm looking for shirts")
+        state.observe(2, "For that, what matters is: cotton shirt; color: grey.")
+        pool = [("mute", 1.0), ("match", 0.9)]
+        with_conflict = rerank(index, state, pool, RerankConfig(facet_conflict_weight=1.0))
+        without = rerank(index, state, pool, RerankConfig(facet_conflict_weight=0.0))
+        self.assertEqual(with_conflict, without)
+
+    def test_override_discards_stale_facet_for_conflict_scoring(self) -> None:
+        # After the customer reverses from black to grey, a grey-only product
+        # must not be penalised for contradicting the discarded black.
+        index = _StubIndex({
+            "old": {"text": "leather wallet slim black"},
+            "new": {"text": "leather wallet slim grey"},
+        })
+        state = DialogState("s")
+        state.observe(1, "I'm looking for wallets")
+        state.observe(2, "For that, what matters is: leather wallet; color: black.")
+        state.observe(3, "Actually, ignore my earlier preference. What I need is: color: grey.")
+        ranked = rerank(index, state, [("old", 1.0), ("new", 0.9)],
+                        RerankConfig(facet_conflict_weight=1.0))
+        self.assertEqual(ranked[0][0], "new")
+
+    def test_conflict_weight_zero_matches_previous_behaviour(self) -> None:
+        index = _StubIndex({
+            "a": {"text": "cotton shirt grey"},
+            "b": {"text": "cotton shirt black"},
+        })
+        state = DialogState("s")
+        state.observe(1, "I'm looking for shirts")
+        state.observe(2, "For that, what matters is: cotton shirt; color: grey.")
+        pool = [("a", 1.0), ("b", 0.5)]
+        zeroed = RerankConfig(facet_conflict_weight=0.0)
+        ranked = rerank(index, state, pool, zeroed)
+        self.assertEqual([asin for asin, _ in ranked], ["a", "b"])
+
 
 class RouterTests(unittest.TestCase):
     def test_cue_based_classification(self) -> None:

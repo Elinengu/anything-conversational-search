@@ -48,6 +48,18 @@ _PATTERNS = {
     for attribute, terms in VOCABULARIES.items()
 }
 
+# What a profile's preference_tags mean in attribute terms. Shared by the
+# clarification policy (answerability priors) and the reranker (profile-weighted
+# facet agreement). Identity entries let a tag name an attribute directly.
+TAG_HINTS = {
+    "fit": "size", "comfort": "material", "durability": "material",
+    "quality": "material", "style": "style", "design": "style",
+    "color": "color", "price": "budget", "value": "budget",
+    "brand": "brand", "performance": "use_case",
+    "material": "material", "size": "size", "use_case": "use_case",
+    "category": "category", "budget": "budget",
+}
+
 # Buckets rather than raw prices: the exact figure is never what a customer states.
 PRICE_BUCKETS = ((15.0, "under 15"), (30.0, "15 to 30"), (60.0, "30 to 60"),
                  (120.0, "60 to 120"), (float("inf"), "over 120"))

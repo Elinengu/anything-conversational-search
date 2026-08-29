@@ -107,6 +107,11 @@ def build_configs(catalog: str) -> dict[str, AgentConfig]:
         "elim_hold2": AgentConfig(
             policy=FixedPolicy(), first_recommend_turn=2, hold_until_stalled=True
         ),
+        # Negative facet evidence ablation: the shipped default is 0.4; these
+        # rows bracket it (off / shipped / upper plateau).
+        "conflict00": AgentConfig(rerank=RerankConfig(facet_conflict_weight=0.0)),
+        "conflict04": AgentConfig(rerank=RerankConfig(facet_conflict_weight=0.4)),
+        "conflict08": AgentConfig(rerank=RerankConfig(facet_conflict_weight=0.8)),
     }
 
 

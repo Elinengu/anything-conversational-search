@@ -1,10 +1,10 @@
 {
   "sample_count": 200,
   "hit_rate_at_10": 1.0,
-  "mrr": 0.841671,
-  "mttc": 2.985,
-  "efficiency": 0.8015,
-  "recommended_technical_score": 0.912801,
+  "mrr": 0.847956,
+  "mttc": 3.005,
+  "efficiency": 0.7995,
+  "recommended_technical_score": 0.914287,
   "reported_token_usage": {
     "prompt_tokens": 0,
     "completion_tokens": 0,
@@ -20,14 +20,14 @@
     "browsing": {
       "sample_count": 80,
       "hit_rate_at_10": 1.0,
-      "mrr": 0.864062,
-      "mttc": 2.775
+      "mrr": 0.869063,
+      "mttc": 2.8125
     },
     "buying": {
       "sample_count": 80,
       "hit_rate_at_10": 1.0,
-      "mrr": 0.835392,
-      "mttc": 2.8125
+      "mrr": 0.846106,
+      "mttc": 2.825
     },
     "intent_override": {
       "sample_count": 30,
@@ -458,8 +458,8 @@
       "scenario_type": "buying",
       "hit": true,
       "first_hit_turn": 3,
-      "best_rank": 2,
-      "reciprocal_rank": 0.5
+      "best_rank": 1,
+      "reciprocal_rank": 1.0
     },
     {
       "sample_id": "public_0054",
@@ -729,9 +729,9 @@
       "sample_id": "public_0087",
       "scenario_type": "browsing",
       "hit": true,
-      "first_hit_turn": 6,
-      "best_rank": 10,
-      "reciprocal_rank": 0.1
+      "first_hit_turn": 9,
+      "best_rank": 2,
+      "reciprocal_rank": 0.5
     },
     {
       "sample_id": "public_0088",
@@ -1425,9 +1425,9 @@
       "sample_id": "public_0174",
       "scenario_type": "buying",
       "hit": true,
-      "first_hit_turn": 5,
-      "best_rank": 7,
-      "reciprocal_rank": 0.14285714285714285
+      "first_hit_turn": 6,
+      "best_rank": 2,
+      "reciprocal_rank": 0.5
     },
     {
       "sample_id": "public_0175",

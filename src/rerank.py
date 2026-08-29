@@ -15,11 +15,29 @@ that "buckle closure" should count for less than "two row stitch" among belts. I
 changed the dev score by 0.0002 and the holdout not at all, because a pool
 retrieved by those same terms has little rarity spread left to exploit, so it was
 removed rather than kept as a dead option.
+
+Negative facet evidence (``_facet_conflicts``) penalises a candidate that
+resolves an attribute the customer constrained and whose text never mentions the
+stated value. Positive signals cannot do this job: a black-only shirt matches
+"cotton shirt" spans exactly as well as a grey one. Contradiction is judged
+against the post-override turns only (``focused_text``) - judged against the
+full history it punished targets for obeying an intent override, which cost
+0.047 MRR on the adversarial override bucket before the fix.
+
+Two more signals were measured and not shipped. Profile-weighted facet
+agreement (extra credit on attributes named by ``preference_tags``) gained
++0.0013 on dev but lost 0.0008 on holdout - the customer already discloses
+their profiled preferences verbatim in-session, so the profile adds noise, not
+information. A budget/price closeness term was rejected before implementation:
+the evaluator's own card builder emits a budget constraint for 0.45% of catalog
+products (0 of 200 public sessions), so the signal could essentially never
+fire. Both measurements are recorded in docs/team/rerank_signals.md.
 """
 
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
 
 from src.index import CatalogIndex
@@ -48,6 +66,16 @@ class RerankConfig:
     # like "Novelty" - see _tail_match. 0.6-1.5 score identically on dev and
     # holdout; this sits mid-plateau rather than at either split's argmax.
     tail_weight: float = 0.8
+    # Penalty per stated facet value the candidate contradicts (customer said
+    # "grey", the candidate resolves a colour and "grey" appears nowhere in its
+    # text). Positive signals saturate inside homogeneous clusters - every
+    # bucketmate matches the same spans and facets - so contradiction is the
+    # only evidence left that separates them. See _facet_conflicts for the
+    # guards that keep this conservative. Measured: dev 0.9207->0.9224,
+    # holdout +0.001, hard set +0.0003 with no bucket regressing; 0.4 and 0.8
+    # score alike, so this sits at the low end of the plateau (a penalty term
+    # earns the smallest weight that works). 0.0 disables.
+    facet_conflict_weight: float = 0.4
 
     # Rescore the whole retrieval pool (RetrievalConfig.pool_size), not a prefix -
     # ~12% of cluster-target sessions had the target in the pool but past rank 200,
@@ -66,27 +94,13 @@ def _popularity(product: dict) -> float:
 
 
 def _facet_agreement(
-    customer_text: str,
-    product: dict,
+    customer_facets: dict[str, str],
+    product_facets: dict[str, str],
 ) -> float:
     """
     Count matching facet values between
     customer constraints and product facets.
     """
-    '''
-    customer_facets = extract(
-        {
-            "text": customer_text,
-            "categories": [],
-            "store": "",
-            "price": None,
-        }
-    )
-    '''
-    customer_facets = extract_query_facets(
-        customer_text
-    )
-    product_facets = extract(product)
 
     score = 0.0
 
@@ -96,6 +110,41 @@ def _facet_agreement(
             score += 1.0
 
     return score
+
+
+# The only synonym pair in the facet vocabularies (src/facets.py). Without it a
+# customer's "gray" would count as contradicted by a product spelling it "grey".
+_VALUE_ALIASES = {"grey": ("grey", "gray"), "gray": ("gray", "grey")}
+
+
+def _facet_conflicts(
+    customer_facets: dict[str, str],
+    product_facets: dict[str, str],
+    product_text: str,
+) -> float:
+    """Count customer-stated facet values the candidate contradicts.
+
+    A conflict needs all three of:
+      1. the customer stated a value for the attribute;
+      2. the candidate resolves that attribute too - silence is never punished,
+         missing data is not disagreement;
+      3. the stated value (or an alias) appears nowhere in the candidate's text.
+         extract() keeps only the first vocabulary match, so a "black/grey
+         reversible" product extracts color=black yet still contains "grey";
+         the substring check keeps such multi-value products unpunished.
+    """
+    conflicts = 0.0
+    for key, value in customer_facets.items():
+        if key not in product_facets:
+            continue
+        aliases = _VALUE_ALIASES.get(value, (value,))
+        if any(
+            re.search(rf"\b{re.escape(alias)}\b", product_text)
+            for alias in aliases
+        ):
+            continue
+        conflicts += 1.0
+    return conflicts
 
 
 # Store-wide wrapper levels that appear on nearly every product and therefore
@@ -197,6 +246,14 @@ def rerank(
     # Normalise retrieval scores so the two signals combine on one scale.
     top_score = max(score for _asin, score in head) or 1.0
 
+    # Per-session quantities, computed once rather than per candidate.
+    customer_facets = extract_query_facets(state.full_text())
+    # Contradiction must be judged against the currently authoritative turns
+    # only: after an intent override, full_text() still carries the discarded
+    # value, and a conflict computed from it punishes the target for obeying
+    # the override. focused_text() == full_text() until an override fires.
+    authoritative_facets = extract_query_facets(state.focused_text())
+
     scored: list[tuple[str, float]] = []
     for parent_asin, retrieval_score in head:
         product = index.products.get(parent_asin)
@@ -208,9 +265,15 @@ def rerank(
         for span in spans:
             if span in text:
                 coverage += 1.0 + config.length_bonus * len(span.split())
+        product_facets = extract(product)
         facet_score = _facet_agreement(
-            state.full_text(),
-            product,
+            customer_facets,
+            product_facets,
+        )
+        conflict_score = _facet_conflicts(
+            authoritative_facets,
+            product_facets,
+            text,
         )
         category_score = _category_match(
             state,
@@ -227,6 +290,7 @@ def rerank(
             + config.facet_weight * facet_score
             + config.category_weight * category_score
             + config.tail_weight * tail_score
+            - config.facet_conflict_weight * conflict_score
         )
         scored.append((parent_asin, total))
 

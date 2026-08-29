@@ -18,8 +18,9 @@ public labels and API contract were **not** touched.
 | + multi-route anchor retrieval | xiaotong0329 | — | — | PR #6 |
 | + category tail match | Elinengu | **0.9128** | **0.7914** | change 5; fixes the last public miss — public 200/200 |
 | + learned boilerplate stoplist | Elinengu | 0.9128 | 0.7914 | change 6; score-neutral by design |
+| + negative facet evidence | Elinengu | **0.9143** | **0.7917** | penalise contradiction of a stated facet; profile + budget signals measured and rejected — `docs/team/rerank_signals.md` |
 
-Net: **public 0.859 -> 0.9128, adversarial 0.684 -> 0.7914.** 46/46 tests pass.
+Net: **public 0.859 -> 0.9143, adversarial 0.684 -> 0.7917.** 51/51 tests pass.
 The six core-agent changes are detailed below; supporting tooling and docs follow.
 
 Dashes mark changes that landed while several branches were merging in parallel, where
@@ -339,6 +340,7 @@ regeneration honest.
 | S5 retrieval | pool size / RRF k / focused-route weight | 300 / 60 / 0.8 | `src/retrieval.py` |
 | S6 rerank | span / retrieval / popularity / **facet** weight | 1.0 / 1.0 / 0.02 / **0.3** | `src/rerank.py` |
 | S6 rerank | category (ancestor) / **tail** weight | 0.4 / **0.8** | `src/rerank.py` |
+| S6 rerank | **facet-conflict penalty** (vs post-override facets) | **0.4** | `src/rerank.py` |
 | S6 rerank | length bonus / **depth** | 0.12 / **300** | `src/rerank.py` |
 | S3 state | pre-override utterance weight | 0.35 (largely inert) | `src/state.py` |
 | S3 state | **declined utterances held out of every retrieval view** | — | `src/state.py` |

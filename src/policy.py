@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import math
 
+from src.facets import TAG_HINTS
 from src.state import DialogState
 
 
@@ -133,12 +134,8 @@ class InfoGainPolicy:
     }
 
     #: preference_tags naming these concepts raise the matching attribute's prior.
-    TAG_HINTS = {
-        "fit": "size", "comfort": "material", "durability": "material",
-        "quality": "material", "style": "style", "design": "style",
-        "color": "color", "price": "budget", "value": "budget",
-        "brand": "brand", "performance": "use_case",
-    }
+    #: Shared with the reranker's profile signal - the vocabulary lives in facets.
+    TAG_HINTS = TAG_HINTS
 
     def __init__(
         self,

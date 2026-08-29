@@ -5,19 +5,25 @@ Working notes on `src/rerank.py` and the recommendation slice in
 
 ## How reranking works today
 
-`rerank()` (`src/rerank.py`) rescoring the top 200 of the retrieval pool:
+`rerank()` (`src/rerank.py`) rescoring the whole 300-candidate retrieval pool:
 
 ```
 score(candidate) =  1.00 x span_coverage
                  +  1.00 x (bm25 / max_bm25_in_pool)      # normalised retrieval, 0..1
                  +  0.02 x popularity                      # tiebreak only
+                 +  0.30 x facet_agreement                 # customer facets == candidate facets
+                 +  0.40 x category_match                  # opening tokens vs category ancestors
+                 +  0.80 x tail_match                      # opening names the candidate's own
+                                                           # two most specific category levels
+                                                           # (docs/team/category_tail_match.md)
 
 span_coverage = sum over each disclosed constraint span:
                   (1 + 0.12 x word_count)   if the span is a literal substring of candidate["text"]
                   0                          otherwise
 ```
 
-Then `sort(key=(-score, parent_asin))`, and pool ranks 201-300 are appended untouched.
+Then `sort(key=(-score, parent_asin))`. Depth equals the pool size (300), so no
+tail is left in bm25 order.
 
 Two properties that matter:
 
