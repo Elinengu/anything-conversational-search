@@ -51,7 +51,28 @@ class AgentConfig:
     # reciprocal rank, because the session ends on the first hit at any position.
     first_recommend_turn: int = 3
     # Shortlist size per turn; the last entry applies to all later turns.
-    list_size_ramp: tuple[int, ...] = (10,)
+    # The first slate is deliberately narrow. Emitting a list ends the session
+    # the moment the target appears and freezes MRR at that position, while a
+    # wrong list costs only a turn - so revealing ten candidates on turn 3 banks
+    # whatever rank the target holds *then*, and showing four defers to turn 4,
+    # when the next disclosed constraint has re-ranked it higher. The
+    # elimination scan makes the deferral free of coverage risk: the candidates
+    # held back are the top of the survivor list next turn (see _shortlist).
+    # Measured, one process, four sets (dev / holdout / generated / hard):
+    #   (10,)    0.9233 / 0.9048 / 0.9181 / 0.7944   flat, the pre-ramp floor
+    #   (3,10)   0.9254 / 0.9146 / 0.9212 / 0.7968
+    #   (4,10)   0.9268 / 0.9096 / 0.9197 / 0.7981   <- ships
+    #   (5,10)   0.9295 / 0.9100 / 0.9210 / 0.8001
+    # First-slate sizes 3, 4 and 5 all beat the flat ramp on all four sets, so
+    # this sits mid-plateau rather than at any split's argmax - (5,10) has the
+    # better mean, but choosing it after the fact is how you buy noise.
+    # Narrowing a *second* turn is worse, not more of the same good thing:
+    # (5,5,10) scores 0.9272 / 0.9044 / 0.9187 / 0.7934, regressing holdout and
+    # hard below the floor. Each session holds four constraints disclosed at up
+    # to two per turn, so by turn 4-5 no further evidence is coming and holding
+    # narrow only spends turns. Cost of the ramp: generated-set Hit@10 0.995 ->
+    # 0.990, one session that runs out of turns. See docs/team/agent_changes.md.
+    list_size_ramp: tuple[int, ...] = (4, 10)
     # Optional confidence gate: emit earlier than first_recommend_turn when the top
     # candidate clearly leads the pool. 0.0 disables it.
     # 0.15-0.50 all beat 0.0 on dev and holdout alike; the curve is flat, so this

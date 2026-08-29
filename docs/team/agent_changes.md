@@ -21,12 +21,15 @@ public labels and API contract were **not** touched.
 | + negative facet evidence | Elinengu | 0.9143 | 0.7917 | penalise contradiction of a stated facet; profile + budget signals measured and rejected — `docs/team/rerank_signals.md` |
 | + pair spans + word-bounded matching | Elinengu | **0.9159** | **0.7944** | keep key:value associations intact; worst hard bucket +4.7 MRR pts |
 | + constraint-ledger investigation | Elinengu | 0.9159 | 0.7944 | change 9; **no code shipped** — six ledger operations measured, all flat or worse; corrected a wrong diagnosis in `src/rerank.py`; two dead functions deleted |
+| + narrow first slate `(4,10)` | Elinengu | **0.9199** | **0.7981** | change 10; one config default. Started as a conditional-MMR assessment — MMR measured and rejected, the deferral it stumbled on kept |
 
-Net: **public 0.859 -> 0.9159, adversarial 0.684 -> 0.7944.** 57/57 tests pass.
-The nine core-agent changes are detailed below; supporting tooling and docs follow.
+Net: **public 0.859 -> 0.9199, adversarial 0.684 -> 0.7981.** 62/62 tests pass.
+The ten core-agent changes are detailed below; supporting tooling and docs follow.
 Change 9 moved the score by exactly zero and is recorded in full anyway — a
 measured no-change is the evidence that keeps the shipped design chosen rather
-than assumed.
+than assumed. Change 10 is the same lesson from the other side: the proposal that
+prompted it was rejected on its own terms, and the win came from understanding
+*why* it appeared to work.
 
 Dashes mark changes that landed while several branches were merging in parallel, where
 no clean before/after was captured at the time. Changes 5-8 were measured in
@@ -515,6 +518,97 @@ recorded with numbers. Turn-1 exclusion is the one worth remembering — it remo
 every false conflict against the target (8 public, 5 hard) and *still* loses score,
 because measuring only the harm and never the benefit is how a plausible fix hides.
 
+
+## Change 10 — Narrow the first slate (Elinengu)
+
+**Files:** `starter/agent.py` (one default), `tools/sweep.py`,
+`tests/test_components.py`, `docs/team/ideas.md`, `IMPLEMENTATION.md`
+
+### Problem
+
+The investigation started as an assessment of a proposed **conditional MMR**
+diversity term: spread the shown slate across plausible interpretations so the
+target is more likely to appear *somewhere* in the top 10, trading rank for
+Hit@10 because Hit@10 carries 0.50 of the score and MRR only 0.30.
+
+The premise is no longer true of this agent. Public-set Hit@10 has been **1.000**
+since change 5. There is no coverage left to buy, and MRR is precisely what a
+diversity penalty spends.
+
+MMR was implemented and measured anyway. Across 260 public slates it moved the
+target *into* a slate it was otherwise outside of **zero** times, and pushed it
+*out* of one 21 times (hard set: 2 in, 9 out). Hit@10 moved on no set at any
+lambda. The reason is structural: disclosed constraints are copied verbatim from
+the target's own metadata, so the head of the ranking is a cluster built around
+the target's attributes — on the ambiguous slates the gate selects, the target's
+similarity to the head (0.417) is *higher* than the head's own internal
+similarity (0.394). The penalty lands hardest on the target.
+
+It nonetheless scored slightly up (public 0.9159 → 0.9176), and tracing why is
+what produced this change: ejecting the target from turn 3's slate leaves it a
+survivor for turn 4, when the next disclosed constraint has re-ranked it higher.
+The gain was **deferral, not diversity** — the §S7 marginal-value trade obtained
+by accident. `list_size_ramp` buys deferral directly.
+
+### What changed
+
+One default in `starter/agent.py`:
+
+```python
+list_size_ramp: tuple[int, ...] = (4, 10)   # was (10,)
+```
+
+Four candidates on turn 3, ten from turn 4. `_shortlist` already indexed the ramp
+correctly; no other code changed. The elimination scan is what makes the deferral
+free — the six held back are the top of the survivor list next turn, so the same
+walk is paced in finer steps rather than truncated.
+
+### Effect
+
+| | before | after |
+|---|---|---|
+| Public set | 0.915887 | **0.919892** |
+| Adversarial set | 0.794375 | **0.798056** |
+| dev / holdout | 0.9233 / 0.9048 | **0.9268 / 0.9096** |
+| generated (200) | 0.9181 | **0.9197** |
+| Tests | 62/62 | 62/62 |
+
+The first-slate plateau, measured in one process across four sets:
+
+| ramp | dev | holdout | generated | hard |
+|---|---|---|---|---|
+| `(10,)` | 0.9233 | 0.9048 | 0.9181 | 0.7944 |
+| `(3,10)` | 0.9254 | **0.9146** | **0.9212** | 0.7968 |
+| **`(4,10)`** | 0.9268 | 0.9096 | 0.9197 | 0.7981 |
+| `(5,10)` | **0.9295** | 0.9100 | 0.9210 | **0.8001** |
+| `(5,5,10)` | 0.9272 | 0.9044 | 0.9187 | 0.7934 |
+| `(5,10)` + MMR | 0.9284 | 0.9076 | 0.9173 | 0.7994 |
+
+Sizes 3, 4 and 5 all beat the flat ramp on all four sets, so `(4,10)` ships as
+the midpoint. `(5,10)` has the better mean and wins dev and hard outright, but
+choosing it after seeing the table is the argmax-fitting the house rule exists to
+prevent; the decision rule was fixed before `(4,10)` was measured.
+
+The whole gain is MRR bought with MTTC, at the ~13:1 odds §3 prices. On public,
+MRR 0.8513 → 0.8690 (×0.30 = +0.0053) against MTTC 2.975 → 3.040 (efficiency
+−0.0065, ×0.20 = −0.0013), netting the +0.0040 observed.
+
+**What did not move:** Hit@10 on public (1.000) and hard (0.885) is unchanged —
+this change buys rank, not coverage. And the last row is the one that closes the
+original question: MMR layered *on top of* the ramp is worse on all four sets, so
+once deferral is supplied properly the diversity term is pure cost. It is
+recorded as rejected in `docs/team/ideas.md` Idea 3.
+
+**Costs, stated plainly.** Generated-set Hit@10 slips 0.995 → 0.990 — one session
+that now runs out of turns. `(5,5,10)` is the informative negative: holding narrow
+a *second* turn regresses holdout and hard below the flat floor, because each
+session carries four constraints disclosed at up to two per turn, so by turn 4-5
+no further evidence is arriving. The win is one narrow turn, not a direction to
+push further. Every delta here also sits under the ±0.02 holdout noise floor the
+skill specifies; the evidence is that they are positive on four independent sets
+at once, not that any single split is decisive.
+
+---
 
 ## Supporting work (Kwong Weng)
 

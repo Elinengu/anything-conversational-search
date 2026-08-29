@@ -176,6 +176,44 @@ Now a clear win: public + dev up, holdout flat, adversarial +0.06. The depth
 change is still a no-op on public; it only helps the adversarial set. 39/39 tests
 pass.
 
+## Idea 1d - narrow the first slate (SHIPPED)
+
+`AgentConfig.list_size_ramp` existed from the start, shipped flat at `(10,)`,
+and `IMPLEMENTATION.md` S7 listed it as "unexercised". Exercising it is the
+single cheapest win measured so far: `(4, 10)` - four candidates on turn 3, ten
+from turn 4 - and nothing else changes.
+
+The reason it works is the same marginal-value trade the whole S7 stage is built
+on. The evaluator ends a session the moment the target is shown and freezes MRR
+at that position, while a wrong list costs only a turn. Ten candidates on turn 3
+therefore maximises the chance of converting *now*, at whatever mediocre rank the
+target currently holds. Four candidates defer that bet to turn 4, when the next
+disclosed constraint has re-ranked the target higher. The elimination scan makes
+the deferral free: the six held back are the top of the survivor list next turn,
+so no coverage is lost - the same walk is just paced in finer steps.
+
+| ramp | dev | holdout | generated | hard |
+|---|---|---|---|---|
+| `(10,)` | 0.9233 | 0.9048 | 0.9181 | 0.7944 |
+| `(3,10)` | 0.9254 | **0.9146** | **0.9212** | 0.7968 |
+| **`(4,10)`** | 0.9268 | 0.9096 | 0.9197 | 0.7981 |
+| `(5,10)` | **0.9295** | 0.9100 | 0.9210 | **0.8001** |
+| `(5,5,10)` | 0.9272 | 0.9044 | 0.9187 | 0.7934 |
+
+First-slate sizes 3, 4 and 5 all beat the flat ramp on all four sets, which is
+what a plateau looks like; `(4,10)` is its midpoint and ships. `(5,10)` has the
+better mean and wins dev and hard outright, but selecting it after seeing the
+table is the argmax-fitting the house rule exists to prevent.
+
+`(5,5,10)` is the informative negative: holding narrow for a *second* turn
+regresses holdout and hard below the flat floor. Each session carries four
+constraints disclosed at up to two per turn, so by turn 4-5 no further evidence
+is arriving and deferring past that point spends turns without buying rank. The
+win is one narrow turn, not a direction to push further.
+
+Cost: generated-set Hit@10 slips 0.995 -> 0.990 - one session that runs out of
+turns. Public and hard Hit@10 are unchanged.
+
 ## Idea 2 - richer rerank scoring
 
 The reranker ignores signals that are already computed:
@@ -200,22 +238,80 @@ The reranker ignores signals that are already computed:
 These do not need windowing - they make the single ranking better, which helps
 every session.
 
-## Idea 3 - MMR diversity term (makes windowing productive)
+## Idea 3 - MMR diversity term (implemented, measured, REJECTED)
 
-Add a dependency term so re-ranking after a window is meaningful:
+The idea was to add a dependency term so that re-ranking after a window is
+meaningful:
 
 ```
 score(candidate) = relevance(candidate) - lambda * max_similarity(candidate, already_shown)
 ```
 
-After showing ranks 1-10, re-scoring the rest with the shown items as "covered"
-pushes up candidates that are *different* - different brand, sub-style, price
-band. Each new window becomes a fresh slice of the plausible space rather than
-"the next 10 by the same score". For an ambiguous target (dozens of near-identical
-leather belts) this raises the hit chance materially. `IMPLEMENTATION.pdf` S7 -
-"Diversify a low-confidence list" - flags this as untested; the marginal-value
-table there (miss->hit ~= 2.6x a rank improvement) says trading rank for coverage
-on low-confidence sessions is likely net-positive.
+with a model-free similarity (same category leaf +0.30, same brand +0.20, same
+material/colour +0.20, title-token Jaccard +0.30), optionally fired only on
+"ambiguous" slates. The stated payoff was coverage: spread the slate across
+plausible interpretations so the target is more likely to appear *somewhere* in
+the top 10, trading rank for Hit@10 because Hit@10 carries 0.50 of the score and
+MRR only 0.30.
+
+**It was built and measured. It does not work here, and it is not shipped.**
+
+### The premise no longer holds
+
+Public-set Hit@10 is **1.000**. There is no coverage headroom to buy. The
+remaining score is MRR and MTTC, and MRR is exactly what a diversity penalty
+spends.
+
+### It never produced the effect it was proposed for
+
+Per-slate counterfactual against the shipped slate (lambda 0.7):
+
+| | public (260 slates) | hard (200 slates) |
+|---|---|---|
+| target **entered** a slate it was otherwise outside | **0** | 2 |
+| target **ejected** from a slate it was otherwise inside | 21 | 9 |
+| within-slate reorder | +10 / -9 / 179 same | +6 / -3 / 73 same |
+
+Hit@10 moved on no dataset at any lambda tested (0.5 - 0.9).
+
+### Why - the target is the centroid, not the outlier
+
+MMR assumes the relevant item is a distinct interpretation being crowded out by
+a redundant cluster. Here the disclosed constraints are copied *verbatim from the
+target's own metadata*, so the head of the ranking is a cluster assembled around
+the target's attributes. Measured on the ambiguous slates the conditional gate
+selects, the target's mean similarity to the head is **higher** than the head's
+own internal similarity - 0.417 vs 0.394 on public, 0.434 vs 0.420 on hard. The
+diversity penalty therefore lands *hardest on the target*, and hardest of all in
+the homogeneous-cluster bucket the idea was aimed at.
+
+### The small gain it did show was deferral, not diversity
+
+End-to-end it scored slightly *up* (public 0.9159 -> 0.9176). The mechanism is
+not diversity: ejecting the target from turn 3's slate leaves it a survivor for
+turn 4, when another disclosed constraint has re-ranked it higher, and the
+evaluator freezes MRR at first hit. That is the S7 marginal-value trade (a rank
+is worth ~13x the turn it costs), obtained by accident.
+
+`list_size_ramp` buys the same deferral directly and more cheaply. Once the ramp
+is in place MMR is **negative on all four sets**:
+
+| | ramp (5,10) | ramp (5,10) + MMR 0.7 |
+|---|---|---|
+| dev | 0.9295 | 0.9284 |
+| holdout | 0.9100 | 0.9076 |
+| generated | 0.9210 | 0.9173 |
+| hard | 0.8001 | 0.7994 |
+
+### Also measured
+
+The "conditional" gating contributed nothing: firing on 86 of 262 public slates
+(margin <= 0.02) scored 0.9176 - identical to firing on all 262. Complexity with
+no effect.
+
+**Do not rebuild this.** The productive reading of "the top 10 are
+near-identical" is not *spread the slate* but *show fewer of them and wait for
+another constraint* - which is Idea 1d below.
 
 ## Idea 4 - learn the weights
 

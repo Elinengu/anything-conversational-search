@@ -10,6 +10,7 @@ from src.rerank import RerankConfig, rerank
 from src.router import classify, detect_turn_intent, extract_opening_facets
 from src.state import PRE_OVERRIDE_WEIGHT, DialogState
 from src.text import constraint_spans, pair_spans, terms
+from starter.agent import Agent, AgentConfig
 
 
 class TextTests(unittest.TestCase):
@@ -300,6 +301,71 @@ class RouterTests(unittest.TestCase):
             productive_turns=2,
         )
         self.assertTrue(t2_route.is_buying)
+
+
+class _StubShortlistState:
+    """The only state ``Agent._shortlist`` reads once the first turn has passed."""
+
+    def __init__(self, session_id: str = "session-1") -> None:
+        self.session_id = session_id
+        self.override_turn = None
+
+
+class ShortlistRampTests(unittest.TestCase):
+    """``list_size_ramp`` is indexed by turn, clamped to its last entry.
+
+    A narrow first slate defers commitment: the evaluator ends a session the
+    moment the target is shown and freezes MRR at that position, so revealing
+    ten candidates on turn 3 banks whatever rank the target holds *then*.
+    Showing fewer costs a turn and buys the rank the next disclosed constraint
+    earns. The elimination scan is what makes it free of coverage risk - the
+    candidates held back are still reached on the following turn.
+    """
+
+    @staticmethod
+    def _agent(ramp: tuple[int, ...]) -> Agent:
+        """An Agent without its 50,000-row index - _shortlist never touches it."""
+        agent = Agent.__new__(Agent)
+        agent.config = AgentConfig(list_size_ramp=ramp)
+        agent._shown = {}
+        agent._shown_override = {}
+        agent._disclosed_count = {}
+        return agent
+
+    @staticmethod
+    def _candidates(count: int = 200) -> list[tuple[str, float]]:
+        return [(f"A{index:03d}", float(count - index)) for index in range(count)]
+
+    def _sizes(self, ramp: tuple[int, ...]) -> list[int]:
+        agent = self._agent(ramp)
+        state = _StubShortlistState()
+        candidates = self._candidates()
+        return [len(agent._shortlist(state, candidates, turn, 10)) for turn in (3, 4, 5, 6)]
+
+    def test_flat_ramp_shows_ten_every_turn(self) -> None:
+        self.assertEqual(self._sizes((10,)), [10, 10, 10, 10])
+
+    def test_narrow_first_slate_then_widens(self) -> None:
+        self.assertEqual(self._sizes((4, 10)), [4, 10, 10, 10])
+
+    def test_last_entry_applies_to_every_later_turn(self) -> None:
+        self.assertEqual(self._sizes((5, 5, 10)), [5, 5, 10, 10])
+
+    def test_ramp_never_exceeds_the_requested_top_k(self) -> None:
+        agent = self._agent((10,))
+        shortlist = agent._shortlist(_StubShortlistState(), self._candidates(), 3, 5)
+        self.assertEqual(len(shortlist), 5)
+
+    def test_narrow_slate_defers_rather_than_drops_candidates(self) -> None:
+        """Nothing held back on turn 3 is lost - the scan reaches it on turn 4."""
+        agent = self._agent((4, 10))
+        state = _StubShortlistState()
+        candidates = self._candidates()
+        first = [item["parent_asin"] for item in agent._shortlist(state, candidates, 3, 10)]
+        second = [item["parent_asin"] for item in agent._shortlist(state, candidates, 4, 10)]
+        self.assertEqual(first, [f"A{index:03d}" for index in range(4)])
+        self.assertEqual(second, [f"A{index:03d}" for index in range(4, 14)])
+        self.assertFalse(set(first) & set(second))
 
 
 class _StubFacets:

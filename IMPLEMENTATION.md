@@ -966,9 +966,52 @@ buy noise. Mid-plateau is the defensible choice — the same reasoning applies t
 `src/policy.py`, whose dev results (`0.8530` at 5.0, `0.8651` at 8.0, `0.8634` at 12.0) are one
 plateau.
 
+**Narrow the first slate.** `list_size_ramp` says how many candidates each turn reveals; the last
+entry applies to every later turn. It shipped flat at `(10,)` for a long time, and is now `(4, 10)`
+— four candidates on turn 3, ten from turn 4.
+
+Showing *fewer* products scores better, which sounds backwards until you line up three facts about
+the evaluator. The session ends the instant the target appears in a shown list. The rank it held
+at that instant becomes the reciprocal rank, permanently. And a list that misses costs nothing but
+a turn.
+
+So every list is a bet. Reveal ten on turn 3 and you maximise the chance of converting *now* — at
+whatever rank the target happens to hold. If it is sitting at position 7, you have just banked
+`RR = 1/7 = 0.14` and the session is over. Reveal four, and that same target stays hidden; you
+spend a turn, the customer discloses another constraint, the reranker re-scores with it, and the
+target typically surfaces near the top. Now you bank `1/1` or `1/2`.
+
+The elimination scan is what makes this safe. Products already shown are excluded from later
+lists, so the six held back on turn 3 are simply the top of the survivor list on turn 4 — nothing
+is skipped, the same walk is just taken in smaller steps.
+
+| First slate | dev | holdout | generated | hard |
+|---|---|---|---|---|
+| 10 (flat) | 0.9233 | 0.9048 | 0.9181 | 0.7944 |
+| 3 | 0.9254 | **0.9146** | **0.9212** | 0.7968 |
+| **4** | 0.9268 | 0.9096 | 0.9197 | 0.7981 |
+| 5 | **0.9295** | 0.9100 | 0.9210 | **0.8001** |
+
+Three, four and five all beat the flat ramp on all four sets — that is a plateau, so `4` ships as
+its midpoint rather than `5`, which happens to top two columns. The decision rule was fixed before
+`4` was measured, which is the point: choosing the winner after seeing the table is how you buy
+noise, exactly as with the `0.20` margin above.
+
+Narrowing a *second* turn is not more of the same good thing. `(5, 5, 10)` scores
+`0.9272 / 0.9044 / 0.9187 / 0.7934`, dropping holdout and hard below the flat floor. Each session
+holds four constraints and the customer discloses at most two per turn, so by turn 4-5 no further
+evidence is coming and waiting longer spends turns without buying rank.
+
 #### Measured effect
 
-`0.8543 → 0.8592`, with MTTC improving from 3.58 to 3.41.
+Confidence gating: `0.8543 → 0.8592`, with MTTC improving from 3.58 to 3.41.
+
+Narrow first slate: public `0.9159 → 0.9199`, adversarial `0.7944 → 0.7981`, dev `0.9233 → 0.9268`,
+holdout `0.9048 → 0.9096`. The whole gain is MRR bought with MTTC at the ~13x odds §3 prices — on
+public, MRR `0.8513 → 0.8690` (×0.30 = +0.0053) against MTTC `2.975 → 3.040` (efficiency −0.0065,
+×0.20 = −0.0013), netting the +0.0040 observed. Hit@10 does not move on public (1.000) or hard
+(0.885): this buys rank, not coverage. One cost worth naming — on the 200-session generated set
+Hit@10 slips `0.995 → 0.990`, a single session that now runs out of turns.
 
 #### Ideas for this stage
 
@@ -981,13 +1024,23 @@ plateau.
   onward. Detecting stagnation — the shortlist stopped changing, the customer stopped disclosing —
   and switching to a different strategy would attack the 6% of sessions that currently miss
   entirely.
-- **Diversify a low-confidence list.** When confidence is low, the top 10 are often near-identical
-  products. Deliberately spreading the list across distinct categories or brands would raise the
-  chance of catching the target, at some cost to rank. Given that a miss→hit is worth 2.6x a rank
-  improvement (§3), that trade may well be positive — and it is untested.
-- **Vary list length with confidence.** `list_size_ramp` exists in `AgentConfig` but ships flat at
-  10. Since wrong recommendations are free (consequence #2), there is likely no benefit to
-  showing fewer — but the mechanism is there and unexercised.
+- **~~Diversify a low-confidence list.~~ Tested, and it does not work.** This entry used to argue
+  that spreading the list across distinct categories or brands would raise the chance of catching
+  the target, on the grounds that a miss→hit is worth 2.6x a rank improvement. **That premise is
+  stale:** it was written when Hit@10 was `0.940`. Hit@10 on the public set is now `1.000`, so
+  there are no misses left to convert and the trade has nothing to buy. An MMR diversity term was
+  implemented and measured anyway: across 260 public slates it brought the target *into* a slate
+  zero times and pushed it *out* 21 times, and Hit@10 moved on no dataset at any setting. The
+  reason is structural — the customer's disclosed constraints are copied verbatim from the target's
+  own metadata, so the crowded top of the list is a cluster formed *around the target*, which sits
+  at its centre rather than being an outlier crowded out of it. `docs/team/ideas.md` Idea 3 records
+  the full measurement.
+- **~~Vary list length with confidence.~~ Done — see "Narrow the first slate" above.** This entry
+  used to guess that "there is likely no benefit to showing fewer". The opposite is true, and for a
+  reason the guess missed: showing fewer is not about precision, it is about *when you commit*.
+  `list_size_ramp` now ships at `(4, 10)`, worth `+0.0040` on the public set. The remaining
+  unexercised part of the idea is making the width depend on measured confidence rather than on the
+  turn number — narrow while `_confident()` is false, ten once it is true.
 
 ---
 
