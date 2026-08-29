@@ -216,3 +216,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Session observation runs (regenerate with: python3 tools/observe.py)
+runs/
