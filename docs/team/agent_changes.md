@@ -20,9 +20,13 @@ public labels and API contract were **not** touched.
 | + learned boilerplate stoplist | Elinengu | 0.9128 | 0.7914 | change 6; score-neutral by design |
 | + negative facet evidence | Elinengu | 0.9143 | 0.7917 | penalise contradiction of a stated facet; profile + budget signals measured and rejected — `docs/team/rerank_signals.md` |
 | + pair spans + word-bounded matching | Elinengu | **0.9159** | **0.7944** | keep key:value associations intact; worst hard bucket +4.7 MRR pts |
+| + constraint-ledger investigation | Elinengu | 0.9159 | 0.7944 | change 9; **no code shipped** — six ledger operations measured, all flat or worse; corrected a wrong diagnosis in `src/rerank.py`; two dead functions deleted |
 
 Net: **public 0.859 -> 0.9159, adversarial 0.684 -> 0.7944.** 57/57 tests pass.
-The eight core-agent changes are detailed below; supporting tooling and docs follow.
+The nine core-agent changes are detailed below; supporting tooling and docs follow.
+Change 9 moved the score by exactly zero and is recorded in full anyway — a
+measured no-change is the evidence that keeps the shipped design chosen rather
+than assumed.
 
 Dashes mark changes that landed while several branches were merging in parallel, where
 no clean before/after was captured at the time. Changes 5-8 were measured in
@@ -442,6 +446,76 @@ identically on dev and holdout; 0.8 sits mid-plateau. Six new unit tests.
 
 ---
 
+## Change 9 — Constraint-ledger investigation: measured, not shipped (Elinengu)
+
+**Files:** `src/rerank.py` (comments), `src/state.py`, `src/index.py` (dead code),
+`docs/team/rerank_signals.md`, `docs/team/signal_descriptions.md`,
+`docs/team/hard_cases.md`, `IMPLEMENTATION.md`
+
+### Problem
+
+A proposal to replace utterance-replay in `DialogState` with an explicit ledger of
+typed `Constraint` records — slot, value, turn, polarity, status — updated by
+CARRY / UPDATE / ADD / DELETE / DONTCARE / NEGATE, with open-ended slots held
+multi-valued so `"Water Resistant"` cannot displace `"machine washable"`.
+
+Two open items in our own docs pointed the same way: "fix or delete the override
+weight" (`hard_cases.md`) and "per-constraint provenance / partial overrides"
+(`IMPLEMENTATION.md` §S3).
+
+### What changed
+
+Every operation was measured against the evaluator before any of it was built, and
+**none of it shipped**. The findings:
+
+- **The override is never a retraction.** `behavior_for()` draws `old_value` and
+  `new_value` from the *same target's* intent card. Across all 46 override sessions
+  in the two eval sets, not one replaces an exclusive facet value with a different
+  one — 25/30 public are cross-slot (`"Buckle closure"` → `"leather"`), 4/30 are
+  `feature → feature`, and the single `material → material` case repeats the same
+  value. `UPDATE` has no case to fire on, which also closes both open items above:
+  there is nothing for `PRE_OVERRIDE_WEIGHT` to express.
+- **`focused_text()` in the conflict path is a turn-1 filter, not a staleness
+  guard.** The comment in `src/rerank.py` claimed stale post-override values
+  punished the target; single-value extraction over full history picks a
+  contradicted value in **0 of 30** sessions. The real mechanism is that
+  `coarse_category()` emits category levels drawn from the same vocabulary as the
+  `style`/`use_case` facets, so `"I'm looking for Pants Casual"` extracts
+  `style=casual`. Variants A and B below are bit-identical, which proves it.
+- **Two dead functions deleted:** `DialogState.query_terms()` and
+  `CatalogIndex.search_phrases()`, neither with any caller.
+
+### Effect
+
+Turn-1 exclusion (A/B/C) and multi-valued facets, all four splits:
+
+| variant | dev | holdout | public | hard |
+|---|---|---|---|---|
+| **shipped baseline** | **0.9233** | **0.9048** | **0.9159** | **0.7944** |
+| A: −turn1, keep focused | 0.9226 | 0.9035 | 0.9150 | 0.7944 |
+| B: −turn1, full history | 0.9226 | 0.9035 | 0.9150 | 0.7944 |
+| C: full history, +turn1 | 0.9233 | 0.9048 | 0.9159 | 0.7920 |
+| multi-value agreement | 0.9225 | 0.9045 | 0.9153 | 0.7921 |
+| multi-value conflict only | 0.9233 | 0.9048 | 0.9159 | 0.7949 |
+| multi-value both | 0.9225 | 0.9045 | 0.9153 | 0.7919 |
+
+Net effect of what shipped:
+
+| | before | after |
+|---|---|---|
+| Public set | 0.915887 | 0.915887 |
+| Adversarial set | 0.794375 | 0.794375 |
+| Tests | 57/57 | 57/57 |
+
+**Exactly zero.** The deletions are score-neutral by construction and the rest is
+comments and documentation. What it buys: a wrong explanation removed from the
+shipped code before it misled the next person, two open items closed as
+not-worth-doing rather than left inviting a rebuild, and four negative results
+recorded with numbers. Turn-1 exclusion is the one worth remembering — it removes
+every false conflict against the target (8 public, 5 hard) and *still* loses score,
+because measuring only the harm and never the benefit is how a plausible fix hides.
+
+
 ## Supporting work (Kwong Weng)
 
 | file | what |
@@ -477,7 +551,7 @@ identically on dev and holdout; 0.8 sits mid-plateau. Six new unit tests.
 | S6 rerank | **facet-conflict penalty** (vs post-override facets) | **0.4** | `src/rerank.py` |
 | S6 rerank | **pair-span weight** (key:value associations, word-bounded) | **0.8** | `src/rerank.py` |
 | S6 rerank | length bonus / **depth** | 0.12 / **300** | `src/rerank.py` |
-| S3 state | pre-override utterance weight | 0.35 (largely inert) | `src/state.py` |
+| S3 state | pre-override utterance weight | 0.35 (inert, and correctly so — change 9) | `src/state.py` |
 | S3 state | **declined utterances held out of every retrieval view** | — | `src/state.py` |
 | S4 policy | FixedPolicy: `other`, then feature-ladder | — | `src/policy.py` |
 | S7 timing | first_recommend_turn / confidence margin / earliest | 3 / 0.20 / 2 | `starter/agent.py` |

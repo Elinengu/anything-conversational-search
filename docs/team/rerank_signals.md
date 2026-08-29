@@ -15,9 +15,14 @@ word-boundary fix to span matching), one was implemented, measured, and removed
 (profile-weighted agreement), one was rejected before a line of code was
 written (budget/price closeness), three fragment-grouping variants were
 prototyped and rejected, and the no-span early return was challenged and
-upheld. The negative results are documented with the same care as the positive
-ones — knowing *why* a plausible signal does not work is what stops it being
-rebuilt later.
+upheld. §6-§8 add a later round that shipped no code at all: turn-1 exclusion
+from facet extraction and multi-valued facet extraction were both measured and
+rejected, and the explicit constraint ledger was specified operation by
+operation and not built. That round also corrected the stated diagnosis in §1 —
+the `focused_text()` guard is right, but not for the reason first recorded.
+The negative results are documented with the same care as the positive ones —
+knowing *why* a plausible signal does not work is what stops it being rebuilt
+later.
 
 **This doc is the decision log: what was tried and what the measurements said.**
 Its companion `signal_descriptions.md` is the as-built spec — every shipped
@@ -73,11 +78,40 @@ contradicting it. Measured cost: `generic_override` MRR 0.673 → 0.626.
 The fix judges conflicts against `focused_text()` — the currently
 authoritative turns only, identical to `full_text()` until an override fires.
 That restored `generic_override` to exactly 0.673 and is now covered by a unit
-test (`test_override_discards_stale_facet_for_conflict_scoring`). The general
-lesson is recorded here deliberately: **negative evidence is more
-override-sensitive than positive evidence.** A stale positive term merely
-boosts some wrong candidates; a stale negative term actively demotes the right
-one.
+test (`test_override_discards_stale_facet_for_conflict_scoring`).
+
+### Correction: the fix is right, the diagnosis above was wrong
+
+The paragraph above was written from the shape of the problem, not from the
+sessions. Investigated properly (see §6), the mechanism is different:
+
+* **The "stale black → grey" example never happens.** `behavior_for()` draws
+  `old_value` and `new_value` from the *same target's* intent card, and across
+  all 46 override sessions in the two eval sets, not one replaces an exclusive
+  facet value with a different one. 25/30 public overrides are cross-slot
+  (`"Buckle closure"` → `"leather"`); 4/30 are `feature → feature`; the single
+  `material → material` case is `"Leather Loafers Women…"` → `"leather"`, the
+  same value. The override in this evaluator is an *emphasis shift*, not a
+  retraction.
+* **Single-value extraction over full history picks a value the post-override
+  turns contradict in 0 of 30 sessions.** There is no staleness to guard.
+* **What `focused_text()` actually does here is drop turn 1.** The one
+  regressing session is `hard_generic_override_08`, whose conflict comes from
+  the opening line: `coarse_category()` emits the target's two most specific
+  category levels, and those are drawn from the same vocabulary as the
+  `style`/`use_case` facets, so `"I'm looking for Pants Casual"` extracts
+  `style=casual` and punishes a target whose own style resolves to
+  `regular fit`.
+
+Proof that this is the whole effect: variants A and B in §6 — exclude turn 1
+keeping `focused_text()`, and exclude turn 1 using full history — score
+**bit-identically on all four splits**.
+
+The general lesson stands, but restated: **negative evidence is more sensitive
+to what counts as a constraint than positive evidence is.** A spurious positive
+term merely boosts some wrong candidates; a spurious negative term actively
+demotes the right one. Turn-1 category tokens are the spurious constraint here,
+not stale ones.
 
 ### Measurements (weight 0.0 → 0.4)
 
@@ -319,7 +353,141 @@ turn-1 exclusion stand.
 
 ---
 
-## 6. Housekeeping shipped alongside
+## 6. Measured and rejected: turn-1 exclusion from facet extraction
+
+### The hypothesis
+
+`extract_query_facets` runs over the whole conversation, including turn 1. But
+turn 1 is the simulator's own framing — `initial_message()` renders
+`coarse_category()`, i.e. the target's two most specific category levels — and
+those levels are drawn from the same vocabulary as the `style` and `use_case`
+facets (`casual`, `athletic`, `running`, `winter`, `work`, `outdoor`, …). So the
+category is being read as a style/use_case *constraint*.
+
+`query_spans()` already excludes turn 1 for exactly this reason
+(`src/state.py:126-133`: "the opening line is the simulator's own framing … not
+quoted product copy"). The facet path never got the same guard. Turn 1 is also
+already consumed correctly as category evidence by `_tail_match`
+(`tail_weight=0.8`) and `_category_match` (`category_weight=0.4`), so the facet
+path double-counts it.
+
+The static evidence looked strong:
+
+| | public (200) | hard (96) |
+|---|---|---|
+| turn-1 framing injects a facet no later turn states | 46 slot-instances (26 `use_case`, 18 `style`, 1 `material`, 1 `size`) | 19 |
+| target wrongly penalised by conflict, turn 1 **included** | 8 | 5 |
+| target wrongly penalised by conflict, turn 1 **excluded** | **0** | **0** |
+
+### Measurements
+
+| variant | dev (120) | holdout (80) | public (200) | hard (96) |
+|---|---|---|---|---|
+| baseline (`focused_text`) | **0.9233** | **0.9048** | **0.9159** | **0.7944** |
+| A: −turn1, keep focused | 0.9226 | 0.9035 | 0.9150 | 0.7944 |
+| B: −turn1, full history | 0.9226 | 0.9035 | 0.9150 | 0.7944 |
+| C: full history, +turn1 | 0.9233 | 0.9048 | 0.9159 | 0.7920 |
+
+Hit rate stays 1.000 on every public split throughout.
+
+### Why the hypothesis failed
+
+The 8-and-5 figures above count only the *harm* — targets wrongly penalised —
+and never the benefit. The category framing is a genuine constraint: "Athletic
+Shoes Running" really does mean the customer wants athletic/running items, and
+demoting a formal-shoe impostor on that basis is correct. The impostor
+demotions outweigh the target penalties, so removing turn 1 loses score
+(−0.0009 public, −0.0013 holdout) despite removing every false penalty.
+
+C reproduces the original regression the `focused_text()` guard was introduced
+for (−0.0024 hard). **Baseline is the optimum of all four**: keep turn 1 on the
+85% of sessions with no override, where it helps; drop it on override sessions,
+where it hurts. No code change — only the wrong explanation in §1 needed fixing.
+
+A ≡ B bit-identically, which is what proves `focused_text()` is doing nothing
+in this path except filtering turn 1.
+
+---
+
+## 7. Measured and rejected: multi-valued facet extraction
+
+### The hypothesis
+
+`extract_query_facets` and `extract` both use `pattern.search()` — **first match
+wins, one value per attribute**. A customer disclosing `"Heather Grey: 90%
+Cotton, 10% Polyester"` yields `material=cotton`; the polyester is invisible to
+both `_facet_agreement` and `_facet_conflicts`. Measured on the public set,
+**89 of 200 sessions state more than one distinct material** and lose all but
+the first; 98 of 200 have at least one multi-valued slot.
+
+This also predicts the open-ended-slot problem directly: `"Water Resistant"`
+should not displace `"machine washable"` merely because both land in `feature`.
+
+Variants: hold each slot's stated values as a list; count agreement when the
+product's value is anywhere in that list; count a conflict only when **none** of
+the stated values appear in the candidate's text (plus a `fractional` variant
+scoring `absent / stated` to preserve discrimination).
+
+### Measurements
+
+| variant | dev (120) | holdout (80) | public (200) | hard (96) |
+|---|---|---|---|---|
+| baseline | **0.9233** | 0.9048 | **0.9159** | 0.7944 |
+| multi agree only | 0.9225 | 0.9045 | 0.9153 | 0.7921 |
+| multi conflict only | **0.9233** | **0.9048** | **0.9159** | **0.7949** |
+| multi both | 0.9225 | 0.9045 | 0.9153 | 0.7919 |
+| multi both, fractional | 0.9225 | 0.9050 | 0.9155 | 0.7932 |
+
+### Why the hypothesis failed
+
+**Multi-value agreement is the harmful half, consistently** (−0.0006 public,
+−0.0023 hard). It loosens the match test from "the product's value equals the
+customer's" to "the product's value is somewhere in the customer's list", so it
+fires for strictly more candidates. More coverage, less discrimination — a
+diluted signal, not a richer one. The same reason the fragment de-weighting
+variants in §2 failed: the gradient is load-bearing.
+
+**Multi-value conflict is exactly neutral** on dev, holdout and public, and
++0.0005 on hard — well inside the documented ~0.02 noise floor. It was not
+shipped despite being harmless: the house rule is that dead options are deleted
+rather than parked, and a code path no measurement justifies does not earn its
+place. The robustness argument for the private set (a multi-material disclosure
+judged against one material) is real but unevidenced, and was weighed against
+the added surface and rejected.
+
+Note that `_facet_conflicts` already carries a narrower fix for the same
+first-match-wins problem on the *product* side — guard 3, the substring check,
+which is why a "black/grey reversible" product is not punished. That guard is
+cheap and measured; generalising it to the query side is not.
+
+---
+
+## 8. Not pursued: the explicit constraint ledger
+
+A typed `Constraint` ledger (slot, value, turn, polarity, status) with
+CARRY / UPDATE / ADD / DELETE / DONTCARE / NEGATE operations was specified and
+each operation measured against this evaluator before any of it was built:
+
+| Op | Status | Verdict |
+|---|---|---|
+| `CARRY` / `ADD` | `full_text()` already accumulates every non-declined turn | already built |
+| `DONTCARE` | `NO_PREFERENCE_CUES` → `Utterance.declined` + `dead_attributes`, read by both policies | already built |
+| `UPDATE` | global down-weight (`apply_override`) | **no case to fire on** — see the §1 correction: 46/46 override sessions are emphasis shifts, not retractions |
+| `DELETE` / `NEGATE` | absent | `customer_reply()` only ever *adds* constraints; the simulator never retracts or negates |
+| multi-valued slots | absent | measured flat or worse — §7 |
+
+Four of the six operations are already implemented or provably unable to fire,
+and the two that could be tested end-to-end measured flat or worse. Building the
+ledger would have been new surface area carrying no signal.
+
+This also closes two logged open items as not worth pursuing: "fix or delete the
+override weight" (`docs/team/hard_cases.md`) — there is nothing for a weight to
+express — and the `PRE_OVERRIDE_WEIGHT` tuning / slot-erasure ideas in
+`IMPLEMENTATION.md` §S3.
+
+---
+
+## 9. Housekeeping shipped alongside
 
 * Deleted the dead commented-out block in `_facet_agreement` (the pre-lowercase
   `extract()` call kept as a `'''…'''` string).
@@ -331,7 +499,7 @@ turn-1 exclusion stand.
   (still showed span + bm25 + popularity over depth 200); now matches
   `RerankConfig`.
 
-## 7. Reproduction
+## 10. Reproduction
 
 ```bash
 python3 -m unittest discover -s tests            # 57 tests
@@ -342,6 +510,16 @@ python3 tools/sweep.py --split dev \
     --configs conflict00,conflict04,pair00,pair08   # the ablation rows
 python3 tools/observe.py --only public_0020      # the motivating session, now rank 1
 ```
+
+§6-§8 were measured with a throwaway harness rather than `tools/sweep.py` rows,
+because the variants change the *shape* of `_facet_agreement` /
+`_facet_conflicts` rather than a weight, and the house rule is not to park dead
+options in `RerankConfig`. The harness monkeypatches `src.rerank.rerank` and
+`starter.agent.rerank` in-process, touches no repo file, and reproduced the
+baseline exactly on all four splits (dev 0.9233, holdout 0.9048, public 0.9159,
+hard 0.7944) before any variant ran — which is the check that makes the
+before/after pairs trustworthy. To redo it, wrap `rerank()` with the one line
+changed and evaluate against `split_samples()` from `tools/sweep.py`.
 
 New unit tests (`tests/test_components.py`): conflict demotes a contradicting
 candidate; a multi-value product containing the stated value is not punished;

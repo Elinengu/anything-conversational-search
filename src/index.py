@@ -128,16 +128,6 @@ class CatalogIndex:
         tokens = terms(text, drop_boilerplate=drop_boilerplate)[:MAX_QUERY_TERMS]
         return self._match(" OR ".join(f'"{token}"' for token in tokens), limit, weights)
 
-    def search_phrases(
-        self,
-        spans: list[str],
-        limit: int = 200,
-        weights: tuple[float, ...] = DEFAULT_WEIGHTS,
-    ) -> list[tuple[str, float]]:
-        """Quoted multi-word phrase query - low recall, high precision."""
-        quoted = [f'"{span}"' for span in spans if span.strip()]
-        return self._match(" OR ".join(quoted), limit, weights)
-
     def __len__(self) -> int:
         return len(self.products)
 

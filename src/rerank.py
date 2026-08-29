@@ -30,9 +30,10 @@ Negative facet evidence (``_facet_conflicts``) penalises a candidate that
 resolves an attribute the customer constrained and whose text never mentions the
 stated value. Positive signals cannot do this job: a black-only shirt matches
 "cotton shirt" spans exactly as well as a grey one. Contradiction is judged
-against the post-override turns only (``focused_text``) - judged against the
-full history it punished targets for obeying an intent override, which cost
-0.047 MRR on the adversarial override bucket before the fix.
+against ``focused_text`` rather than the full history, which costs 0.047 MRR on
+the adversarial override bucket. The reason is *not* staleness, as this file
+long claimed - it is that ``focused_text`` drops turn 1, whose category framing
+extracts as a style/use_case constraint. See the note at the call site.
 
 Two more signals were measured and not shipped. Profile-weighted facet
 agreement (extra credit on attributes named by ``preference_tags``) gained
@@ -267,10 +268,25 @@ def rerank(
 
     # Per-session quantities, computed once rather than per candidate.
     customer_facets = extract_query_facets(state.full_text())
-    # Contradiction must be judged against the currently authoritative turns
-    # only: after an intent override, full_text() still carries the discarded
-    # value, and a conflict computed from it punishes the target for obeying
-    # the override. focused_text() == full_text() until an override fires.
+    # Judged against focused_text(), which on an override session means "turn 1
+    # excluded". That is what this line actually buys, and the original
+    # "discarded value" reading of it was wrong: measured over all 30 public
+    # override sessions, full history picks a value the post-override turns
+    # contradict in *zero* of them. The one session that regresses
+    # (hard_generic_override_08) conflicts on turn 1 - coarse_category() emits
+    # the target's two most specific category levels, and those are drawn from
+    # the same vocabulary as the style/use_case facets, so "I'm looking for
+    # Pants Casual" extracts style=casual and then punishes every candidate
+    # whose own style resolves to something else.
+    #
+    # The asymmetry is deliberate, not an oversight. Excluding turn 1 from
+    # conflict scoring *everywhere* was measured and is worse (public 0.9159 ->
+    # 0.9150, holdout 0.9048 -> 0.9035): the category framing is a real
+    # constraint, and the impostors it demotes outweigh the 8 targets it
+    # wrongly penalises. Keeping turn 1 on override sessions is also worse
+    # (hard 0.7944 -> 0.7920). Excluding it on override sessions only - what
+    # focused_text() happens to do here - is the best of the three.
+    # docs/team/rerank_signals.md records all four variants.
     authoritative_facets = extract_query_facets(state.focused_text())
 
     scored: list[tuple[str, float]] = []

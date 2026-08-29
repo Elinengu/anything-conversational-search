@@ -100,6 +100,16 @@ Two secondary findings:
   of weight. So `0.35` behaves identically to any value in `(0, 1)`; the
   "sweep the override weight" idea in IMPLEMENTATION.pdf §S3 cannot pay off as
   the code stands.
+
+  **Resolved — no fix needed.** The weight is inert *and there is nothing for it
+  to express.* `behavior_for()` draws both `old_value` and `new_value` from the
+  same target's intent card, and across all 46 override sessions in the two eval
+  sets not one replaces an exclusive facet value with a different one: 25/30
+  public overrides are cross-slot (`"Buckle closure"` → `"leather"`), 4/30 are
+  `feature → feature`, and the single `material → material` case repeats the
+  same value. The override is an emphasis shift, not a retraction, so
+  down-weighting pre-override turns has no correct amount. See
+  `docs/team/rerank_signals.md` §6 and §8.
 - **Budget constraints are triply dead.** For the 13.5% of targets with a price,
   the disclosed `"budget around $X"` (a) barely helps FTS retrieval (just the
   digits), (b) can never substring-match in `rerank()` because price is not in
@@ -153,12 +163,17 @@ switch strategy — diversify the list across sub-categories/brands, or ask a
 miss→hit is worth ~2.6× a rank improvement, trading rank for coverage on
 low-confidence sessions is likely net-positive.
 
-### 5. Fix or delete the override weight  — correctness
+### 5. Fix or delete the override weight  — ~~correctness~~ CLOSED, not worth doing
 
-Either make `full_text()` / `query_spans()` actually honour `Utterance.weight`
+~~Either make `full_text()` / `query_spans()` actually honour `Utterance.weight`
 (repeat or scale down-weighted tokens), or drop `PRE_OVERRIDE_WEIGHT` and rely on
-the `focused_text()` route alone. Then the §S3 sweep becomes meaningful. The
-`generic_override` bucket (0.625) is where this shows up.
+the `focused_text()` route alone. Then the §S3 sweep becomes meaningful.~~
+
+Investigated and closed. The sweep can never be meaningful, because the
+evaluator's override never retracts anything — see the resolution note under
+"The override down-weight is inert" above, and `docs/team/rerank_signals.md`
+§6-§8 for the measurements. Four variants of the surrounding conflict-scoring
+logic were tried; all scored flat or worse than the shipped agent.
 
 ### 6. Learn the rerank weights  — once 1–2 add new features
 

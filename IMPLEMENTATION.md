@@ -463,8 +463,10 @@ mean, 19.8ms at the 95th percentile**.
   `tests/test_stoplist.py` for the invariants that keep a future regeneration honest.
 - **Persist the index.** 4.1s of startup could become near-zero by writing the FTS5 index to a
   file instead of `:memory:`. Only worth it if startup time is ever judged.
-- **Dead code.** `search_phrases()` (`src/index.py:119`) has had no caller since the phrase route
-  was removed in §6. It should go.
+- ~~**Dead code.** `search_phrases()` (`src/index.py:119`) has had no caller since the phrase route
+  was removed in §6. It should go.~~ **Done** — deleted, along with
+  `DialogState.query_terms()` (`src/state.py`), which also had no caller. Both deletions verified
+  score-identical: public 0.915887, hard 0.794375, 57/57 tests.
 
 ---
 
@@ -606,21 +608,29 @@ plus the decision to ask a question at all.
 
 #### Ideas for this stage
 
-- **Tune the override weight.** `PRE_OVERRIDE_WEIGHT = 0.35` was chosen by judgement and **never
-  swept**. Intent override is the weakest scenario in the final results (0.867 hit rate against
-  0.94 overall, MTTC 4.60 against 3.41), so this constant sits directly on the largest remaining
-  weakness. Sweeping `0.0` (true erasure) through `1.0` (no override handling) via the harness is
-  a small experiment with a real chance of paying.
-- **Per-constraint provenance, not per-turn.** Weight currently applies to a whole utterance. A
-  turn that contains both a reversal *and* new information gets uniformly discounted. Tracking
-  weight per extracted constraint span would be finer-grained and better matches what "slot"
-  rewriting means in the brief.
-- **Detect *partial* overrides.** `OVERRIDE_CUES` treats any reversal as global. A customer
-  saying "actually, not in black" is revising one facet, not the whole request. Pairing the
-  reversal cue with the facet it mentions would let the agent revise a single slot.
-- **Contradiction detection.** Nothing currently notices if a customer states two incompatible
-  constraints. Detecting that and asking which one wins is both a real product behaviour and a
-  natural clarification trigger.
+**All four override ideas below were investigated together and closed as not worth pursuing.**
+The reason is one measured fact: `behavior_for()` draws both `old_value` and `new_value` from the
+*same target product's* intent card, and across all 46 override sessions in the public and hard
+sets, **not one replaces an exclusive facet value with a different one** — 25/30 public overrides
+are cross-slot (`"Buckle closure"` → `"leather"`), 4/30 are `feature → feature`
+(`"Stainless Steel Band"` → `"Water Resistant"`, both true of the target), and the single
+`material → material` case repeats the same value. The override is an *emphasis shift*, not a
+retraction. Full measurements in `docs/team/rerank_signals.md` §6-§8.
+
+- ~~**Tune the override weight.**~~ **Closed.** `PRE_OVERRIDE_WEIGHT = 0.35` is inert *and* has
+  nothing to express: there is no discarded constraint to down-weight, so no value of the
+  constant is more correct than another.
+- ~~**Per-constraint provenance, not per-turn.**~~ **Closed.** Built as a four-variant ablation
+  over the conflict-scoring path (turn-1 exclusion × full-vs-focused history); every variant
+  scored flat or worse than the shipped agent. Provenance is real — `focused_text()` in the
+  conflict path turns out to be nothing but a turn-1 filter — but acting on it more precisely
+  loses score, because the turn-1 category framing is a genuine constraint.
+- ~~**Detect *partial* overrides.**~~ **Closed.** A partial override is the *only* kind this
+  simulator produces, and the correct handling of it is to add the new constraint without
+  touching the old one — which is already what the agent does.
+- ~~**Contradiction detection.**~~ **Closed for this evaluator.** `customer_reply()` only ever
+  *adds* constraints, all drawn from one target's card, so the customer can never state two
+  incompatible ones. Still a real product behaviour; not a scoring lever here.
 
 ---
 
@@ -1049,6 +1059,35 @@ not repeat the experiment.
 | **Weighting phrases by rarity within the shortlist** | +0.0002 dev, 0.0000 holdout | Deleted entirely, not left as an off-by-default flag. |
 | **`InfoGainPolicy` as the default** | dev 0.8369 vs 0.8738; holdout 0.8141 vs 0.8374 | Kept in the repo and documented, but not the default. |
 | **Dense-vector retrieval** | not built | Cancelled after measuring retrieval recall at 80/80 — the bottleneck was ranking, and it would have broken the no-network guarantee. |
+| **Turn-1 exclusion from facet extraction** | public 0.9159 → 0.9150, holdout 0.9048 → 0.9035 | Rejected. Removes every false conflict against the target (8 public, 5 hard) and still loses — the opening's category words are a real constraint, and the impostors they demote outweigh the targets they cost. |
+| **Multi-valued facet extraction** | agreement −0.0006 public / −0.0023 hard; conflict-only 0.0000 | Rejected. The agreement half dilutes the signal by matching more candidates; the conflict half is exactly neutral and was not shipped, because a code path no measurement justifies does not earn its place. |
+| **Explicit constraint ledger (S3)** | not built | Cancelled after specifying and measuring all six operations — see below. |
+
+**The constraint ledger, and why measuring a design beats arguing about it.** A typed
+`Constraint` ledger (slot, value, turn, polarity, status) with CARRY / UPDATE / ADD / DELETE /
+DONTCARE / NEGATE operations was proposed as a replacement for replaying raw utterances. Rather
+than build it and see, each operation was checked against what the evaluator actually does. Four
+of the six could not pay: `CARRY`/`ADD` is what `full_text()` already does, `DONTCARE` is already
+implemented as `Utterance.declined` plus `dead_attributes`, and `DELETE`/`NEGATE` cannot fire
+because `customer_reply()` only ever *adds* constraints.
+
+The sixth, `UPDATE`, is the interesting one, and it failed for a reason worth writing down.
+`behavior_for()` draws both the discarded and the new preference from the **same target
+product's** intent card. Across all 46 override sessions in the public and hard sets, **not one
+replaces an exclusive facet value with a different one**: 25 of 30 public overrides are
+cross-slot (`"Buckle closure"` → `"leather"` — a material is added, the buckle is still true),
+4 are `feature → feature` (`"Stainless Steel Band"` → `"Water Resistant"`, both true), and the
+single `material → material` case repeats the same value. What reads as "ignore my earlier
+preference" is an *emphasis shift*, not a retraction. There is nothing to supersede.
+
+Chasing this also corrected a wrong explanation in the shipped code. `src/rerank.py` judged
+conflicts against `focused_text()` and attributed that to stale post-override values punishing the
+target. Measured: single-value extraction over full history picks a contradicted value in **0 of
+30** sessions. The guard's real function is dropping turn 1, whose `coarse_category()` framing
+("I'm looking for Pants Casual") extracts as a `style` constraint. Two variants — exclude turn 1
+keeping `focused_text()`, and exclude turn 1 using full history — scored **bit-identically on all
+four splits**, which is the proof. The guard stays; only its comment changed. Full measurements in
+`docs/team/rerank_signals.md` §6-§8.
 
 **A bug worth learning from.** The first version of `InfoGainPolicy` opened every conversation by
 asking the customer's preferred *brand*. The cause was using raw entropy: brand has thousands of
