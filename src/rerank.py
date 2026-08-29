@@ -39,6 +39,12 @@ class RerankConfig:
     # Candidate facets matching the customer's stated facets (material, colour, ...).
     facet_weight: float = 0.3
     category_weight: float = 0.4
+    # The customer's opening names the target's category-path *tail* (its two
+    # most specific levels), so a candidate whose own tail is fully named in the
+    # opening is a far stronger match than one that merely shares an ancestor
+    # like "Novelty" - see _tail_match. 0.6-1.5 score identically on dev and
+    # holdout; this sits mid-plateau rather than at either split's argmax.
+    tail_weight: float = 0.8
 
     # Rescore the whole retrieval pool (RetrievalConfig.pool_size), not a prefix -
     # ~12% of cluster-target sessions had the target in the pool but past rank 200,
@@ -83,6 +89,51 @@ def _facet_agreement(
         if product_facets.get(key) == value:
             score += 1.0
 
+    return score
+
+
+# Store-wide wrapper levels that appear on nearly every product and therefore
+# say nothing about which subtree a product lives in.
+GENERIC_CATEGORY_PARTS = {
+    "clothing", "clothing shoes & jewelry", "clothing, shoes & jewelry",
+}
+
+
+def _tail_match(
+    state: DialogState,
+    product: dict,
+) -> float:
+    """Alignment between the opening message and the candidate's category tail.
+
+    The simulated customer opens with the target's coarse category, which the
+    evaluator builds from the two most specific levels of the target's category
+    path ("Novelty > Women" -> "I'm looking for Novelty Women"). Ancestor
+    overlap alone cannot use this: a deep candidate ("... > Novelty > Women >
+    Tops & Tees > T-Shirts") shares every ancestor the target has, yet its own
+    tail ("Tops & Tees T-Shirts") goes unmentioned in the opening. Scoring the
+    tail separates the two - and it is matched by token containment, not by
+    parsing the opening template, so paraphrased private-set wording still
+    works. In the one public-set miss (public_0020) this cut a 159-way rerank
+    tie down to the handful of candidates on the right leaf.
+    """
+    opening_terms = set(
+        terms(state.opening, drop_boilerplate=True)
+    )
+    if not opening_terms:
+        return 0.0
+
+    cleaned: list[str] = []
+    for value in product.get("categories", []):
+        for part in str(value).split(","):
+            part = part.strip()
+            if part and part.lower() not in GENERIC_CATEGORY_PARTS:
+                cleaned.append(part)
+
+    score = 0.0
+    for part in cleaned[-2:]:
+        part_tokens = set(terms(part))
+        if part_tokens and part_tokens <= opening_terms:
+            score += 1.0
     return score
 
 
@@ -159,12 +210,17 @@ def rerank(
             state,
             product,
         )
+        tail_score = _tail_match(
+            state,
+            product,
+        )
         total = (
             config.span_weight * coverage
             + config.retrieval_weight * (retrieval_score / top_score)
             + config.popularity_weight * _popularity(product)
             + config.facet_weight * facet_score
             + config.category_weight * category_score
+            + config.tail_weight * tail_score
         )
         scored.append((parent_asin, total))
 

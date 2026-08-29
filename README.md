@@ -78,6 +78,7 @@ customer turn
 | `starter/agent.py` | — | The `Agent` the evaluator imports; owns the response contract |
 | `tools/sweep.py` | S0 | Experiment harness and the dev/holdout split |
 | `tools/observe.py` | — | Session tracer: annotated transcripts and failure diagnosis |
+| `tools/build_stoplist.py` | S1 | Learns `src/stoplist.py` (metadata boilerplate) from the catalog |
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the data flow, the boundaries between
 stages, and the failure behaviour at each one. See
