@@ -333,14 +333,33 @@ Each session hides ~4 constraints and the customer discloses at most 2 per
 answered question; the profile has up to 3 tags plus two rating fields. The
 narrow openings:
 
-1. **`average_prior_rating` / `rating_style` modulating popularity.** Both fields
-   are read by nothing. A "critical" reviewer with average 1.0 plausibly buys
-   different products than a 5.0 "usually positive" one, and the customer never
-   says this out loud, so it is genuinely orthogonal to the transcript. Concrete:
-   scale (or flip the sign of) `popularity_weight` by the profile — do not boost
-   popular items for a low-rating critical buyer. Expected value low-moderate;
-   rating style is a weak identity signal, but it costs one cheap term and uses
-   two dead fields. Sweep it as a `popularity_profile_weight` ablation.
+1. **`average_prior_rating` / `rating_style` modulating popularity — TRIED,
+   does not generalise, not shipped.** Both fields are read by nothing and are
+   orthogonal to the transcript (the customer never says "I rate harshly").
+   Implemented as an added term
+   `popularity_profile_weight x rating_disposition x _popularity(product)`,
+   with `rating_disposition = clip(average_prior_rating - 4.0, -1, +1)` — so the
+   three public groups (avg 5 / 4 / <=3) map to +1 / 0 / -1 and a critical buyer
+   pushes popular candidates *down*. Swept as the `ppop` config rows:
+
+| weight | dev | holdout |
+|---|---:|---:|
+| 0.00 | 0.9233 | 0.9048 |
+| 0.02 | 0.9235 | 0.9048 |
+| 0.05 | 0.9254 | 0.9033 |
+| 0.10 | 0.9285 | 0.9014 |
+| 0.20 | 0.9293 | 0.9036 |
+
+   Dev climbs monotonically (+0.006 at 0.20); holdout is best at **0** and down
+   ~0.003 across the range. The full public set "gains" +0.0018 at weight 0.10
+   (0.9159 -> 0.9177) and the hard set +0.005 — but that public number is just
+   the +0.005 dev gain diluted by the -0.003 holdout loss, and the hard set's
+   profiles are synthetic (a rating correlation is baked into
+   `tools/hard_cases.py`), so it is not an independent test. **The same
+   knife-edge signature as profile-weighted facet agreement.** Code reverted;
+   the disposition-to-popularity correlation is real in the 120 dev sessions and
+   noise in the 80 holdout ones. Recorded in `rerank_signals.md` alongside the
+   other profile negative result.
 
 2. **Tags for a dimension the conversation never covers.** If a tag names an
    attribute the agent never got to ask about (ladder ran out, or the target has
@@ -363,9 +382,10 @@ narrow openings:
    that is flat on the public set but non-negative on holdout is defensible as
    robustness even though house convention is to delete dead options.
 
-**Recommendation.** Try option 1 (popularity modulation) first — it is the only
-one touching genuinely unused, genuinely orthogonal fields. Expect it to be
-flat-to-slightly-positive; keep it only if holdout agrees, at the smallest
-weight on its plateau. Options 2-3 are last-resort tie-breaks worth a single
-sweep each. Do not give any profile term a large weight — the evidence says it
-overfits.
+**Recommendation.** Option 1 was the most promising and it failed the holdout
+test — the second independent profile attempt to do so. Options 2-4 rest on the
+same redundancy (the profile compresses information the transcript delivers in
+full) and are each worth at most a single sweep. Practical conclusion after two
+tries: **on this evaluator `user_profile` carries no non-redundant signal for
+reranking.** Revisit only if a future evaluator version discloses fewer
+constraints or paraphrases them, which would break the redundancy.

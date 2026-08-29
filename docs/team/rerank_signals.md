@@ -215,6 +215,34 @@ like `"material"` now maps to the `material` attribute. `InfoGainPolicy`
 aliases it unchanged; profile tags that name an attribute directly previously
 did nothing in its answerability prior.
 
+### 3b. Same verdict, second try: rating-disposition modulated popularity
+
+A different profile field, a fresh hypothesis: `average_prior_rating` /
+`rating_style` are read by nothing and are genuinely orthogonal to the
+transcript (a customer never says "I rate harshly"). Hypothesis — a generous
+rater buys mainstream, well-reviewed products; a critical one shops away from
+the bestseller shelf. Added term:
+`popularity_profile_weight x rating_disposition x _popularity(product)`, with
+`rating_disposition = clip(average_prior_rating - 4.0, -1, +1)` (the public
+groups avg 5 / 4 / <=3 map to +1 / 0 / -1).
+
+| weight | dev | holdout |
+|---|---:|---:|
+| 0.00 | 0.9233 | 0.9048 |
+| 0.02 | 0.9235 | 0.9048 |
+| 0.05 | 0.9254 | 0.9033 |
+| 0.10 | 0.9285 | 0.9014 |
+| 0.20 | 0.9293 | 0.9036 |
+
+Dev climbs monotonically (+0.006); holdout is best at 0 and down ~0.003 across
+the range — the identical knife-edge. Full public "+0.0018" at 0.10 is the dev
+gain diluted by the holdout loss; the hard set "+0.005" is not independent (its
+profiles are synthesised with a rating correlation by `tools/hard_cases.py`).
+Code reverted. Two independent profile attempts have now failed the same way:
+**the `user_profile` carries no non-redundant rerank signal on this evaluator.**
+The disposition-to-popularity correlation is real in the 120 dev sessions and
+noise in the 80 holdout ones.
+
 ---
 
 ## 4. Rejected before implementation: budget/price closeness
