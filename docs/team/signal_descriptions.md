@@ -1,9 +1,17 @@
 # S6 Rerank — Every Signal, In Detail
 
-Reference for `src/rerank.py` as of `origin/main` (`96513ba`). Covers the eight
-scoring signals, exactly how each is computed, and how each weight was chosen.
-Closes with the one agent input that is *not* a signal — `user_profile` — and
-what could be done with it.
+Reference for `src/rerank.py` as of `96513ba` — still the most recent commit to
+touch that file. Covers the eight scoring signals, exactly how each is computed,
+and how each weight was chosen. Closes with the one agent input that is *not* a
+signal — `user_profile` — and what could be done with it.
+
+**This doc is the as-built spec: what the reranker does today.** Its companion
+`rerank_signals.md` is the decision log: what was tried, what the measurements
+said, and what was rejected — including three signals that never shipped
+(profile-weighted agreement, budget/price closeness, fragment de-weighting) and
+one piece of current behaviour that was challenged and upheld. Where a weight is
+justified here in a sentence, the full ablation lives there. Keep them in step:
+a signal added or a weight changed needs an edit in both.
 
 ---
 
@@ -14,7 +22,7 @@ spans = state.query_spans()
 if not spans:                       # nothing disclosed yet -> rerank is a NO-OP;
     return candidates               # the pool passes through in RRF order
 head = candidates[:300]             # depth == pool_size, so the whole pool
-pairs = state.query_pair_spans()
+pairs = state.query_pair_spans() if config.pair_weight else []   # skipped when off
 top_score = max(retrieval_score in head) or 1.0
 customer_facets      = extract_query_facets(state.full_text())      # whole convo
 authoritative_facets = extract_query_facets(state.focused_text())   # post-override only
@@ -40,6 +48,13 @@ only retrieval quantity used is the pre-computed fused score.**
 Key gate: **before a real fragment is disclosed (turn 1, or a customer who has
 only declined), `rerank()` returns the pool untouched.** Ordering before then is
 pure S5.
+
+That gate is deliberate and was challenged on the reasonable grounds that "no
+spans" is not "no information" — the opening always names a category. It was
+measured and kept (`rerank_signals.md` §5): the gate only affects a turn that
+actually shows a list in 3.4% of public turns, the buying opening's hard
+requirement is a single word so no span exists to extract either way, and the
+best variant moved 4 sessions of 200 while regressing the override bucket.
 
 ---
 
@@ -187,7 +202,13 @@ here** — the discriminator when spans, facets and `category_score` all saturat
 **Weight** Swept: "0.6-1.5 score identically on dev and holdout; this sits
 mid-plateau." Measured effect: public 199/200 -> 200/200, score
 0.9029 -> 0.9125, adversarial 0.789 -> 0.8007; the one public miss
-(`public_0020`) went from rerank rank 171 into the top 10.
+(`public_0020`) went from rerank rank 171 into the top 10. Full write-up:
+`category_tail_match.md`.
+
+Those adversarial figures are **pre-anchor-retrieval-merge** and are not
+comparable to the ones quoted for signals 2 and 8: that merge moved the hard-set
+baseline from 0.8007 down to 0.7914. Only compare hard-set numbers measured in
+the same session as each other.
 
 ---
 
@@ -248,6 +269,24 @@ empty, so the whole pool is reranked.
    signal that demotes a true target shows up there first.
 7. **Dead options are deleted, never kept at weight 0** (pool-local rarity,
    profile-weighted agreement — both removed entirely).
+
+---
+
+## Not a signal: price / budget
+
+`product["price"]` is loaded into the trimmed product dict and bucketed by
+`extract(product)` into a `budget` facet — but no scoring term reads it, and the
+customer's `"budget around $X"` can never match one: `extract_query_facets` never
+emits `budget`, and the price is absent from `product["text"]` so no span can
+match it either.
+
+That is not an oversight. A closeness term was designed and rejected **before
+implementation** on measurement (`rerank_signals.md` §4): `intent_card()` appends
+the budget line after every feature/detail candidate and keeps only the first
+four, so a budget surfaces for **0 of 200 public sessions** and 0.45% of the
+catalog. The four hard-set sessions carrying one render it as `budget around $—`
+with no number, and are the four `never_retrieved` misses no rerank term can
+reach. The design is on file there if a future evaluator emits budgets routinely.
 
 ---
 

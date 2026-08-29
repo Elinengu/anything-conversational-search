@@ -19,9 +19,17 @@ upheld. The negative results are documented with the same care as the positive
 ones — knowing *why* a plausible signal does not work is what stops it being
 rebuilt later.
 
+**This doc is the decision log: what was tried and what the measurements said.**
+Its companion `signal_descriptions.md` is the as-built spec — every shipped
+signal, exactly how it is computed, and the house method for choosing a weight.
+Read that one to know what the reranker *does*; read this one to know *why*.
+Keep them in step: a signal added or a weight changed needs an edit in both.
+
 All numbers were measured on the current tree in one session, so before/after
 pairs are directly comparable. (The hard-set baseline here is 0.7914, not the
-0.8007 recorded before the anchor-retrieval merge — the merge moved it.)
+0.8007 quoted for the tail signal in `signal_descriptions.md` and
+`category_tail_match.md` — the anchor-retrieval merge moved it. Hard-set numbers
+are only comparable within a single measurement session.)
 
 ---
 
