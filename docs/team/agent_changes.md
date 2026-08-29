@@ -14,10 +14,19 @@ public labels and API contract were **not** touched.
 | + elimination scan (turn 3) | KW | 0.898 | 0.725 | (this is what `main` carried) |
 | + facet-agreement rerank signal | corainexia | 0.903 | 0.788 | PR #3 |
 | + retrieval-recall fixes | KW | 0.903 | 0.788 | this branch; dev 0.909, holdout 0.895 |
-| + category tail matching | Elinengu | **0.913** | **0.801** | fixes the last public miss — public 200/200; `docs/category_tail_match.md` |
+| + query facet extraction | corainexia | — | — | PR #5 |
+| + multi-route anchor retrieval | xiaotong0329 | — | — | PR #6 |
+| + category tail match | Elinengu | **0.9128** | **0.7914** | change 5; fixes the last public miss — public 200/200 |
+| + learned boilerplate stoplist | Elinengu | 0.9128 | 0.7914 | change 6; score-neutral by design |
 
-Net: **public 0.859 -> 0.913, adversarial 0.684 -> 0.801.** 39/39 tests pass.
-The four core-agent changes are detailed below; supporting tooling and docs follow.
+Net: **public 0.859 -> 0.9128, adversarial 0.684 -> 0.7914.** 46/46 tests pass.
+The six core-agent changes are detailed below; supporting tooling and docs follow.
+
+Dashes mark changes that landed while several branches were merging in parallel, where
+no clean before/after was captured at the time. Changes 5 and 6 were measured in
+isolation instead — toggling the one parameter in a single process — which is the
+method `.claude/skills/record-change/SKILL.md` now requires, precisely because
+differencing across merges attributed one teammate's gain to another's change.
 
 ---
 
@@ -121,7 +130,7 @@ total = ( span_weight * coverage
  + facet_weight * facet_score ) # facet_weight = 0.3 <-- new
 ```
 
-This is `docs/ideas.md` Idea 2 (partial) — the reranker had been ignoring
+This is `docs/team/ideas.md` Idea 2 (partial) — the reranker had been ignoring
 `FacetStore`, which is built for every product but read by nothing.
 
 ### Effect
@@ -170,6 +179,134 @@ with Change 3.
 
 ---
 
+## Change 5 — Category tail match in the reranker (Elinengu)
+
+**Files:** `src/rerank.py` — commit `f322a52`. Full write-up:
+`docs/team/category_tail_match.md`
+
+### Problem
+
+The customer's opening names the target's coarse category, which the evaluator builds
+from the two most specific levels of the target's category path (`coarse_category`,
+`evaluator/local_evaluator.py:126`): `Novelty > Women` becomes *"I'm looking for
+Novelty Women"*.
+
+Ancestor overlap alone cannot exploit that. A deeper candidate —
+`... > Novelty > Women > Tops & Tees > T-Shirts` — shares every ancestor the target
+has and scores just as well, even though its own two most specific levels
+(`Tops & Tees T-Shirts`) are never mentioned in the opening. In the last remaining
+public-set miss (`public_0020`) this produced a **159-way tie** in the reranker.
+
+### What changed
+
+Score the *tail* of each candidate's category path, not its ancestors: a point for
+each of the candidate's two most specific levels whose tokens are fully contained in
+the opening. Matching is by token containment rather than by parsing the opening's
+template, so paraphrased private-set wording still works. Generic levels such as
+`Clothing, Shoes & Jewelry` are excluded.
+
+```python
+for part in cleaned[-2:]:                  # the two most specific levels
+    part_tokens = set(terms(part))
+    if part_tokens and part_tokens <= opening_terms:
+        score += 1.0
+```
+
+`RerankConfig.tail_weight = 0.8`. The 0.6-1.5 range scores identically on dev and
+holdout, so this sits mid-plateau rather than at either split's argmax.
+
+### Effect
+
+Measured in one process by toggling `tail_weight` between `0.0` and `0.8`, everything
+else held constant.
+
+| | off | on | delta |
+|---|---|---|---|
+| Public set | 0.907000 | **0.912801** | +0.0058 |
+| Public MRR | 0.8273 | 0.8417 | +0.0144 |
+| Public MTTC | 3.060 | 2.985 | -0.075 |
+| Adversarial set | 0.786037 | **0.791375** | +0.0053 |
+| Adversarial MRR | 0.6798 | 0.6949 | +0.0151 |
+
+The gain is entirely in ranking. Hit rate does not move on either set (public 1.000,
+adversarial 0.8854) — the tail match reorders candidates retrieval had already found,
+which is what a reranking signal should do.
+
+---
+
+## Change 6 — Learned boilerplate stoplist (Elinengu)
+
+**Files:** `tools/build_stoplist.py`, `src/stoplist.py`, `src/text.py`,
+`tests/test_stoplist.py` — commit `f322a52`
+
+### Problem
+
+`BOILERPLATE` in `src/text.py` was 24 hand-written tokens with no record of what
+evidence produced any of them. `IMPLEMENTATION.md` proposed replacing it by dropping
+the most frequent ~200 catalog terms.
+
+**That proposal was wrong.** Ranked by document frequency over the 50,000-product
+catalog, `polyester` is 72nd, `cotton` 83rd, `black` 97th, `leather` 111th and
+`spandex` 141st. Dropping the top 200 deletes every one — and those are precisely the
+constraints the customer discloses, because `intent_card()` inserts a material at
+position 0 and a colour at position 1 of every card. Meanwhile `asin`, a genuine
+member of the hand-written list, sits at rank 10,379 with 0.0% document frequency.
+Frequency fails in both directions.
+
+### What changed
+
+The usable signal is *where* a token occurs, not how often. Structural metadata lives
+in the `details` dict and appears almost nowhere else:
+
+| structural | in `details` | | attribute | in `details` |
+|---|---:|---|---|---:|
+| `department` | 100.0% | | `spandex` | 1.2% |
+| `dimensions` | 99.6% | | `cotton` | 2.5% |
+| `manufacturer` | 99.6% | | `polyester` | 3.3% |
+| `inches` | 97.7% | | `black` | 13.4% |
+
+The gap between 16% and 96% is empty of attribute words, so the threshold is read off
+the catalog's own distribution rather than tuned against a score.
+`tools/build_stoplist.py` selects tokens with document frequency >= 5% and >= 90% of
+occurrences inside `details`, and writes `src/stoplist.py`. It reads
+`data/catalog.jsonl` and never opens `data/public_set.jsonl`, so it cannot fit the
+public sessions.
+
+The learned list reproduces 14 of the 24 hand-written terms and finds 22 more nobody
+wrote down — every month name and year 2014-2022, harvested from
+`Date First Available: August 15, 2019`.
+
+**Ten terms stay hand-written, deliberately.** `imported`, `machine`, `wash`,
+`closure`, `care` and friends are care-and-origin phrases in `features`/`description`.
+Two statistics were tested and both fail to separate them from real attributes: by
+document frequency `closure` (38.6%) outranks `polyester` (21.8%); by spread across
+the 12 largest category buckets `polyester` (CV 0.51) sits between `imported` (0.49)
+and `wash` (0.60), with `black`/`white` (0.34/0.31) inside the scaffolding band. What
+separates them is that a shopper does not choose between "imported" and "not
+imported" — semantics, not frequency. The evidence sits beside them in `src/text.py`
+so the experiment is not retried.
+
+### Effect
+
+Measured in one process by swapping `src.text.BOILERPLATE` between the two lists.
+
+| | hand-written (24) | learned (46) |
+|---|---|---|
+| Public set | 0.912801 | **0.912801** |
+| Adversarial set | 0.791636 | 0.791375 |
+| Sweep dev / holdout | 0.9187 / 0.9029 | 0.9190 / 0.9029 |
+
+**Score-neutral, as predicted before it was written.** Boilerplate removal strips a
+median of one token from a ten-token query, and `MAX_QUERY_TERMS = 60` never binds — 0
+of 200 sessions come close. The adversarial `-0.0003` is one session's reciprocal
+rank; hit rate and MTTC are unchanged on both sets.
+
+It ships for auditability and for robustness on a catalog nobody has hand-inspected,
+not for points. `tests/test_stoplist.py` holds the invariants that keep a future
+regeneration honest.
+
+---
+
 ## Supporting work (Kwong Weng)
 
 | file | what |
@@ -177,8 +314,8 @@ with Change 3.
 | `tools/hard_cases.py` | Adversarial session generator + per-bucket scorer. Scans the frozen catalog, buckets every product by an adversarial property, samples 16 each. `--run` scores the agent grouped by bucket. |
 | `data/hard_set.jsonl` | 96 generated sessions (6 buckets: homogeneous_cluster, budget_only_signal, boilerplate_soft, degenerate_card, generic_override, cross_category_collision). Public-set schema; scored by the unmodified evaluator. |
 | `tools/sweep.py` | `build_configs()` — added `plain`, `elim1/2/3`, `elim_hold1/2` for the start-turn sweep. |
-| `docs/ideas.md` / `ideas.pdf` | Reranking & recommendation-strategy ideas, each with the measured result: elimination scan (1a/1b), decline filter (1c), facet / category / MMR / learned-weights (2-6). |
-| `docs/hard_cases.md` / `.pdf` | Failure analysis of the adversarial set and the prioritised fix plan. |
+| `docs/team/ideas.md` / `ideas.pdf` | Reranking & recommendation-strategy ideas, each with the measured result: elimination scan (1a/1b), decline filter (1c), facet / category / MMR / learned-weights (2-6). |
+| `docs/team/hard_cases.md` / `.pdf` | Failure analysis of the adversarial set and the prioritised fix plan. |
 | `agent_summary.pdf` | Rewritten (`c7757af`) for the current elimination-scan workflow: the loop, one turn stage-by-stage, recommendation timing, and a round-by-round table per scenario. |
 | `examples.pdf` | Two annotated agent<->simulator transcripts (one hit, one miss). |
 
@@ -188,9 +325,9 @@ with Change 3.
 |---|---|---|
 | `a13d8b5` | Elinengu | `Customer_Simulator_Explainer.pdf` |
 | `80bd4f8` | Elinengu | `tools/observe.py`, `tests/test_observe.py` — session observer / monitor |
-| `0f085ec` | Elinengu | `docs/intent_override_retrieval.{md,pdf}` |
-| `01ffdcb` | Elinengu | `docs/reranking_explained.{md,pdf}` |
-| (this change) | Elinengu | `docs/category_tail_match.{md,pdf}` — the last public-set miss, and the no-overfit evidence |
+| `0f085ec` | Elinengu | `docs/team/intent_override_retrieval.{md,pdf}` |
+| `01ffdcb` | Elinengu | `docs/team/reranking_explained.{md,pdf}` |
+| (this change) | Elinengu | `docs/team/category_tail_match.{md,pdf}` — the last public-set miss, and the no-overfit evidence |
 
 ---
 
@@ -211,5 +348,9 @@ with Change 3.
 
 ## Not touched (organizer-owned)
 
-`evaluator/local_evaluator.py`, `data/catalog.jsonl`, `data/public_set.jsonl`,
-`docs/agent_api_contract.json`, `docs/evaluation_config.json`.
+`evaluator/local_evaluator.py`, `data/catalog.jsonl`, `data/public_set.jsonl`, and the
+five frozen files at the root of `docs/`: `agent_api_contract.json`,
+`baseline_results.json`, `competition_specification.md`, `evaluation_config.json`,
+`submission_rules.md`.
+
+Everything under `docs/team/` is ours — see `docs/README.md` for the split.

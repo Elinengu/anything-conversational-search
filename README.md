@@ -80,6 +80,10 @@ customer turn
 | `tools/observe.py` | — | Session tracer: annotated transcripts and failure diagnosis |
 | `tools/build_stoplist.py` | S1 | Learns `src/stoplist.py` (metadata boilerplate) from the catalog |
 
+See [agent_changes.md](agent_changes.md) for the running log of every change by author,
+with before/after numbers. New entries are added with the `record-change` skill in
+`.claude/skills/`, which carries the measurement rules the numbers depend on.
+
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the data flow, the boundaries between
 stages, and the failure behaviour at each one. See
 [IMPLEMENTATION.md](IMPLEMENTATION.md) for a full stage-by-stage account of what
@@ -294,4 +298,6 @@ zero in that environment is worth less than one that scores `0.8592` everywhere.
 
 Catalog and sessions derive from Amazon Reviews 2023 by McAuley Lab, UCSD. See
 [DATA_ATTRIBUTION.md](DATA_ATTRIBUTION.md) before using or redistributing the data.
-The evaluator, `data/`, and `docs/` are organizer-owned and unmodified.
+The evaluator, `data/`, and the five frozen files at the root of `docs/` are
+organizer-owned and unmodified. Documents the team wrote live in
+[`docs/team/`](docs/team/); [`docs/README.md`](docs/README.md) explains the split.

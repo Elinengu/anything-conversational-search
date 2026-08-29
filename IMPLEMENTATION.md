@@ -849,22 +849,46 @@ The same evidence, applied to a shortlist the terms route had already filled cor
 gain. **Precision-oriented signals belong in ranking; recall-oriented ones belong in retrieval.**
 This is the concrete example promised in §2.
 
+**Later addition — matching the category *tail*.** The opening message names the target's
+coarse category, and the evaluator builds that from the two most specific levels of the target's
+category path (`coarse_category`, `evaluator/local_evaluator.py:126`): a target filed under
+`Novelty > Women` produces *"I'm looking for Novelty Women"*.
+
+Rewarding candidates that share *ancestors* with the opening cannot use this. Consider two
+candidates when the customer says "Novelty Women":
+
+```
+target      ... > Novelty > Women                              tail = "Novelty Women"    named
+candidate   ... > Novelty > Women > Tops & Tees > T-Shirts     tail = "Tops & Tees T-Shirts"  not named
+```
+
+The candidate shares *every* ancestor the target has, so ancestor overlap scores it just as
+highly — yet its own two most specific levels were never mentioned. Scoring the tail separates
+them: award a point for each of the candidate's two deepest category levels whose words all
+appear in the opening. Matching is by token containment rather than by parsing the opening's
+sentence pattern, so a paraphrased private-set opening still works.
+
+In the last remaining public-set miss (`public_0020`) this cut a **159-way tie** down to the few
+candidates on the right leaf. It is worth **+0.0058** on the public set and **+0.0053** on the
+adversarial set, entirely through better ordering — hit rate does not move on either set, which
+is exactly what a reranking signal should look like (`RerankConfig.tail_weight = 0.8`).
+
 #### Measured effect
 
-**0.7799 → 0.8543.** The single largest gain after dialog state.
+**0.7799 → 0.8543** for verbatim span coverage — the single largest gain after dialog state.
+The signals added since (facet agreement, category agreement, and the category tail match) are
+recorded per change in `agent_changes.md`.
 
 #### Ideas for this stage
 
-- **Facet agreement — the clearest unused signal in the repo.** `FacetStore` is constructed at
-  `starter/agent.py:75`, and `src/facets.py` extracts material, colour, size, brand, price band
-  and category for every product — but **no ranking signal reads any of it**. The shipped
-  `FixedPolicy` doesn't use facets either, so the extractor currently does no work in the shipped
-  configuration. Adding "candidate's material matches what the customer said" to the score is a
-  small change against code that already exists, and it targets MRR, which carries 30%.
-- **Category anchoring.** A traced failure makes the case: for a target belt, the customer had
-  disclosed only `"buckle closure"` and `"100 leather"` — both generic — and the target sat at
-  **rank 15** behind a dozen other leather belts. Boosting candidates whose category matches the
-  opening message's stated category is the most direct attack on that failure mode.
+- ~~**Facet agreement — the clearest unused signal in the repo.**~~ **Done.** `src/facets.py`
+  was extracting material, colour, size, brand and price band for every product while no ranking
+  signal read any of it. It now feeds `RerankConfig.facet_weight` (PR #3).
+- ~~**Category anchoring.**~~ **Done, twice.** The motivating failure was a target belt whose
+  customer had disclosed only `"buckle closure"` and `"100 leather"` — both generic — leaving the
+  target at **rank 15** behind a dozen other leather belts. This is now covered by
+  `category_weight` (PR #4) and, more sharply, by the category tail match described above.
+  Together they closed the last public-set miss.
 - **Learn the signal weights.** `span_weight`, `retrieval_weight`, `popularity_weight` and
   `length_bonus` were all set by hand. With ~176 known-correct sessions to learn from, even simple
   logistic regression over these features would likely beat hand-tuning — and stays fully offline.
@@ -1161,7 +1185,7 @@ catalog itself. Same benefit, no download, no rule risk. It appears in §10.
 | `ARCHITECTURE.md` | — | Data-flow diagram and stage boundaries |
 | `README.md` | — | Results and decision rationale |
 
-**Never modify** `evaluator/`, `data/`, or `docs/` — they are organizer-owned and scoring is
+**Never modify** `evaluator/`, `data/`, and the five frozen files at the root of `docs/` (`competition_specification.md`, `agent_api_contract.json`, `evaluation_config.json`, `baseline_results.json`, `submission_rules.md`) — they are organizer-owned and scoring is
 invalid if they change.
 
 ---
