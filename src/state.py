@@ -16,7 +16,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from src.text import constraint_spans, pair_spans, terms
+from src.text import constraint_spans, pair_spans
 
 
 # Cue-based, not template matching: the private evaluation set may paraphrase the
@@ -119,9 +119,6 @@ class DialogState:
         return " ".join(
             u.text for u in self.utterances if not u.declined and u.weight >= 1.0
         ) or self.full_text()
-
-    def query_terms(self) -> list[str]:
-        return terms(self.full_text(), drop_boilerplate=True)
 
     def query_spans(self) -> list[str]:
         """Verbatim constraint fragments, newest first.

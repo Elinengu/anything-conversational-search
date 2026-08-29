@@ -116,6 +116,17 @@ def build_configs(catalog: str) -> dict[str, AgentConfig]:
         "pair00": AgentConfig(rerank=RerankConfig(pair_weight=0.0)),
         "pair08": AgentConfig(rerank=RerankConfig(pair_weight=0.8)),
         "pair15": AgentConfig(rerank=RerankConfig(pair_weight=1.5)),
+        # Slate-size ramp: how many candidates the *first* slate reveals before
+        # widening to 10. Narrowing it defers commitment by a turn, which buys
+        # the rank the next disclosed constraint earns - the evaluator freezes
+        # MRR at the position the target held when it was first shown.
+        # ramp_flat is the pre-ramp floor; 3/4/5 bracket the plateau; ramp55
+        # holds narrow for a second turn and regresses (see agent_changes.md).
+        "ramp_flat": AgentConfig(list_size_ramp=(10,)),
+        "ramp3": AgentConfig(list_size_ramp=(3, 10)),
+        "ramp4": AgentConfig(list_size_ramp=(4, 10)),
+        "ramp5": AgentConfig(list_size_ramp=(5, 10)),
+        "ramp55": AgentConfig(list_size_ramp=(5, 5, 10)),
     }
 
 

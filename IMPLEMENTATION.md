@@ -463,8 +463,10 @@ mean, 19.8ms at the 95th percentile**.
   `tests/test_stoplist.py` for the invariants that keep a future regeneration honest.
 - **Persist the index.** 4.1s of startup could become near-zero by writing the FTS5 index to a
   file instead of `:memory:`. Only worth it if startup time is ever judged.
-- **Dead code.** `search_phrases()` (`src/index.py:119`) has had no caller since the phrase route
-  was removed in §6. It should go.
+- ~~**Dead code.** `search_phrases()` (`src/index.py:119`) has had no caller since the phrase route
+  was removed in §6. It should go.~~ **Done** — deleted, along with
+  `DialogState.query_terms()` (`src/state.py`), which also had no caller. Both deletions verified
+  score-identical: public 0.915887, hard 0.794375, 57/57 tests.
 
 ---
 
@@ -606,21 +608,29 @@ plus the decision to ask a question at all.
 
 #### Ideas for this stage
 
-- **Tune the override weight.** `PRE_OVERRIDE_WEIGHT = 0.35` was chosen by judgement and **never
-  swept**. Intent override is the weakest scenario in the final results (0.867 hit rate against
-  0.94 overall, MTTC 4.60 against 3.41), so this constant sits directly on the largest remaining
-  weakness. Sweeping `0.0` (true erasure) through `1.0` (no override handling) via the harness is
-  a small experiment with a real chance of paying.
-- **Per-constraint provenance, not per-turn.** Weight currently applies to a whole utterance. A
-  turn that contains both a reversal *and* new information gets uniformly discounted. Tracking
-  weight per extracted constraint span would be finer-grained and better matches what "slot"
-  rewriting means in the brief.
-- **Detect *partial* overrides.** `OVERRIDE_CUES` treats any reversal as global. A customer
-  saying "actually, not in black" is revising one facet, not the whole request. Pairing the
-  reversal cue with the facet it mentions would let the agent revise a single slot.
-- **Contradiction detection.** Nothing currently notices if a customer states two incompatible
-  constraints. Detecting that and asking which one wins is both a real product behaviour and a
-  natural clarification trigger.
+**All four override ideas below were investigated together and closed as not worth pursuing.**
+The reason is one measured fact: `behavior_for()` draws both `old_value` and `new_value` from the
+*same target product's* intent card, and across all 46 override sessions in the public and hard
+sets, **not one replaces an exclusive facet value with a different one** — 25/30 public overrides
+are cross-slot (`"Buckle closure"` → `"leather"`), 4/30 are `feature → feature`
+(`"Stainless Steel Band"` → `"Water Resistant"`, both true of the target), and the single
+`material → material` case repeats the same value. The override is an *emphasis shift*, not a
+retraction. Full measurements in `docs/team/rerank_signals.md` §6-§8.
+
+- ~~**Tune the override weight.**~~ **Closed.** `PRE_OVERRIDE_WEIGHT = 0.35` is inert *and* has
+  nothing to express: there is no discarded constraint to down-weight, so no value of the
+  constant is more correct than another.
+- ~~**Per-constraint provenance, not per-turn.**~~ **Closed.** Built as a four-variant ablation
+  over the conflict-scoring path (turn-1 exclusion × full-vs-focused history); every variant
+  scored flat or worse than the shipped agent. Provenance is real — `focused_text()` in the
+  conflict path turns out to be nothing but a turn-1 filter — but acting on it more precisely
+  loses score, because the turn-1 category framing is a genuine constraint.
+- ~~**Detect *partial* overrides.**~~ **Closed.** A partial override is the *only* kind this
+  simulator produces, and the correct handling of it is to add the new constraint without
+  touching the old one — which is already what the agent does.
+- ~~**Contradiction detection.**~~ **Closed for this evaluator.** `customer_reply()` only ever
+  *adds* constraints, all drawn from one target's card, so the customer can never state two
+  incompatible ones. Still a real product behaviour; not a scoring lever here.
 
 ---
 
@@ -956,9 +966,52 @@ buy noise. Mid-plateau is the defensible choice — the same reasoning applies t
 `src/policy.py`, whose dev results (`0.8530` at 5.0, `0.8651` at 8.0, `0.8634` at 12.0) are one
 plateau.
 
+**Narrow the first slate.** `list_size_ramp` says how many candidates each turn reveals; the last
+entry applies to every later turn. It shipped flat at `(10,)` for a long time, and is now `(4, 10)`
+— four candidates on turn 3, ten from turn 4.
+
+Showing *fewer* products scores better, which sounds backwards until you line up three facts about
+the evaluator. The session ends the instant the target appears in a shown list. The rank it held
+at that instant becomes the reciprocal rank, permanently. And a list that misses costs nothing but
+a turn.
+
+So every list is a bet. Reveal ten on turn 3 and you maximise the chance of converting *now* — at
+whatever rank the target happens to hold. If it is sitting at position 7, you have just banked
+`RR = 1/7 = 0.14` and the session is over. Reveal four, and that same target stays hidden; you
+spend a turn, the customer discloses another constraint, the reranker re-scores with it, and the
+target typically surfaces near the top. Now you bank `1/1` or `1/2`.
+
+The elimination scan is what makes this safe. Products already shown are excluded from later
+lists, so the six held back on turn 3 are simply the top of the survivor list on turn 4 — nothing
+is skipped, the same walk is just taken in smaller steps.
+
+| First slate | dev | holdout | generated | hard |
+|---|---|---|---|---|
+| 10 (flat) | 0.9233 | 0.9048 | 0.9181 | 0.7944 |
+| 3 | 0.9254 | **0.9146** | **0.9212** | 0.7968 |
+| **4** | 0.9268 | 0.9096 | 0.9197 | 0.7981 |
+| 5 | **0.9295** | 0.9100 | 0.9210 | **0.8001** |
+
+Three, four and five all beat the flat ramp on all four sets — that is a plateau, so `4` ships as
+its midpoint rather than `5`, which happens to top two columns. The decision rule was fixed before
+`4` was measured, which is the point: choosing the winner after seeing the table is how you buy
+noise, exactly as with the `0.20` margin above.
+
+Narrowing a *second* turn is not more of the same good thing. `(5, 5, 10)` scores
+`0.9272 / 0.9044 / 0.9187 / 0.7934`, dropping holdout and hard below the flat floor. Each session
+holds four constraints and the customer discloses at most two per turn, so by turn 4-5 no further
+evidence is coming and waiting longer spends turns without buying rank.
+
 #### Measured effect
 
-`0.8543 → 0.8592`, with MTTC improving from 3.58 to 3.41.
+Confidence gating: `0.8543 → 0.8592`, with MTTC improving from 3.58 to 3.41.
+
+Narrow first slate: public `0.9159 → 0.9199`, adversarial `0.7944 → 0.7981`, dev `0.9233 → 0.9268`,
+holdout `0.9048 → 0.9096`. The whole gain is MRR bought with MTTC at the ~13x odds §3 prices — on
+public, MRR `0.8513 → 0.8690` (×0.30 = +0.0053) against MTTC `2.975 → 3.040` (efficiency −0.0065,
+×0.20 = −0.0013), netting the +0.0040 observed. Hit@10 does not move on public (1.000) or hard
+(0.885): this buys rank, not coverage. One cost worth naming — on the 200-session generated set
+Hit@10 slips `0.995 → 0.990`, a single session that now runs out of turns.
 
 #### Ideas for this stage
 
@@ -971,13 +1024,23 @@ plateau.
   onward. Detecting stagnation — the shortlist stopped changing, the customer stopped disclosing —
   and switching to a different strategy would attack the 6% of sessions that currently miss
   entirely.
-- **Diversify a low-confidence list.** When confidence is low, the top 10 are often near-identical
-  products. Deliberately spreading the list across distinct categories or brands would raise the
-  chance of catching the target, at some cost to rank. Given that a miss→hit is worth 2.6x a rank
-  improvement (§3), that trade may well be positive — and it is untested.
-- **Vary list length with confidence.** `list_size_ramp` exists in `AgentConfig` but ships flat at
-  10. Since wrong recommendations are free (consequence #2), there is likely no benefit to
-  showing fewer — but the mechanism is there and unexercised.
+- **~~Diversify a low-confidence list.~~ Tested, and it does not work.** This entry used to argue
+  that spreading the list across distinct categories or brands would raise the chance of catching
+  the target, on the grounds that a miss→hit is worth 2.6x a rank improvement. **That premise is
+  stale:** it was written when Hit@10 was `0.940`. Hit@10 on the public set is now `1.000`, so
+  there are no misses left to convert and the trade has nothing to buy. An MMR diversity term was
+  implemented and measured anyway: across 260 public slates it brought the target *into* a slate
+  zero times and pushed it *out* 21 times, and Hit@10 moved on no dataset at any setting. The
+  reason is structural — the customer's disclosed constraints are copied verbatim from the target's
+  own metadata, so the crowded top of the list is a cluster formed *around the target*, which sits
+  at its centre rather than being an outlier crowded out of it. `docs/team/ideas.md` Idea 3 records
+  the full measurement.
+- **~~Vary list length with confidence.~~ Done — see "Narrow the first slate" above.** This entry
+  used to guess that "there is likely no benefit to showing fewer". The opposite is true, and for a
+  reason the guess missed: showing fewer is not about precision, it is about *when you commit*.
+  `list_size_ramp` now ships at `(4, 10)`, worth `+0.0040` on the public set. The remaining
+  unexercised part of the idea is making the width depend on measured confidence rather than on the
+  turn number — narrow while `_confident()` is false, ten once it is true.
 
 ---
 
@@ -1049,6 +1112,35 @@ not repeat the experiment.
 | **Weighting phrases by rarity within the shortlist** | +0.0002 dev, 0.0000 holdout | Deleted entirely, not left as an off-by-default flag. |
 | **`InfoGainPolicy` as the default** | dev 0.8369 vs 0.8738; holdout 0.8141 vs 0.8374 | Kept in the repo and documented, but not the default. |
 | **Dense-vector retrieval** | not built | Cancelled after measuring retrieval recall at 80/80 — the bottleneck was ranking, and it would have broken the no-network guarantee. |
+| **Turn-1 exclusion from facet extraction** | public 0.9159 → 0.9150, holdout 0.9048 → 0.9035 | Rejected. Removes every false conflict against the target (8 public, 5 hard) and still loses — the opening's category words are a real constraint, and the impostors they demote outweigh the targets they cost. |
+| **Multi-valued facet extraction** | agreement −0.0006 public / −0.0023 hard; conflict-only 0.0000 | Rejected. The agreement half dilutes the signal by matching more candidates; the conflict half is exactly neutral and was not shipped, because a code path no measurement justifies does not earn its place. |
+| **Explicit constraint ledger (S3)** | not built | Cancelled after specifying and measuring all six operations — see below. |
+
+**The constraint ledger, and why measuring a design beats arguing about it.** A typed
+`Constraint` ledger (slot, value, turn, polarity, status) with CARRY / UPDATE / ADD / DELETE /
+DONTCARE / NEGATE operations was proposed as a replacement for replaying raw utterances. Rather
+than build it and see, each operation was checked against what the evaluator actually does. Four
+of the six could not pay: `CARRY`/`ADD` is what `full_text()` already does, `DONTCARE` is already
+implemented as `Utterance.declined` plus `dead_attributes`, and `DELETE`/`NEGATE` cannot fire
+because `customer_reply()` only ever *adds* constraints.
+
+The sixth, `UPDATE`, is the interesting one, and it failed for a reason worth writing down.
+`behavior_for()` draws both the discarded and the new preference from the **same target
+product's** intent card. Across all 46 override sessions in the public and hard sets, **not one
+replaces an exclusive facet value with a different one**: 25 of 30 public overrides are
+cross-slot (`"Buckle closure"` → `"leather"` — a material is added, the buckle is still true),
+4 are `feature → feature` (`"Stainless Steel Band"` → `"Water Resistant"`, both true), and the
+single `material → material` case repeats the same value. What reads as "ignore my earlier
+preference" is an *emphasis shift*, not a retraction. There is nothing to supersede.
+
+Chasing this also corrected a wrong explanation in the shipped code. `src/rerank.py` judged
+conflicts against `focused_text()` and attributed that to stale post-override values punishing the
+target. Measured: single-value extraction over full history picks a contradicted value in **0 of
+30** sessions. The guard's real function is dropping turn 1, whose `coarse_category()` framing
+("I'm looking for Pants Casual") extracts as a `style` constraint. Two variants — exclude turn 1
+keeping `focused_text()`, and exclude turn 1 using full history — scored **bit-identically on all
+four splits**, which is the proof. The guard stays; only its comment changed. Full measurements in
+`docs/team/rerank_signals.md` §6-§8.
 
 **A bug worth learning from.** The first version of `InfoGainPolicy` opened every conversation by
 asking the customer's preferred *brand*. The cause was using raw entropy: brand has thousands of

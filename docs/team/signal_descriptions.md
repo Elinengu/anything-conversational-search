@@ -216,7 +216,8 @@ the same session as each other.
 
 **Input** `authoritative_facets = extract_query_facets(focused_text())` —
 **post-override turns only** (identical to `full_text()` until an override
-fires).
+fires). What this buys in practice is *turn-1 exclusion on override sessions*,
+not staleness protection — see **Weight** below.
 
 **Computation** `_facet_conflicts()`: for each stated `(key, value)`:
 1. skip if `key not in product_facets` — silence is not disagreement;
@@ -235,9 +236,17 @@ well as a grey one.
 **Weight** Swept `conflict00 / 04 / 08`. "dev 0.9224 at 0.4 and 0.9226 at 0.8 —
 a plateau, and a penalty term gets the smallest weight on it." Also a deliberate
 ceiling: at 0.4 one conflict cannot overturn a genuine span lead (each span
-match is worth >= 1.12). Had a bug — judged against `full_text()` it punished
-override targets for obeying the reversal (`generic_override` MRR
-0.673 -> 0.626); the `focused_text()` fix restored it and is unit-tested.
+match is worth >= 1.12). Input choice: judged against `full_text()` it costs
+`generic_override` MRR 0.673 -> 0.626; `focused_text()` restores it and is
+unit-tested. The original explanation — stale post-override values punishing
+the target — is **wrong**, and was corrected after measurement: this evaluator's
+override never retracts anything (46/46 sessions), and single-value extraction
+over full history picks a contradicted value in 0 of 30 sessions. The real
+mechanism is that `focused_text()` drops turn 1, whose `coarse_category()`
+framing extracts as a `style`/`use_case` constraint. Excluding turn 1
+everywhere is worse (public 0.9159 -> 0.9150); keeping it on override sessions
+is worse (hard 0.7944 -> 0.7920); the shipped asymmetry is the best of the
+three. Four variants in `rerank_signals.md` §6.
 
 ---
 
