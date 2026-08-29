@@ -1,10 +1,10 @@
 {
   "sample_count": 200,
-  "hit_rate_at_10": 0.99,
-  "mrr": 0.820687,
-  "mttc": 3.15,
-  "efficiency": 0.785,
-  "recommended_technical_score": 0.898206,
+  "hit_rate_at_10": 0.995,
+  "mrr": 0.813603,
+  "mttc": 3.105,
+  "efficiency": 0.7895,
+  "recommended_technical_score": 0.899481,
   "reported_token_usage": {
     "prompt_tokens": 0,
     "completion_tokens": 0,
@@ -14,25 +14,25 @@
     "boundary": {
       "sample_count": 10,
       "hit_rate_at_10": 1.0,
-      "mrr": 0.9,
-      "mttc": 4.0
+      "mrr": 0.81,
+      "mttc": 3.9
     },
     "browsing": {
       "sample_count": 80,
-      "hit_rate_at_10": 0.9875,
-      "mrr": 0.826091,
-      "mttc": 2.9125
+      "hit_rate_at_10": 1.0,
+      "mrr": 0.840972,
+      "mttc": 2.875
     },
     "buying": {
       "sample_count": 80,
       "hit_rate_at_10": 0.9875,
-      "mrr": 0.830174,
-      "mttc": 3.0
+      "mrr": 0.817049,
+      "mttc": 2.9375
     },
     "intent_override": {
       "sample_count": 30,
       "hit_rate_at_10": 1.0,
-      "mrr": 0.754537,
+      "mrr": 0.732632,
       "mttc": 3.9
     }
   },
@@ -697,7 +697,7 @@
       "sample_id": "public_0083",
       "scenario_type": "buying",
       "hit": true,
-      "first_hit_turn": 6,
+      "first_hit_turn": 5,
       "best_rank": 9,
       "reciprocal_rank": 0.1111111111111111
     },
@@ -728,10 +728,10 @@
     {
       "sample_id": "public_0087",
       "scenario_type": "browsing",
-      "hit": false,
-      "first_hit_turn": null,
-      "best_rank": null,
-      "reciprocal_rank": 0.0
+      "hit": true,
+      "first_hit_turn": 8,
+      "best_rank": 3,
+      "reciprocal_rank": 0.3333333333333333
     },
     {
       "sample_id": "public_0088",
@@ -801,9 +801,9 @@
       "sample_id": "public_0096",
       "scenario_type": "intent_override",
       "hit": true,
-      "first_hit_turn": 8,
-      "best_rank": 1,
-      "reciprocal_rank": 1.0
+      "first_hit_turn": 6,
+      "best_rank": 7,
+      "reciprocal_rank": 0.14285714285714285
     },
     {
       "sample_id": "public_0097",
@@ -1042,8 +1042,8 @@
       "scenario_type": "browsing",
       "hit": true,
       "first_hit_turn": 5,
-      "best_rank": 7,
-      "reciprocal_rank": 0.14285714285714285
+      "best_rank": 1,
+      "reciprocal_rank": 1.0
     },
     {
       "sample_id": "public_0127",
@@ -1185,15 +1185,15 @@
       "sample_id": "public_0144",
       "scenario_type": "intent_override",
       "hit": true,
-      "first_hit_turn": 6,
-      "best_rank": 5,
-      "reciprocal_rank": 0.2
+      "first_hit_turn": 7,
+      "best_rank": 10,
+      "reciprocal_rank": 0.1
     },
     {
       "sample_id": "public_0145",
       "scenario_type": "buying",
       "hit": true,
-      "first_hit_turn": 7,
+      "first_hit_turn": 5,
       "best_rank": 9,
       "reciprocal_rank": 0.1111111111111111
     },
@@ -1321,9 +1321,9 @@
       "sample_id": "public_0161",
       "scenario_type": "buying",
       "hit": true,
-      "first_hit_turn": 9,
-      "best_rank": 2,
-      "reciprocal_rank": 0.5
+      "first_hit_turn": 7,
+      "best_rank": 4,
+      "reciprocal_rank": 0.25
     },
     {
       "sample_id": "public_0162",
@@ -1473,9 +1473,9 @@
       "sample_id": "public_0180",
       "scenario_type": "boundary",
       "hit": true,
-      "first_hit_turn": 4,
-      "best_rank": 1,
-      "reciprocal_rank": 1.0
+      "first_hit_turn": 3,
+      "best_rank": 10,
+      "reciprocal_rank": 0.1
     },
     {
       "sample_id": "public_0181",
@@ -1586,8 +1586,8 @@
       "scenario_type": "buying",
       "hit": true,
       "first_hit_turn": 4,
-      "best_rank": 1,
-      "reciprocal_rank": 1.0
+      "best_rank": 5,
+      "reciprocal_rank": 0.2
     },
     {
       "sample_id": "public_0195",
@@ -1617,9 +1617,9 @@
       "sample_id": "public_0198",
       "scenario_type": "intent_override",
       "hit": true,
-      "first_hit_turn": 5,
-      "best_rank": 5,
-      "reciprocal_rank": 0.2
+      "first_hit_turn": 6,
+      "best_rank": 2,
+      "reciprocal_rank": 0.5
     },
     {
       "sample_id": "public_0199",

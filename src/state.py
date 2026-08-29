@@ -45,6 +45,11 @@ class Utterance:
     turn: int
     text: str
     weight: float = 1.0
+    #: The customer declined to answer ("I don't have a preference for X"). Such
+    #: replies carry no product signal but their words ("feature", "material",
+    #: "colour", ...) would otherwise leak into the bag-of-words query and the
+    #: span matcher, so they are held out of every retrieval view.
+    declined: bool = False
 
 
 @dataclass
@@ -66,15 +71,17 @@ class DialogState:
         message = (text or "").strip()
         if turn == 1:
             self.opening = message
+        declined = bool(message and NO_PREFERENCE_CUES.search(message))
         if message and OVERRIDE_CUES.search(message) and self.override_turn is None:
             self.apply_override(turn)
-        if message and NO_PREFERENCE_CUES.search(message) and self.asked:
+        if declined and self.asked:
             self.dead_attributes.add(self.asked[-1])
         known = set(self.query_spans())
-        self.utterances.append(Utterance(turn=turn, text=message))
+        self.utterances.append(Utterance(turn=turn, text=message, declined=declined))
         # A turn is "productive" when it disclosed a constraint we had not seen.
-        # The policy uses this to judge whether broad questions are exhausted.
-        produced = turn > 1 and any(
+        # The policy uses this to judge whether broad questions are exhausted; a
+        # decline never counts.
+        produced = not declined and turn > 1 and any(
             span not in known for span in constraint_spans(message)
         )
         self.last_turn_productive = produced
@@ -101,8 +108,8 @@ class DialogState:
     # ---- views for retrieval --------------------------------------------------
 
     def full_text(self) -> str:
-        """Everything the customer has said - maximum recall."""
-        return " ".join(utterance.text for utterance in self.utterances)
+        """Everything informative the customer has said - maximum recall."""
+        return " ".join(u.text for u in self.utterances if not u.declined)
 
     def focused_text(self) -> str:
         """Only the currently authoritative turns - maximum precision.
@@ -110,7 +117,7 @@ class DialogState:
         Identical to ``full_text`` until an override fires.
         """
         return " ".join(
-            utterance.text for utterance in self.utterances if utterance.weight >= 1.0
+            u.text for u in self.utterances if not u.declined and u.weight >= 1.0
         ) or self.full_text()
 
     def query_terms(self) -> list[str]:
@@ -126,7 +133,7 @@ class DialogState:
         spans: list[str] = []
         seen: set[str] = set()
         for utterance in reversed(self.utterances):
-            if utterance.turn == 1:
+            if utterance.turn == 1 or utterance.declined:
                 continue
             for span in constraint_spans(utterance.text):
                 if span not in seen:
