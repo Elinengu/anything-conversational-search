@@ -91,6 +91,22 @@ def build_configs(catalog: str) -> dict[str, AgentConfig]:
             policy=InfoGainPolicy(facets, allow_broad=False),
             first_recommend_turn=3,
         ),
+        # Plain: same top 10 every turn from turn 3 (no scan) - the pre-scan floor.
+        "plain": AgentConfig(
+            policy=FixedPolicy(), first_recommend_turn=3, elimination_scan=False
+        ),
+        # Elimination scan: drop everything already shown, return the top of the
+        # re-ranked survivors. Sweep the turn at which the scan starts emitting.
+        "elim1": AgentConfig(policy=FixedPolicy(), first_recommend_turn=1),
+        "elim2": AgentConfig(policy=FixedPolicy(), first_recommend_turn=2),
+        "elim3": AgentConfig(policy=FixedPolicy(), first_recommend_turn=3),
+        # Elimination scan, but hold every list until disclosure has stalled.
+        "elim_hold1": AgentConfig(
+            policy=FixedPolicy(), first_recommend_turn=1, hold_until_stalled=True
+        ),
+        "elim_hold2": AgentConfig(
+            policy=FixedPolicy(), first_recommend_turn=2, hold_until_stalled=True
+        ),
     }
 
 

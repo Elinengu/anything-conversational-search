@@ -34,11 +34,12 @@ Two properties that matter:
 returns essentially the same order - each score is independent of which other
 items are in the list. Re-running rerank buys nothing on its own.
 
-## Idea 1 - windowed recommendations (IMPLEMENTED, measured)
+## Idea 1 - windowed recommendations (measured; superseded by 1b on this branch)
 
 Instead of showing the same top 10 every turn 3-10, walk a frozen ranking in
 windows: turn 3 -> ranks 1-10, turn 4 -> 11-20, turn 5 -> 21-30, ...
-(`AgentConfig.scan_windows`, default on; `_shortlist` in `starter/agent.py`.)
+(`AgentConfig.scan_windows` on branch `kwongweng_rerank_once`; replaced by the
+elimination scan below on `kwongweng_elimination_scan`.)
 
 - The ranking is frozen, then sliced. Freezing avoids a gap bug: if the live
   pool reorders between turns, a target can fall between a window that was
@@ -68,6 +69,49 @@ Per-scenario (public): browsing hit 0.963 -> 1.000, buying 0.938 -> 0.988,
 intent_override 0.867 -> 0.967, boundary hit 1.000 held (its MRR slipped
 0.846 -> 0.756 - the two late-converting boundary sessions now hit a couple of
 ranks lower; ~0 net score impact). 29/29 tests pass, regression floor clears.
+
+## Idea 1b - elimination scan (branch `kwongweng_elimination_scan`)
+
+A product shown on an earlier turn and *not* hit on is a confirmed non-target
+(the session would have ended). So each turn: drop everything already shown,
+return the top of the re-ranked *survivors*. `rerank()` runs every turn, so this
+reflects new constraints automatically - no frozen pool, cursor or re-snapshot
+signature. `AgentConfig.elimination_scan` (default on), `first_recommend_turn`
+is the start-turn knob, `hold_until_stalled` holds every list until a turn adds
+no new real constraint.
+
+One correctness exception kept: a list shown *before* an intent override confirms
+nothing (the evaluator ignores hits until the override lands), so `_shown` is
+cleared on override detection and the scan restarts on the post-override ranking.
+
+### Sweep (`tools/sweep.py`, FixedPolicy, span rerank)
+
+| config | dev score | holdout score | note |
+|---|---|---|---|
+| plain (same top 10) | 0.8738 | 0.8374 | pre-scan floor |
+| elim start turn 1 | 0.8691 | 0.8543 | early hits freeze poor MRR (0.63-0.70) |
+| elim start turn 2 | 0.8711 | 0.8648 | same |
+| **elim start turn 3** | **0.8967** | **0.8869** | **ships** - hit@10 0.98/1.00, MRR 0.82/0.78 |
+| elim start 2 + hold_until_stalled | 0.8802 | 0.8652 | best override MRR but MTTC ~4.1 kills efficiency |
+
+### elim start-turn-3 vs windowed (full sets)
+
+| set | metric | windowed (1a) | elimination (1b) |
+|---|---|---|---|
+| public (200) | score | 0.8907 | **0.8928** |
+| public | MRR | 0.7942 | **0.8041** |
+| public | boundary MRR | 0.756 | **0.883** (windowing's regression, fixed) |
+| public | intent_override | 0.967 / MRR 0.725 | 1.000 / MRR 0.736 |
+| adversarial (96) | score | **0.764** | 0.725 |
+| adversarial | hit@10 | **0.854** | 0.802 |
+
+Elimination wins the real metric (public + holdout) and is simpler, but loses
+~2-3 sessions on the adversarial stress set: when the disclosed constraints are
+all generic, the "no preference" junk spans make the ranking noisy enough that a
+borderline target (~rank 12-20) is pushed away before the shrinking survivor set
+reaches it - the frozen ranking in 1a can't do that. Most adversarial misses are
+just genuinely-too-deep targets (survivor rank 100-250 or ejected from the pool);
+both variants miss those. 29/29 tests pass.
 
 ## Idea 2 - richer rerank scoring
 

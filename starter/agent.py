@@ -60,12 +60,17 @@ class AgentConfig:
     earliest_recommend_turn: int = 2
     #: Route the customer-facing phrasing by detected intent.
     use_router: bool = True
-    # Once information stops arriving (~turn 3) the ranking no longer changes, so
-    # re-showing the same top 10 wastes the remaining turns. Instead, freeze the
-    # ranking on the first list shown and walk it in windows: turn 3 -> ranks
-    # 1-10, turn 4 -> 11-20, turn 5 -> 21-30, ... A miss only costs a turn, and
-    # the session ends on the first hit, so scanning deeper is close to free.
-    scan_windows: bool = True
+    # Elimination scan: any product shown and not hit on is a confirmed
+    # non-target (the session ends on a hit), so each turn we drop everything
+    # already shown and return the top 10 of the re-ranked survivors. This walks
+    # up to 100 distinct candidates over 10 turns, re-ranking with all current
+    # information every turn, with no frozen-pool bookkeeping. False = the plain
+    # "same top 10 every turn" behaviour.
+    elimination_scan: bool = True
+    # Hold every recommendation until disclosure has stalled (a turn that adds no
+    # new real constraint). Off by default; the scan already tolerates early,
+    # under-informed lists because a wrong list only costs a turn.
+    hold_until_stalled: bool = False
 
 
 class Agent:
@@ -85,19 +90,22 @@ class Agent:
             # ties on dev; see README "Clarification policy" for the measurements.
             self.config.policy = FixedPolicy()
         self._states: dict[str, DialogState] = {}
-        # Per-session state for the windowed shortlist (see AgentConfig.scan_windows).
-        self._scan_pool: dict[str, list[str]] = {}
-        self._scan_cursor: dict[str, int] = {}
-        self._scan_frozen_sig: dict[str, tuple[int, int]] = {}
+        # parent_asins already shown this session - excluded from later turns
+        # (see AgentConfig.elimination_scan).
+        self._shown: dict[str, set[str]] = {}
+        # override turn last accounted for, per session (see _shortlist).
+        self._shown_override: dict[str, int] = {}
+        # last-seen real-disclosure count per session (AgentConfig.hold_until_stalled).
+        self._disclosed_count: dict[str, int] = {}
 
     def reset(self, session_id: str, user_profile: dict) -> None:
         self._states[session_id] = DialogState(
             session_id=session_id,
             profile=user_profile if isinstance(user_profile, dict) else {},
         )
-        self._scan_pool.pop(session_id, None)
-        self._scan_cursor.pop(session_id, None)
-        self._scan_frozen_sig.pop(session_id, None)
+        self._shown.pop(session_id, None)
+        self._shown_override.pop(session_id, None)
+        self._disclosed_count.pop(session_id, None)
 
     def respond(self, session_id: str, user_message: str, turn: int, top_k: int) -> dict:
         try:
@@ -142,42 +150,42 @@ class Agent:
     ) -> list[dict]:
         top_limit = top_k if isinstance(top_k, int) and top_k > 0 else 10
         first_turn = self.config.first_recommend_turn
+        sid = state.session_id
 
-        if turn < first_turn:
-            # Early, high-confidence emission always shows the current best slice.
-            if self._confident(candidates, turn):
-                return [{"parent_asin": asin} for asin, _score in candidates[:top_limit]]
+        if turn < first_turn and not self._confident(candidates, turn):
             return []
+        if self.config.hold_until_stalled and turn < 10:
+            # Hold every list until a turn adds no new real constraint (the "no
+            # preference" replies parse into spans too, so count real ones only).
+            count = self._real_disclosure_count(state)
+            rising = count > self._disclosed_count.get(sid, -1)
+            self._disclosed_count[sid] = count
+            if rising:
+                return []
 
         ramp = self.config.list_size_ramp
         size = ramp[min(max(0, turn - first_turn), len(ramp) - 1)]
         limit = min(size, top_limit)
 
-        if not self.config.scan_windows:
+        if not self.config.elimination_scan:
             return [{"parent_asin": asin} for asin, _score in candidates[:limit]]
 
-        # Serve the shortlist from a frozen ranking, walked in windows (1-10, then
-        # 11-20, ...). Freezing avoids a gap: if the live pool reorders between
-        # turns a target could fall between an already-passed window and one not
-        # yet reached and never be shown. Re-snapshot (and restart the scan) each
-        # time the information state genuinely changes - a new real constraint, or
-        # an intent override taking effect (which the evaluator ignores hits
-        # before). Once it settles, the scan proceeds undisturbed.
-        sid = state.session_id
-        pool = self._scan_pool.get(sid)
-        signature = (self._real_disclosure_count(state), state.override_turn or 0)
-        if pool is None or signature != self._scan_frozen_sig.get(sid):
-            pool = self._scan_pool[sid] = [asin for asin, _score in candidates]
-            self._scan_frozen_sig[sid] = signature
-            self._scan_cursor[sid] = 0
-
-        start = self._scan_cursor.get(sid, 0)
-        window = pool[start:start + limit]
-        if window:
-            self._scan_cursor[sid] = start + limit
-            return [{"parent_asin": asin} for asin in window]
-        # Pool exhausted - fall back to re-showing the strongest slice.
-        return [{"parent_asin": asin} for asin in pool[:limit]]
+        # A product shown on an earlier turn and not hit on is a confirmed
+        # non-target (the session would have ended). Drop everything shown so far
+        # and return the top of the re-ranked survivors. rerank() runs every turn,
+        # so this reflects new constraints; and because it is always the current
+        # top of all survivors, a target that reorders downward is still a
+        # survivor and surfaces a turn later - no gap.
+        shown = self._shown.setdefault(sid, set())
+        # Exception: a list shown *before* an intent override does not confirm
+        # anything - the evaluator ignores hits until the override lands, so the
+        # target may well have been in it. Un-exclude everything on override.
+        if (state.override_turn or 0) != self._shown_override.get(sid, 0):
+            shown.clear()
+            self._shown_override[sid] = state.override_turn or 0
+        picks = [asin for asin, _score in candidates if asin not in shown][:limit]
+        shown.update(picks)
+        return [{"parent_asin": asin} for asin in picks]
 
     def _confident(self, candidates: list[tuple[str, float]], turn: int) -> bool:
         """True when the leader is far enough ahead to be worth showing early.
@@ -201,8 +209,9 @@ class Agent:
 
         The simulator's "I don't have a preference for X" replies also parse into
         a constraint span, so a plain productive-turn counter keeps rising every
-        turn and would re-freeze the scan pool forever. Those spans always contain
-        "preference for"; real product constraints do not.
+        turn. Those spans always contain "preference for"; real product
+        constraints do not. Used by ``hold_until_stalled`` to tell "new
+        information arrived" from "the customer just declined".
         """
         return sum(1 for span in state.query_spans() if "preference for" not in span)
 
