@@ -113,6 +113,63 @@ reaches it - the frozen ranking in 1a can't do that. Most adversarial misses are
 just genuinely-too-deep targets (survivor rank 100-250 or ejected from the pool);
 both variants miss those. 29/29 tests pass.
 
+## Idea 1c - stop the "no preference" replies polluting retrieval (branch `kwongweng_retrieval_recall`)
+
+Retrieval queries `state.full_text()` = every utterance joined. From turn 4 the
+simulator's *"I don't have an additional preference for feature / use_case /
+style / material / colour / size"* leaks `feature, style, material, colour,
+size, category` into the BM25 OR-query and the span matcher - terms that match
+huge swathes of the catalog and dilute the target.
+
+Fix: `Utterance.declined` flag, set in `observe()` when `NO_PREFERENCE_CUES`
+matches; `full_text()`, `focused_text()` and `query_spans()` skip declined
+utterances. Also `RerankConfig.depth` 200 -> 300 (rescore the whole pool, not a
+prefix).
+
+### Retrieval recall (target in the pool - the point of the change)
+
+| | public end-of-session | adversarial end-of-session |
+|---|---|---|
+| in pool (300), before | 98% | 81% |
+| in pool (300), after | **100%** | **95%** |
+| in reranked top-200, before | 97% | 78% |
+| after (depth 300) | **100%** | **95%** |
+| end-of-session pool rank p90, before -> after | 87 -> 16 | 279 -> 200 |
+
+Per adversarial bucket, pool@end: degenerate_card 56 -> 88%, homogeneous_cluster
+81 -> 100%, generic_override 75 -> 94%, cross_category 94 -> 100%. The
+within-session degradation is gone.
+
+### Score
+
+| set | before | after | delta |
+|---|---|---|---|
+| public (200) | 0.8982 | 0.8995 | +0.001 (hit 0.990 -> 0.995, MRR 0.821 -> 0.814) |
+| dev | 0.9003 | 0.9041 | +0.004 |
+| holdout | 0.8951 | 0.8925 | **-0.003** |
+| adversarial (96) | 0.725 | **0.794** | **+0.069** (hit 0.802 -> 0.885) |
+
+Recall goal achieved and a large adversarial gain, but on its own roughly flat on
+the public metric - the leaked decline terms were a weak tie-break that happened
+to favour a few already-well-ranked public targets (holdout MRR 0.80 -> 0.79).
+
+**Then merged with the teammate's facet-agreement rerank signal** (Idea 2,
+`RerankConfig.facet_weight = 0.3`, `src/rerank.py`) - which recovers that MRR and
+more. Combined:
+
+| set | main | recall only | recall + facet |
+|---|---|---|---|
+| public | 0.8982 | 0.8995 | **0.9031** |
+| public MRR | 0.821 | 0.814 | **0.825** |
+| dev | 0.9003 | 0.9041 | **0.9087** |
+| holdout | 0.8951 | 0.8925 | **0.8946** (flat) |
+| adversarial | 0.725 | 0.794 | **0.788** |
+| adversarial hit@10 | 0.802 | 0.885 | **0.885** |
+
+Now a clear win: public + dev up, holdout flat, adversarial +0.06. The depth
+change is still a no-op on public; it only helps the adversarial set. 39/39 tests
+pass.
+
 ## Idea 2 - richer rerank scoring
 
 The reranker ignores signals that are already computed:

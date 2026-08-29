@@ -36,11 +36,14 @@ class RerankConfig:
     length_bonus: float = 0.12
     retrieval_weight: float = 1.0
     popularity_weight: float = 0.02
-
+    # Candidate facets matching the customer's stated facets (material, colour, ...).
     facet_weight: float = 0.3
     category_weight: float = 0.4
 
-    depth: int = 200
+    # Rescore the whole retrieval pool (RetrievalConfig.pool_size), not a prefix -
+    # ~12% of cluster-target sessions had the target in the pool but past rank 200,
+    # where it was left in bm25 order and the span signal never applied.
+    depth: int = 300
 
 
 def _popularity(product: dict) -> float:
