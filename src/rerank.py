@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from src.index import CatalogIndex
 from src.state import DialogState
 from src.facets import extract
+from src.text import terms
 
 
 @dataclass
@@ -37,6 +38,7 @@ class RerankConfig:
     popularity_weight: float = 0.02
 
     facet_weight: float = 0.3
+    category_weight: float = 0.4
 
     depth: int = 200
 
@@ -81,6 +83,41 @@ def _facet_agreement(
     return score
 
 
+def _category_match(
+    state: DialogState,
+    product: dict,
+) -> float:
+    """
+    Category agreement between
+    opening query and candidate product.
+    """
+
+    opening_terms = set(
+        terms(state.opening, drop_boilerplate=True)
+    )
+
+    categories = {
+        str(value).lower()
+        for value in product.get("categories", [])
+    }
+
+    if not opening_terms:
+        return 0.0
+
+    score = 0.0
+
+    for category in categories:
+
+        category_tokens = set(
+            terms(category)
+        )
+
+        if opening_terms.intersection(category_tokens):
+            score += 1.0
+
+    return score
+
+
 def rerank(
     index: CatalogIndex,
     state: DialogState,
@@ -111,17 +148,20 @@ def rerank(
         for span in spans:
             if span in text:
                 coverage += 1.0 + config.length_bonus * len(span.split())
-
         facet_score = _facet_agreement(
             state.full_text(),
             product,
         )
-        
+        category_score = _category_match(
+            state,
+            product,
+        )
         total = (
             config.span_weight * coverage
             + config.retrieval_weight * (retrieval_score / top_score)
             + config.popularity_weight * _popularity(product)
             + config.facet_weight * facet_score
+            + config.category_weight * category_score
         )
         scored.append((parent_asin, total))
 
