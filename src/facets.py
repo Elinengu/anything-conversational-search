@@ -105,6 +105,37 @@ def extract(product: dict) -> dict[str, str]:
     return values
 
 
+def extract_query_facets(text: str) -> dict[str, str]:
+    """
+    Extract shopper constraints from a query.
+
+    Unlike extract(), this is designed for
+    customer utterances rather than catalog products.
+
+    Example:
+
+    "black leather belt"
+
+    ->
+    {
+        "color": "black",
+        "material": "leather"
+    }
+    """
+
+    text = (text or "").lower()
+
+    values: dict[str, str] = {}
+
+    for attribute, pattern in _PATTERNS.items():
+        match = pattern.search(text)
+
+        if match:
+            values[attribute] = match.group(1)
+
+    return values
+
+
 class FacetStore:
     """Lazily extracted, memoised facets keyed by ``parent_asin``."""
 

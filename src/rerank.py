@@ -24,7 +24,10 @@ from dataclasses import dataclass
 
 from src.index import CatalogIndex
 from src.state import DialogState
-from src.facets import extract
+from src.facets import (
+    extract,
+    extract_query_facets,
+)
 from src.text import terms
 
 
@@ -64,7 +67,7 @@ def _facet_agreement(
     Count matching facet values between
     customer constraints and product facets.
     """
-
+    '''
     customer_facets = extract(
         {
             "text": customer_text,
@@ -73,7 +76,10 @@ def _facet_agreement(
             "price": None,
         }
     )
-
+    '''
+    customer_facets = extract_query_facets(
+        customer_text
+    )
     product_facets = extract(product)
 
     score = 0.0
