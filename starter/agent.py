@@ -60,6 +60,12 @@ class AgentConfig:
     earliest_recommend_turn: int = 2
     #: Route the customer-facing phrasing by detected intent.
     use_router: bool = True
+    # Once information stops arriving (~turn 3) the ranking no longer changes, so
+    # re-showing the same top 10 wastes the remaining turns. Instead, freeze the
+    # ranking on the first list shown and walk it in windows: turn 3 -> ranks
+    # 1-10, turn 4 -> 11-20, turn 5 -> 21-30, ... A miss only costs a turn, and
+    # the session ends on the first hit, so scanning deeper is close to free.
+    scan_windows: bool = True
 
 
 class Agent:
@@ -79,12 +85,19 @@ class Agent:
             # ties on dev; see README "Clarification policy" for the measurements.
             self.config.policy = FixedPolicy()
         self._states: dict[str, DialogState] = {}
+        # Per-session state for the windowed shortlist (see AgentConfig.scan_windows).
+        self._scan_pool: dict[str, list[str]] = {}
+        self._scan_cursor: dict[str, int] = {}
+        self._scan_frozen_sig: dict[str, tuple[int, int]] = {}
 
     def reset(self, session_id: str, user_profile: dict) -> None:
         self._states[session_id] = DialogState(
             session_id=session_id,
             profile=user_profile if isinstance(user_profile, dict) else {},
         )
+        self._scan_pool.pop(session_id, None)
+        self._scan_cursor.pop(session_id, None)
+        self._scan_frozen_sig.pop(session_id, None)
 
     def respond(self, session_id: str, user_message: str, turn: int, top_k: int) -> dict:
         try:
@@ -114,21 +127,57 @@ class Agent:
             attribute = "other"
         state.record_ask(attribute)
 
-        recommendations = self._shortlist(candidates, turn, top_k)
+        recommendations = self._shortlist(state, candidates, turn, top_k)
         question = self.config.policy.question(attribute)
         if route is not None:
             question = route.tone + question[0].lower() + question[1:]
         return self._envelope(question, attribute, recommendations)
 
-    def _shortlist(self, candidates: list[tuple[str, float]], turn: int, top_k: int) -> list[dict]:
+    def _shortlist(
+        self,
+        state: DialogState,
+        candidates: list[tuple[str, float]],
+        turn: int,
+        top_k: int,
+    ) -> list[dict]:
+        top_limit = top_k if isinstance(top_k, int) and top_k > 0 else 10
         first_turn = self.config.first_recommend_turn
-        if turn < first_turn and not self._confident(candidates, turn):
+
+        if turn < first_turn:
+            # Early, high-confidence emission always shows the current best slice.
+            if self._confident(candidates, turn):
+                return [{"parent_asin": asin} for asin, _score in candidates[:top_limit]]
             return []
+
         ramp = self.config.list_size_ramp
-        offset = max(0, turn - first_turn)
-        size = ramp[min(offset, len(ramp) - 1)]
-        limit = min(size, top_k if isinstance(top_k, int) and top_k > 0 else 10)
-        return [{"parent_asin": parent_asin} for parent_asin, _score in candidates[:limit]]
+        size = ramp[min(max(0, turn - first_turn), len(ramp) - 1)]
+        limit = min(size, top_limit)
+
+        if not self.config.scan_windows:
+            return [{"parent_asin": asin} for asin, _score in candidates[:limit]]
+
+        # Serve the shortlist from a frozen ranking, walked in windows (1-10, then
+        # 11-20, ...). Freezing avoids a gap: if the live pool reorders between
+        # turns a target could fall between an already-passed window and one not
+        # yet reached and never be shown. Re-snapshot (and restart the scan) each
+        # time the information state genuinely changes - a new real constraint, or
+        # an intent override taking effect (which the evaluator ignores hits
+        # before). Once it settles, the scan proceeds undisturbed.
+        sid = state.session_id
+        pool = self._scan_pool.get(sid)
+        signature = (self._real_disclosure_count(state), state.override_turn or 0)
+        if pool is None or signature != self._scan_frozen_sig.get(sid):
+            pool = self._scan_pool[sid] = [asin for asin, _score in candidates]
+            self._scan_frozen_sig[sid] = signature
+            self._scan_cursor[sid] = 0
+
+        start = self._scan_cursor.get(sid, 0)
+        window = pool[start:start + limit]
+        if window:
+            self._scan_cursor[sid] = start + limit
+            return [{"parent_asin": asin} for asin in window]
+        # Pool exhausted - fall back to re-showing the strongest slice.
+        return [{"parent_asin": asin} for asin in pool[:limit]]
 
     def _confident(self, candidates: list[tuple[str, float]], turn: int) -> bool:
         """True when the leader is far enough ahead to be worth showing early.
@@ -145,6 +194,17 @@ class Agent:
         if best <= 0.0:
             return False
         return (best - runner_up) / best >= margin
+
+    @staticmethod
+    def _real_disclosure_count(state: DialogState) -> int:
+        """Count genuine constraint spans the customer has disclosed.
+
+        The simulator's "I don't have a preference for X" replies also parse into
+        a constraint span, so a plain productive-turn counter keeps rising every
+        turn and would re-freeze the scan pool forever. Those spans always contain
+        "preference for"; real product constraints do not.
+        """
+        return sum(1 for span in state.query_spans() if "preference for" not in span)
 
     @staticmethod
     def _envelope(message: str, attribute: str | None, recommendations: list[dict]) -> dict:
