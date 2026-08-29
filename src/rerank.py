@@ -16,6 +16,16 @@ changed the dev score by 0.0002 and the holdout not at all, because a pool
 retrieved by those same terms has little rarity spread left to exploit, so it was
 removed rather than kept as a dead option.
 
+Pair spans complement the fragments rather than replace them. Fragment
+coverage asks "does this product mention 90% cotton at all?"; the message's
+actual evidence is "does it say that about heather grey?" - the colon/comma
+structure that ``constraint_spans`` severs. Three fragment de-weighting
+variants (sum/rootk, mean, best-of-group) were prototyped and all measured flat
+or worse, because the 8-of-8-vs-5-of-8 fragment gradient is load-bearing; the
+win is adding the intact association as its own term, which is what finally
+moved the homogeneous-cluster bucket (MRR 0.431 -> 0.478) where fragments
+saturate by construction.
+
 Negative facet evidence (``_facet_conflicts``) penalises a candidate that
 resolves an attribute the customer constrained and whose text never mentions the
 stated value. Positive signals cannot do this job: a black-only shirt matches
@@ -76,6 +86,14 @@ class RerankConfig:
     # score alike, so this sits at the low end of the plateau (a penalty term
     # earns the smallest weight that works). 0.0 disables.
     facet_conflict_weight: float = 0.4
+    # Association-preserving spans (state.query_pair_spans): "heather grey 90
+    # cotton 10 polyester" as one unit instead of three fragments, so the
+    # composition must be stated about that colour. Flat 1.0 per matched pair -
+    # the pair's evidential value is the intact association, not its length.
+    # Measured: public 0.9149->0.9159, hard 0.7917->0.7944, with the gain
+    # concentrated in the homogeneous-cluster bucket (MRR 0.431->0.478) where
+    # fragments saturate. 0.4-1.5 score identically; mid-plateau. 0.0 disables.
+    pair_weight: float = 0.8
 
     # Rescore the whole retrieval pool (RetrievalConfig.pool_size), not a prefix -
     # ~12% of cluster-target sessions had the target in the pool but past rank 200,
@@ -242,6 +260,7 @@ def rerank(
     tail = candidates[config.depth :]
     if not spans:
         return candidates
+    pairs = state.query_pair_spans() if config.pair_weight else []
 
     # Normalise retrieval scores so the two signals combine on one scale.
     top_score = max(score for _asin, score in head) or 1.0
@@ -260,11 +279,19 @@ def rerank(
         if product is None:
             scored.append((parent_asin, 0.0))
             continue
+        # Word-bounded matching: text is token-joined, so padding both sides
+        # anchors every span at token edges ("90 cotton" no longer matches
+        # "190 cotton").
+        padded = f" {product['text']} "
         text = product["text"]
         coverage = 0.0
         for span in spans:
-            if span in text:
+            if f" {span} " in padded:
                 coverage += 1.0 + config.length_bonus * len(span.split())
+        pair_coverage = 0.0
+        for span in pairs:
+            if f" {span} " in padded:
+                pair_coverage += 1.0
         product_facets = extract(product)
         facet_score = _facet_agreement(
             customer_facets,
@@ -285,6 +312,7 @@ def rerank(
         )
         total = (
             config.span_weight * coverage
+            + config.pair_weight * pair_coverage
             + config.retrieval_weight * (retrieval_score / top_score)
             + config.popularity_weight * _popularity(product)
             + config.facet_weight * facet_score

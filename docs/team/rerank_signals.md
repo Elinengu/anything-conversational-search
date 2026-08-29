@@ -1,19 +1,22 @@
-# S6 — Three Candidate Rerank Signals: One Shipped, Two Rejected by Measurement
+# S6 — Rerank Signal Investigations: What Shipped and What Didn't
 
-**File changed: `src/rerank.py`** (one new signal + housekeeping); supporting
-edits in `src/facets.py`, `src/policy.py`, `tools/sweep.py`,
-`tests/test_components.py`.
+**Files changed: `src/rerank.py`, `src/text.py`, `src/state.py`** (two new
+signals + housekeeping); supporting edits in `src/facets.py`, `src/policy.py`,
+`tools/sweep.py`, `tests/test_components.py`.
 
-**Result:** public set 0.9128 → **0.9143** (200/200 kept), dev split 0.9207 →
-0.9224, holdout 0.9010 → 0.9021, adversarial hard set 0.7914 → 0.7917 with no
-bucket regressing.
+**Result:** public set 0.9128 → **0.9159** (200/200 kept), dev split 0.9207 →
+0.9233, holdout 0.9010 → 0.9048, adversarial hard set 0.7914 → **0.7944** with
+no bucket regressing and the worst bucket (`homogeneous_cluster`) up 4.7 MRR
+points.
 
-This is the record of a three-signal investigation. One signal shipped
-(negative facet evidence), one was implemented, measured, and removed
-(profile-weighted agreement), and one was rejected before a line of code was
-written (budget/price closeness). The negative results are documented with the
-same care as the positive one — knowing *why* a plausible signal does not work
-is what stops it being rebuilt later.
+This is the record of the rerank-signal investigations. Two signals shipped
+(negative facet evidence; association-preserving pair spans, plus a
+word-boundary fix to span matching), one was implemented, measured, and removed
+(profile-weighted agreement), one was rejected before a line of code was
+written (budget/price closeness), and three fragment-grouping variants were
+prototyped and rejected. The negative results are documented with the same
+care as the positive ones — knowing *why* a plausible signal does not work is
+what stops it being rebuilt later.
 
 All numbers were measured on the current tree in one session, so before/after
 pairs are directly comparable. (The hard-set baseline here is 0.7914, not the
@@ -99,7 +102,77 @@ the story it was designed around.
 
 ---
 
-## 2. Implemented, measured, removed: profile-weighted facet agreement
+## 2. Shipped: association-preserving pair spans (+ word-bounded matching)
+
+### The gap — spotted by reading one transcript
+
+The customer's turn-2 message in `public_0020`:
+
+> For that, what matters is: color: grey; Solid colors: 100% Cotton;
+> Heather Grey: 90% Cotton, 10% Polyester; All Other Heathers: 50% Cotton,
+> 50% Polyester.
+
+`constraint_spans()` splits on `[.;:,\n]`, producing `heather grey`,
+`90 cotton`, `10 polyester`, … — eight fragments. But the line is a *mapping*:
+colour-variant → composition. Splitting on colons and commas severs "heather
+grey" from *its* "90 cotton 10 polyester", so a candidate that pairs the
+composition differently (an 80/20 heather grey) matches all eight fragments
+exactly as well as the target. The fragments ask "does this product mention
+90% cotton at all?"; the evidence in the message is "does it say that *about
+heather grey*?"
+
+### What was tried first — and rejected
+
+The obvious diagnosis is that eight fragments from one line over-weight that
+line, so three de-weighting variants were prototyped: per-utterance groups
+scored as sum/√k (public 0.9139), mean (0.9134), and best-single-span
+(0.9025, −1.2 points). **All flat or worse.** The fragment gradient — target
+matches 8/8, impostor matches 5/8 — is load-bearing and must not be
+compressed. The fix is not to weaken the fragments but to *add* the
+association they lost.
+
+### The signal
+
+`pair_spans()` (`src/text.py`) splits only on sentence separators (`.;\n` and
+`" - "`), keeping colon/comma-joined content together, stripping the leading
+simulator framing, minimum 3 words. `query_pair_spans()` (`src/state.py`)
+applies the same turn-1/declined exclusions as `query_spans()` and drops
+anything already emitted as a fragment. The reranker adds
+`pair_weight (0.8) × matched pairs`, flat 1.0 per pair — the pair's evidential
+value is the intact association, not its length. Catalog copy repeats these
+blocks verbatim, so the joined form is still an exact substring of the target:
+df("heather grey 90 cotton 10 polyester") = 511 products vs 612 for
+"heather grey" alone.
+
+Alongside it, one latent bug fixed: coverage tested `span in text` unanchored,
+so `"90 cotton"` also matched `"190 cotton"` (1–4 catalog products per numeric
+span). Both fragment and pair matching are now word-bounded — the product text
+is token-joined, so padding with single spaces anchors every span at token
+edges.
+
+### Measurements
+
+| step | public | public MRR | hard | hard MRR |
+|---|---:|---:|---:|---:|
+| baseline (conflict shipped) | 0.9143 | 0.848 | 0.7917 | 0.696 |
+| + word-bounded matching | 0.9149 | 0.850 | 0.7917 | 0.696 |
+| + pair spans (0.8) | **0.9159** | **0.851** | **0.7944** | **0.705** |
+
+Hard set per bucket: the entire gain sits in `homogeneous_cluster`
+(MRR 0.431 → **0.478**) and `generic_override` (0.673 → 0.680); every other
+bucket is exactly unchanged, and no hit is lost anywhere. This is the bucket
+the conflict signal could not move — bucketmates in a homogeneous cluster
+share every *fragment* by construction, but they do not all pair the
+compositions the same way, so the intact association is the discriminator that
+survives saturation. `public_0020` itself, the session that exposed the gap,
+goes from rank 4 to **rank 1**.
+
+Weight: 0.4–1.5 score identically on dev (0.9233) and holdout (+0.0008);
+0.8 sits mid-plateau per house convention.
+
+---
+
+## 3. Implemented, measured, removed: profile-weighted facet agreement
 
 `user_profile.preference_tags` (e.g. `["material", "fit"]`) is unused in the
 scored path. The idea: give extra credit when a facet agreement lands on an
@@ -135,7 +208,7 @@ did nothing in its answerability prior.
 
 ---
 
-## 3. Rejected before implementation: budget/price closeness
+## 4. Rejected before implementation: budget/price closeness
 
 The idea — long recorded in `docs/team/hard_cases.md` as "budget is triply
 dead" — was to parse the customer's "budget around $X" and score candidates by
@@ -165,7 +238,7 @@ rounding), weight ~0.6.
 
 ---
 
-## 4. Housekeeping shipped alongside
+## 5. Housekeeping shipped alongside
 
 * Deleted the dead commented-out block in `_facet_agreement` (the pre-lowercase
   `extract()` call kept as a `'''…'''` string).
@@ -177,18 +250,21 @@ rounding), weight ~0.6.
   (still showed span + bm25 + popularity over depth 200); now matches
   `RerankConfig`.
 
-## 5. Reproduction
+## 6. Reproduction
 
 ```bash
-python3 -m unittest discover -s tests            # 51 tests
-python3 -m evaluator.local_evaluator             # 0.9143, hit 1.0
+python3 -m unittest discover -s tests            # 57 tests
+python3 -m evaluator.local_evaluator             # 0.9159, hit 1.0
 python3 -m evaluator.local_evaluator \
-    --dataset data/hard_set.jsonl                # 0.7917
+    --dataset data/hard_set.jsonl                # 0.7944
 python3 tools/sweep.py --split dev \
-    --configs conflict00,conflict04,conflict08   # the ablation rows
+    --configs conflict00,conflict04,pair00,pair08   # the ablation rows
+python3 tools/observe.py --only public_0020      # the motivating session, now rank 1
 ```
 
 New unit tests (`tests/test_components.py`): conflict demotes a contradicting
 candidate; a multi-value product containing the stated value is not punished;
 silence about a facet is not a conflict; an override discards the stale value
-for conflict scoring; weight 0.0 reproduces the previous ranking exactly.
+for conflict scoring; pair spans keep key:value associations and strip leading
+filler; an intact association outranks recombined fragments; span matching is
+word-bounded; each new weight at 0.0 reproduces the previous ranking exactly.

@@ -112,6 +112,10 @@ def build_configs(catalog: str) -> dict[str, AgentConfig]:
         "conflict00": AgentConfig(rerank=RerankConfig(facet_conflict_weight=0.0)),
         "conflict04": AgentConfig(rerank=RerankConfig(facet_conflict_weight=0.4)),
         "conflict08": AgentConfig(rerank=RerankConfig(facet_conflict_weight=0.8)),
+        # Association-preserving pair spans: off / candidate / upper plateau.
+        "pair00": AgentConfig(rerank=RerankConfig(pair_weight=0.0)),
+        "pair08": AgentConfig(rerank=RerankConfig(pair_weight=0.8)),
+        "pair15": AgentConfig(rerank=RerankConfig(pair_weight=1.5)),
     }
 
 

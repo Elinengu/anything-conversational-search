@@ -18,13 +18,14 @@ public labels and API contract were **not** touched.
 | + multi-route anchor retrieval | xiaotong0329 | — | — | PR #6 |
 | + category tail match | Elinengu | **0.9128** | **0.7914** | change 5; fixes the last public miss — public 200/200 |
 | + learned boilerplate stoplist | Elinengu | 0.9128 | 0.7914 | change 6; score-neutral by design |
-| + negative facet evidence | Elinengu | **0.9143** | **0.7917** | penalise contradiction of a stated facet; profile + budget signals measured and rejected — `docs/team/rerank_signals.md` |
+| + negative facet evidence | Elinengu | 0.9143 | 0.7917 | penalise contradiction of a stated facet; profile + budget signals measured and rejected — `docs/team/rerank_signals.md` |
+| + pair spans + word-bounded matching | Elinengu | **0.9159** | **0.7944** | keep key:value associations intact; worst hard bucket +4.7 MRR pts |
 
-Net: **public 0.859 -> 0.9143, adversarial 0.684 -> 0.7917.** 51/51 tests pass.
-The seven core-agent changes are detailed below; supporting tooling and docs follow.
+Net: **public 0.859 -> 0.9159, adversarial 0.684 -> 0.7944.** 57/57 tests pass.
+The eight core-agent changes are detailed below; supporting tooling and docs follow.
 
 Dashes mark changes that landed while several branches were merging in parallel, where
-no clean before/after was captured at the time. Changes 5-7 were measured in
+no clean before/after was captured at the time. Changes 5-8 were measured in
 isolation instead — toggling the one parameter in a single process — which is the
 method `.claude/skills/record-change/SKILL.md` now requires, precisely because
 differencing across merges attributed one teammate's gain to another's change.
@@ -380,6 +381,67 @@ intent cards contain a budget, 0.45% of the catalog can produce one).
 
 ---
 
+## Change 8 — Pair spans and word-bounded span matching (Elinengu)
+
+**Files:** `src/text.py`, `src/state.py`, `src/rerank.py`, `tools/sweep.py`,
+`tests/test_components.py` — full record in `docs/team/rerank_signals.md` §2
+
+### Problem
+
+Spotted by reading the `public_0020` transcript. The customer's disclosure
+"Heather Grey: 90% Cotton, 10% Polyester" is a mapping — colour-variant →
+composition — but `constraint_spans()` splits on `[.;:,\n]`, severing "heather
+grey" from *its* "90 cotton 10 polyester". A candidate that pairs the
+composition differently (an 80/20 heather grey) matches all the fragments
+exactly as well as the target. Fragments ask "mentions 90% cotton at all?";
+the message's evidence is "says it *about heather grey*?"
+
+Second, latent bug: coverage tested `span in text` unanchored, so "90 cotton"
+also matched "190 cotton" (1-4 catalog products per numeric span).
+
+### What changed
+
+* `pair_spans()` (`src/text.py`): splits only on sentence separators
+  (`.;\n`, `" - "`), keeping colon/comma-joined key:value content together;
+  strips the leading simulator framing; minimum 3 words. Catalog copy repeats
+  these blocks verbatim, so the joined form is still an exact substring of the
+  target: df("heather grey 90 cotton 10 polyester") = 511 products vs 612 for
+  "heather grey" alone.
+* `query_pair_spans()` (`src/state.py`): same turn-1/declined exclusions as
+  `query_spans()`, and drops anything already emitted as a fragment so no
+  evidence is counted twice.
+* `rerank()` adds `pair_weight (0.8) x matched_pairs`, flat 1.0 per pair — the
+  pair's value is the intact association, not its length. Both fragment and
+  pair matching are now word-bounded (the product text is token-joined, so
+  padding with single spaces anchors spans at token edges).
+
+**What was tried first and rejected:** the obvious diagnosis — eight fragments
+from one line over-weight that line — led to three de-weighting prototypes:
+per-utterance groups as sum/&#8730;k (public 0.9139), mean (0.9134), best-single-span
+(0.9025). All flat or worse; the 8-of-8-vs-5-of-8 fragment gradient is
+load-bearing. The fix is adding the lost association, not weakening the
+fragments.
+
+### Effect
+
+Measured in one process, one toggle at a time:
+
+| | baseline | + word-bounded | + pair spans (0.8) |
+|---|---|---|---|
+| Public set | 0.914287 | 0.914937 | **0.915887** (hit stays 200/200) |
+| Adversarial set | 0.791697 | 0.791697 | **0.794375** |
+| Sweep dev / holdout | 0.9224 / 0.9021 | 0.9223 / 0.9040 | 0.9233 / 0.9048 |
+
+The hard-set gain sits entirely in `homogeneous_cluster` (MRR 0.431 -> **0.478**)
+and `generic_override` (0.673 -> 0.680); no other bucket moves, no hit is lost.
+This is the bucket Change 7 could not touch: bucketmates share every fragment
+by construction, but they do not pair the compositions the same way — the
+intact association is the discriminator that survives saturation.
+`public_0020` itself goes from rank 4 to rank 1. Weight 0.4-1.5 scores
+identically on dev and holdout; 0.8 sits mid-plateau. Six new unit tests.
+
+---
+
 ## Supporting work (Kwong Weng)
 
 | file | what |
@@ -413,6 +475,7 @@ intent cards contain a budget, 0.45% of the catalog can produce one).
 | S6 rerank | span / retrieval / popularity / **facet** weight | 1.0 / 1.0 / 0.02 / **0.3** | `src/rerank.py` |
 | S6 rerank | category (ancestor) / **tail** weight | 0.4 / **0.8** | `src/rerank.py` |
 | S6 rerank | **facet-conflict penalty** (vs post-override facets) | **0.4** | `src/rerank.py` |
+| S6 rerank | **pair-span weight** (key:value associations, word-bounded) | **0.8** | `src/rerank.py` |
 | S6 rerank | length bonus / **depth** | 0.12 / **300** | `src/rerank.py` |
 | S3 state | pre-override utterance weight | 0.35 (largely inert) | `src/state.py` |
 | S3 state | **declined utterances held out of every retrieval view** | — | `src/state.py` |

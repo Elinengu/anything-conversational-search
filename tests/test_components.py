@@ -9,7 +9,7 @@ from src.policy import ALLOWED_ATTRIBUTES, FixedPolicy, InfoGainPolicy
 from src.rerank import RerankConfig, rerank
 from src.router import classify, detect_turn_intent, extract_opening_facets
 from src.state import PRE_OVERRIDE_WEIGHT, DialogState
-from src.text import constraint_spans, terms
+from src.text import constraint_spans, pair_spans, terms
 
 
 class TextTests(unittest.TestCase):
@@ -22,6 +22,30 @@ class TextTests(unittest.TestCase):
         # "100% Leather" must normalise the same way the index normalises product
         # text, or the reranker's substring match silently never fires.
         self.assertIn("100 leather", constraint_spans("what matters is: 100% Leather."))
+
+    def test_pair_spans_keep_key_value_associations(self) -> None:
+        msg = ("For that, what matters is: color: grey; Heather Grey: 90% Cotton, "
+               "10% Polyester; All Other Heathers: 50% Cotton, 50% Polyester.")
+        spans = pair_spans(msg)
+        self.assertIn("heather grey 90 cotton 10 polyester", spans)
+        self.assertIn("all other heathers 50 cotton 50 polyester", spans)
+        # Fragments produced by constraint_spans must NOT reappear here.
+        self.assertNotIn("90 cotton", spans)
+
+    def test_pair_spans_split_on_sentence_separators_only(self) -> None:
+        spans = pair_spans("Solid colors: 100% Cotton; Machine Wash Warm Water.")
+        self.assertIn("solid colors 100 cotton", spans)
+        self.assertIn("machine wash warm water", spans)
+
+    def test_pair_spans_strip_leading_filler(self) -> None:
+        # The simulator framing sits before the first colon; without the strip
+        # it would glue itself to the first pair.
+        spans = pair_spans("For that, what matters is: Heather Grey: 90% Cotton.")
+        self.assertIn("heather grey 90 cotton", spans)
+        self.assertNotIn("for that what matters is heather grey 90 cotton", spans)
+        # Two-token leftovers (e.g. "color grey" after the strip) stay below
+        # min_words - that association is carried by facet extraction instead.
+        self.assertEqual(pair_spans("For that, what matters is: color: grey."), [])
 
     def test_terms_drop_filler_and_deduplicate(self) -> None:
         result = terms("I am looking for a blue blue shirt", drop_boilerplate=True)
@@ -178,6 +202,47 @@ class RerankTests(unittest.TestCase):
         ranked = rerank(index, state, [("old", 1.0), ("new", 0.9)],
                         RerankConfig(facet_conflict_weight=1.0))
         self.assertEqual(ranked[0][0], "new")
+
+    def test_intact_association_outranks_recombined_fragments(self) -> None:
+        # Both candidates contain every fragment ("heather grey", "90 cotton",
+        # "10 polyester"), but only "intact" states the composition about that
+        # colour. Fragment coverage ties; the pair span decides.
+        index = _StubIndex({
+            "shuffled": {"text": "tee in heather grey solid is 90 cotton trim 10 polyester"},
+            "intact": {"text": "tee heather grey 90 cotton 10 polyester classic"},
+        })
+        state = DialogState("s")
+        state.observe(1, "I'm looking for tees")
+        state.observe(2, "For that, what matters is: Heather Grey: 90% Cotton, 10% Polyester.")
+        ranked = rerank(index, state, [("shuffled", 1.0), ("intact", 0.9)],
+                        RerankConfig(pair_weight=0.8))
+        self.assertEqual(ranked[0][0], "intact")
+
+    def test_span_matching_is_word_bounded(self) -> None:
+        # "90 cotton" must not match "190 cotton".
+        index = _StubIndex({
+            "midtoken": {"text": "thread count 190 cotton sateen sheet"},
+            "real": {"text": "soft 90 cotton 10 polyester blend tee"},
+        })
+        state = DialogState("s")
+        state.observe(1, "I'm looking for tees")
+        state.observe(2, "For that, what matters is: 90% Cotton.")
+        ranked = rerank(index, state, [("midtoken", 1.0), ("real", 0.9)], RerankConfig())
+        self.assertEqual(ranked[0][0], "real")
+
+    def test_pair_weight_zero_reproduces_fragment_ranking(self) -> None:
+        index = _StubIndex({
+            "a": {"text": "tee heather grey 90 cotton 10 polyester"},
+            "b": {"text": "tee heather grey solid 90 cotton and 10 polyester"},
+        })
+        state = DialogState("s")
+        state.observe(1, "I'm looking for tees")
+        state.observe(2, "For that, what matters is: Heather Grey: 90% Cotton, 10% Polyester.")
+        pool = [("a", 1.0), ("b", 0.5)]
+        ranked = rerank(index, state, pool, RerankConfig(pair_weight=0.0))
+        # With the pair term off, equal fragment coverage leaves retrieval
+        # order in charge.
+        self.assertEqual([asin for asin, _ in ranked], ["a", "b"])
 
     def test_conflict_weight_zero_matches_previous_behaviour(self) -> None:
         index = _StubIndex({

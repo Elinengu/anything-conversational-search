@@ -16,7 +16,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from src.text import constraint_spans, terms
+from src.text import constraint_spans, pair_spans, terms
 
 
 # Cue-based, not template matching: the private evaluation set may paraphrase the
@@ -137,6 +137,24 @@ class DialogState:
                 continue
             for span in constraint_spans(utterance.text):
                 if span not in seen:
+                    seen.add(span)
+                    spans.append(span)
+        return spans
+
+    def query_pair_spans(self) -> list[str]:
+        """Association-preserving spans, newest first - see text.pair_spans.
+
+        Same exclusions as ``query_spans``, plus anything already emitted as a
+        fragment span so the reranker never counts the same evidence twice.
+        """
+        fragments = set(self.query_spans())
+        spans: list[str] = []
+        seen: set[str] = set()
+        for utterance in reversed(self.utterances):
+            if utterance.turn == 1 or utterance.declined:
+                continue
+            for span in pair_spans(utterance.text):
+                if span not in seen and span not in fragments:
                     seen.add(span)
                     spans.append(span)
         return spans

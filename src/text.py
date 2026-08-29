@@ -104,3 +104,35 @@ def constraint_spans(text: str, min_words: int = 2) -> list[str]:
         seen.add(span)
         out.append(span)
     return out
+
+
+def pair_spans(text: str, min_words: int = 3) -> list[str]:
+    """Association-preserving fragments from one customer message.
+
+    ``constraint_spans`` splits on colons and commas, which severs key:value
+    structure: "Heather Grey: 90% Cotton, 10% Polyester" becomes three
+    fragments that any product mentioning the parts in any arrangement can
+    match. Splitting only on sentence separators keeps the association intact
+    ("heather grey 90 cotton 10 polyester"), so a candidate must state that
+    composition *about that colour* - catalog copy repeats these blocks
+    verbatim, so the joined form is still an exact substring of the target.
+
+    A leading run of stopwords is stripped: the simulator's framing sits in
+    front of the first colon, and without the split it would glue itself to
+    the first real pair ("for that what matters is color grey" -> "color
+    grey").
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for chunk in re.split(r"[.;\n]| - ", text):
+        tokens = [token.lower() for token in TOKEN_RE.findall(chunk)]
+        while tokens and tokens[0] in STOPWORDS:
+            tokens.pop(0)
+        span = " ".join(tokens)
+        if not span or span in seen:
+            continue
+        if len(tokens) < min_words or len(tokens) > 25:
+            continue
+        seen.add(span)
+        out.append(span)
+    return out
