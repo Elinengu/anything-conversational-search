@@ -149,13 +149,26 @@ within-session degradation is gone.
 | holdout | 0.8951 | 0.8925 | **-0.003** |
 | adversarial (96) | 0.725 | **0.794** | **+0.069** (hit 0.802 -> 0.885) |
 
-Recall goal achieved and a large adversarial gain, but roughly flat on the public
-metric - the leaked decline terms were a weak tie-break that happened to favour a
-few already-well-ranked public targets (holdout MRR 0.80 -> 0.79). The depth
-change is a no-op on public (recall was already inside rank 200 there); it only
-helps the adversarial set. 39/39 tests pass. **Merge decision is a judgement
-call:** ship if the adversarial set is trusted as the better proxy for the
-private hard tail; hold if the holdout dip matters more.
+Recall goal achieved and a large adversarial gain, but on its own roughly flat on
+the public metric - the leaked decline terms were a weak tie-break that happened
+to favour a few already-well-ranked public targets (holdout MRR 0.80 -> 0.79).
+
+**Then merged with the teammate's facet-agreement rerank signal** (Idea 2,
+`RerankConfig.facet_weight = 0.3`, `src/rerank.py`) - which recovers that MRR and
+more. Combined:
+
+| set | main | recall only | recall + facet |
+|---|---|---|---|
+| public | 0.8982 | 0.8995 | **0.9031** |
+| public MRR | 0.821 | 0.814 | **0.825** |
+| dev | 0.9003 | 0.9041 | **0.9087** |
+| holdout | 0.8951 | 0.8925 | **0.8946** (flat) |
+| adversarial | 0.725 | 0.794 | **0.788** |
+| adversarial hit@10 | 0.802 | 0.885 | **0.885** |
+
+Now a clear win: public + dev up, holdout flat, adversarial +0.06. The depth
+change is still a no-op on public; it only helps the adversarial set. 39/39 tests
+pass.
 
 ## Idea 2 - richer rerank scoring
 
