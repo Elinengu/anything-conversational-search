@@ -1,112 +1,296 @@
-# TechJam Conversational E-Commerce Search Challenge
+# Conversational Shopping Agent — TechJam 2026 Track 4
 
-Build an AI shopping agent that asks useful follow-up questions and recommends the customer's hidden target product within at most 10 turns.
+A multi-turn shopping agent for the TechJam Conversational E-Commerce Search
+Challenge. It finds a hidden target product in a frozen 50,000-item Amazon
+Clothing/Shoes/Jewelry catalog by asking the customer questions and narrowing a
+candidate pool across turns.
 
-## What You Receive
+**Public-set score: `0.8592`** against the supplied BM25 baseline's `0.1067` — an
+8x improvement, with no model API, no network, and no dependencies beyond the
+Python standard library.
 
-- A frozen catalog of 50,000 products from the `Clothing_Shoes_and_Jewelry` category of Amazon Reviews 2023.
-- 200 labeled public sessions for local development.
-- A weak BM25 starter agent and deterministic local evaluator.
-- The Agent API contract and scoring rules.
+| Split | Sessions | Hit@10 | MRR | MTTC | Efficiency | TechnicalScore |
+|---|---|---|---|---|---|---|
+| Public (all) | 200 | 0.940 | 0.791 | 3.40 | 0.759 | **0.8592** |
+| Dev (tuning) | 120 | 0.950 | 0.814 | 3.27 | 0.772 | 0.8738 |
+| Holdout (untouched) | 80 | 0.925 | 0.756 | 3.60 | 0.740 | 0.8374 |
+| *Supplied baseline* | 200 | 0.125 | 0.068 | 9.81 | 0.119 | *0.1067* |
 
-The organizer keeps 800 additional sessions private for final evaluation.
+Every number above is reproducible with the commands in
+[Reproducing the results](#reproducing-the-results).
 
-## Task
+## The core insight
 
-For each session, your agent receives an anonymized preference profile and a short customer message. Raw user IDs, review text, timestamps, and purchase history are never disclosed. On every turn the agent may:
+The supplied baseline is stateless. It answers each turn from that turn's message
+alone, and it never sets `ask_attribute`.
 
-- ask a natural clarification question in `message` and identify one requested field in `ask_attribute`;
-- return a ranked list of up to 10 catalog `parent_asin` values;
-- do both in the same response.
+That second part is what costs it the challenge. The simulated customer only
+discloses a constraint when the agent asks for one, and each session holds exactly
+four constraints drawn verbatim from the target product's own metadata. An agent
+that never asks a question never receives more than the opening sentence, and an
+agent that asks but forgets throws away each answer as it arrives.
 
-The session ends when the target product appears in the scored Top 10 or after turn 10. Sessions cover Buying, Browsing, Intent Override, and Boundary behavior.
+So the largest win is not in retrieval. It is *asking a question and remembering
+the answer*. That change alone — accumulate every turn, always ask something, hold
+the shortlist until something has been disclosed — moved the score from `0.1067`
+to `0.7811` before a single retrieval parameter was touched. Everything after that
+is comparatively small.
 
-## Download the Catalog
+The second insight follows from the first: because disclosed constraints are
+*verbatim* product copy, a candidate whose text literally contains
+`"stainless steel band"` is far more likely to be the target than one that merely
+shares those tokens. Matching those spans as a reranking signal took the score from
+`0.7799` to `0.8543`, and the remaining tuning to `0.8592`.
 
-Download `catalog.jsonl.gz` from the GitHub Release attached to this repository, then run:
+## Architecture
+
+```
+customer turn
+     |
+     v
+ S2 router ......... buying vs browsing, from linguistic cues
+     |
+     v
+ S3 state .......... accumulate turns, track provenance, handle intent override
+     |
+     v
+ S5 retrieval ...... FTS5 bag-of-words + post-override focused route, fused by RRF
+     |
+     v
+ S6 rerank ......... verbatim constraint-span coverage over the top 200
+     |
+     v
+ S4 policy ......... which attribute to ask about next
+     |
+     v
+ S7 timing ......... emit a shortlist, or hold and ask again
+```
+
+| Module | Stage | Responsibility |
+|---|---|---|
+| `src/index.py` | S1 | Catalog → in-memory FTS5 index + trimmed product records |
+| `src/router.py` | S2 | Buying/browsing classification from cues, not templates |
+| `src/state.py` | S3 | Turn accumulation, slot provenance, override handling |
+| `src/policy.py` | S4 | Clarification policy (`FixedPolicy`, `InfoGainPolicy`) |
+| `src/retrieval.py` | S5 | Multi-route candidate generation with RRF fusion |
+| `src/rerank.py` | S6 | Verbatim span coverage, facet agreement, popularity tie-break |
+| `src/facets.py` | — | Typed attribute extraction shared by S4 and S6 |
+| `starter/agent.py` | — | The `Agent` the evaluator imports; owns the response contract |
+| `tools/sweep.py` | S0 | Experiment harness and the dev/holdout split |
+| `tools/observe.py` | — | Session tracer: annotated transcripts and failure diagnosis |
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the data flow, the boundaries between
+stages, and the failure behaviour at each one. See
+[IMPLEMENTATION.md](IMPLEMENTATION.md) for a full stage-by-stage account of what
+changed and why, written for readers new to search and recommender systems, with
+enhancement ideas at the end of each stage.
+
+## Setup
+
+Python 3.10 or newer. **No third-party packages are required.**
 
 ```bash
+# 1. Download catalog.jsonl.gz from the repository's GitHub Release, then:
 gzip -dk catalog.jsonl.gz
 mv catalog.jsonl data/catalog.jsonl
+
+# 2. Verify against the published SHA256SUMS file.
 ```
 
-Verify the downloaded file using the published `SHA256SUMS` file.
+There is nothing else to install, no API key to set, and no environment variable
+to configure.
 
-## Run the Starter
-
-Python 3.10 or later is recommended. The starter uses only the Python standard library.
+## Reproducing the results
 
 ```bash
+# Official evaluator — writes results.json (~28s)
 python3 -m evaluator.local_evaluator
+
+# The dev/holdout split the tuning decisions were made against
+python3 tools/sweep.py --split dev
+python3 tools/sweep.py --split holdout
+
+# Test suite: contract, components, and the end-to-end scoring floor (~14s)
+python3 -m unittest discover -s tests -t .
 ```
 
-Edit `starter/agent.py` to implement your system. Do not edit the evaluator or public labels when reporting your local score.
-The command writes per-session results and aggregate metrics to `results.json`.
+`tools/sweep.py` compares several named configurations in one process, sharing a
+single catalog index. Add a row to `build_configs()` to test a change.
 
-The included weak BM25 starter scores Hit Rate@10 `0.125`, MRR `0.068034`, and
-MTTC `9.81` on the released public set. See `docs/baseline_results.json`.
+## Inspecting sessions
 
-## Agent Interface
+Aggregate metrics say *how much* was lost, never *where*. `tools/observe.py`
+records what happened in every session — what the customer said, what it
+disclosed, how the agent ranked, and why the target was or was not found.
 
-```python
-class Agent:
-    def reset(self, session_id: str, user_profile: dict) -> None:
-        ...
-
-    def respond(self, session_id: str, user_message: str, turn: int, top_k: int) -> dict:
-        return {
-            "message": "Do you have a material preference?",
-            "ask_attribute": "material",
-            "recommendations": [
-                {"parent_asin": "B000..."},
-                {"parent_asin": "B001..."}
-            ],
-            "usage": {"prompt_tokens": 120, "completion_tokens": 30}
-        }
+```bash
+python3 tools/observe.py --verify              # all 200 sessions -> runs/<tag>-<stamp>/
+python3 tools/observe.py --scenario intent_override
+python3 tools/observe.py --only public_0008
+python3 tools/observe.py --dataset data/hard_set.jsonl --tag hard
 ```
 
-`ask_attribute` is one of `category`, `material`, `color`, `size`, `style`, `brand`, `budget`, `feature`, `use_case`, `other`, or `null`. See `docs/agent_api_contract.json`.
+**The evaluator is not modified, copied, or forked.** `evaluate()` accepts the
+agent as a parameter, so the observer wraps the agent and lets the organizer's own
+evaluator drive every session — the reported score is the real one. `--verify`
+re-runs untraced and asserts the two agree (they do, to the last digit). The
+pipeline stages are probed by wrapping `classify` / `retrieve` / `rerank` in
+`starter/agent.py`'s namespace for the duration of the run, so no production code
+carries any tracing overhead.
 
-## Technical Metrics
+| Flag | Default | Purpose |
+|---|---|---|
+| `--dataset` | `data/public_set.jsonl` | session file to run |
+| `--catalog` | `data/catalog.jsonl` | catalog to index |
+| `--scenario` | all | `buying` / `browsing` / `intent_override` / `boundary` |
+| `--only` | all | comma-separated `sample_id`s |
+| `--limit N` | all | first N sessions after filtering |
+| `--tag` | `public` | names the run folder |
+| `--out` | `runs` | run-folder root |
+| `--top` | 10 | candidates recorded per turn |
+| `--no-markdown` | off | skip the per-session files, keep `trace.jsonl` |
+| `--verify` | off | re-run untraced and assert an identical score (~2x runtime) |
 
-- **Hit Rate@10:** fraction of sessions that find the target within 10 turns.
-- **MRR:** mean reciprocal rank of the target; a miss contributes zero.
-- **MTTC:** mean first-hit turn; a miss is assigned turn 11.
-- **Reported token usage:** prompt and completion tokens returned by the team's model client.
+Each run writes `index.md` (worst sessions first), `sessions/<id>.md` (one
+annotated transcript per session), `trace.jsonl`, `summary.json`, and a
+self-contained offline `viewer.html` that filters by scenario, outcome, and
+failure mode. `runs/` is git-ignored; regenerate rather than commit.
 
-```text
-TechnicalScore = 0.50 × HitRate@10 + 0.30 × MRR + 0.20 × Efficiency
-Efficiency = clip((11 - MTTC) / 10, 0, 1)
-```
+Any session file works, not just the public set: one JSON object per line with
+`sample_id`, `scenario_type`, `ground_truth.parent_asin` and `user_profile`, with
+every target present in the catalog. A sample carrying its own `intent_card` **and**
+`behavior` bypasses derivation (`evaluator/local_evaluator.py:205`), and the
+observer renders whichever card was actually in play.
 
-`TechnicalScore` is an objective input to the `Technical Execution` assessment. It is not a separate judging criterion and does not represent the entire `Technical Execution` score.
+Every session is classified into one failure mode, which is the point of the tool —
+a miss caused by a target that was never retrieved is a different repair from one
+that sat at rank 14 for six turns:
 
-Only exact `parent_asin` equality produces a hit. Core metrics are also reported by scenario.
+| Diagnosis | Meaning | Stage to repair |
+|---|---|---|
+| `hit` | found and scored | — |
+| `never_retrieved` | target never entered the candidate pool | S1 / S5 |
+| `ranked_out` | in the pool throughout, never reached the shown top 10 | S6 |
+| `withheld_only` | reached the top 10, but the list was held back every time | S7 |
+| `override_locked` | shown before the override fired, so the hit could not count | S3 |
+| `exhausted` | 10 turns elapsed with the target outside the top 10 | — |
 
-## Model Choice and Cost
+The runs also count **turns left on the table**: hits where the target was already
+inside a convertible top 10 before the list was shown. Placements before an
+override are excluded, since `evaluator/local_evaluator.py:252` cannot convert them.
 
-Teams may use any legally accessible LLM API or local model. Teams manage their own credentials and must never commit API keys. Model choice, estimated cost, token usage, and latency must be disclosed. Token usage is a feasibility metric, not part of the core technical score. The organizer does not provide or reimburse model API credits; teams are responsible for any costs incurred through optional external services.
+### What the first full run showed
 
-## Files
+On the public set, all 12 misses are `ranked_out` and **none** are
+`never_retrieved` — the target entered the pool in 200 of 200 sessions, at best
+ranked positions of 13, 17, 19, 20, 20, 23, 28, 30, 32, 47, 53 and 117. Every
+remaining point on this set is a ranking problem, not a search problem.
 
-```text
-data/public_set.jsonl             200 labeled development sessions
-docs/competition_specification.md participant rules and evaluation protocol
-docs/agent_api_contract.json      machine-readable Agent contract
-docs/evaluation_config.json       scoring configuration
-docs/baseline_results.json        reproducible weak-starter reference score
-starter/agent.py                  editable weak starter
-evaluator/local_evaluator.py      public-set simulator and scorer
-```
+The same run counts **98 turns left on the table** across 89 sessions. Perfect
+timing would move MTTC from `3.405` to `2.915`, worth `+0.0098` — more than any
+other measured opportunity. The cause is legible in the transcripts: at those
+turns the top-1/top-2 margin has a median of `0.017`, and every one of them falls
+under `confidence_margin = 0.20` (`starter/agent.py:59`). In `public_0008` the
+target held rank 1 on turn 2 with `4.8243` against `4.8053` — a 0.4% margin, so
+the gate held and a turn was spent. Span coverage saturates, which bunches the
+scores, and the gate is reading a scale it cannot discriminate on. That figure is
+the ceiling of perfect foresight, not what a re-tuned fixed threshold would reach.
 
-## Judging and Submission Policy
+The adversarial set (`tools/hard_cases.py`) is where retrieval is genuinely under
+stress: 96 sessions score `0.6842`, and 4 sessions are `never_retrieved`.
 
-- Participant submission requirements: `docs/submission_rules.md`
-- Organizer-only final judging controls: `organizer/JUDGING_RUNBOOK.md`
-- Organizer private release checklist: `organizer/private_release_checklist.md`
-- Judging day operations SOP: `organizer/JUDGING_DAY_SOP.md`
+## Design decisions worth defending
 
-## Data Source
+**Intent override down-weights rather than erases.** The brief describes override
+as slot erasure. We deliberately deviate. In this evaluator the discarded
+preference is *still derived from the target product*, so erasing it destroys
+usable signal; pre-override turns are weighted to `0.35` instead of dropped, and a
+separate retrieval route runs over post-override turns alone. If the private
+simulator uses genuine decoy values, the focused route already isolates them.
 
-The catalog and sessions are derived from Amazon Reviews 2023 by McAuley Lab, UCSD. See `DATA_ATTRIBUTION.md` before using or redistributing the data.
-Sessions are sampled deterministically from the official Clothing 5-core leave-last-out split and joined to the frozen catalog.
+**Verbatim span matching lives in the reranker, not in retrieval.** As an FTS5
+phrase query it recalls the target in only 47 of 80 sampled sessions, so fusing it
+at retrieval time injects more noise than signal. Applied as a rescoring signal
+over a pool the bag-of-words route already fills — where it recalls the target
+80/80 at median rank 1 — the same evidence is pure gain.
+
+**The clarification policy ships as the simpler of two implementations.**
+`InfoGainPolicy` selects the question that most reduces uncertainty over the live
+candidate pool, using a gain ratio (raw information gain is dominated by brand,
+which has thousands of distinct values and which shoppers can rarely answer) times
+an answerability prior. It is the more interesting design and it finds the target slightly *more* often on
+the dev split (hit rate `0.958` against `0.950`), but it ranks it worse — MRR
+`0.703` against `0.814` — and loses overall on both splits: `0.8369` against
+`0.8738` on dev, `0.8141` against `0.8374` on holdout. Specific questions surface
+fewer constraints per turn, and thinner evidence ranks worse even when it still
+retrieves. We ship the policy that wins on data we did not tune against, and keep
+the other selectable via `AgentConfig(policy=InfoGainPolicy(agent.facets))`.
+
+**Intent routing does not touch retrieval, because measurement said not to.**
+Widening the pool for browsing and narrowing it for buying changed the dev score
+not at all and cost `0.002` on the holdout. Rather than keep it as decoration, the
+router was scoped to what it genuinely does well: phrasing the agent's questions
+appropriately for an exploring versus a decided customer.
+
+**Span rarity weighting was measured and removed.** Weighting each disclosed span
+by pool-local rarity — so that "buckle closure" counts for less than "two row
+stitch" among belts — is principled and was implemented in full. It moved the dev
+score by `0.0002` and the holdout not at all, because a pool retrieved by those
+same terms has little rarity spread left to exploit. It was deleted rather than
+left in as an off-by-default flag.
+
+**Tuning constants sit mid-plateau, not at the argmax.** The confidence margin is
+`0.20` because every value from `0.15` to `0.50` beats `0.0` on both splits and the
+curve between them is flat. With 200 public sessions deciding nothing and 800
+private ones deciding everything, picking a split's argmax is how you buy noise.
+
+## Disclosure
+
+| | |
+|---|---|
+| Model / API | **None.** No LLM, no network, no credentials. |
+| Dependencies | Python standard library only |
+| Estimated cost | $0.00 |
+| Token usage | 0 prompt, 0 completion — `usage` is reported honestly as zero |
+| Index build | 4.1s one-time, at `Agent.__init__` |
+| Per-turn latency | mean 16.6ms, p95 19.8ms, max 21.0ms |
+| Peak memory | ~282 MB resident |
+| Full public evaluation | ~28s for 200 sessions |
+
+The agent runs identically with the network disabled; there is no fallback path
+because there is no online path. This was a deliberate choice: the submission rules
+reserve the right to score under network restrictions, and an agent that scores
+zero in that environment is worth less than one that scores `0.8592` everywhere.
+
+## Limitations and what we would do next
+
+- **Facet extraction is regex and keyword based.** It produces a usable partition
+  of the candidate pool, not a correct product taxonomy. A material like
+  "recycled polyester blend" resolves to `polyester`, and colour is taken from the
+  first match in the text rather than the item's actual colourway.
+- **`InfoGainPolicy` is not yet good enough to ship.** Its weakness is that it
+  cannot estimate *how many* constraints an answer will surface, only how much a
+  known answer would split the pool. That is visible in its results: it retrieves
+  the target as often as the shipped policy but ranks it worse, because it gathers
+  less evidence per turn. Modelling expected yield per attribute — from observed
+  disclosure sizes rather than a fixed prior — is the obvious next step, and is
+  what would let the more principled policy overtake the simpler one.
+- **Intent override is the weakest scenario**, at `0.867` hit rate against `0.94`
+  overall. Some of this is structural: those sessions cannot convert before the
+  override arrives on turn 3 or 4, which puts a floor under MTTC. The remaining
+  gap is genuine, and the focused route is a blunt instrument for it.
+- **No dense retrieval.** A local sentence-transformer route was planned and cut:
+  the lexical route recalls the target in **200 of 200** public sessions — measured
+  exhaustively by `tools/observe.py`, not sampled — so the headroom is in ranking,
+  not recall, and a model download would have compromised the no-network guarantee.
+  The adversarial set is the caveat: 4 of its 96 sessions are `never_retrieved`, so
+  the claim holds for the released distribution rather than universally.
+- **The dev/holdout split is 120/80.** Differences below roughly `0.02` on the
+  holdout are not distinguishable from noise at that size, and we have treated
+  them as such throughout.
+
+## Data
+
+Catalog and sessions derive from Amazon Reviews 2023 by McAuley Lab, UCSD. See
+[DATA_ATTRIBUTION.md](DATA_ATTRIBUTION.md) before using or redistributing the data.
+The evaluator, `data/`, and `docs/` are organizer-owned and unmodified.
