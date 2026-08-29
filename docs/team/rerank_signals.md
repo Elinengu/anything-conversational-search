@@ -13,10 +13,11 @@ This is the record of the rerank-signal investigations. Two signals shipped
 (negative facet evidence; association-preserving pair spans, plus a
 word-boundary fix to span matching), one was implemented, measured, and removed
 (profile-weighted agreement), one was rejected before a line of code was
-written (budget/price closeness), and three fragment-grouping variants were
-prototyped and rejected. The negative results are documented with the same
-care as the positive ones — knowing *why* a plausible signal does not work is
-what stops it being rebuilt later.
+written (budget/price closeness), three fragment-grouping variants were
+prototyped and rejected, and the no-span early return was challenged and
+upheld. The negative results are documented with the same care as the positive
+ones — knowing *why* a plausible signal does not work is what stops it being
+rebuilt later.
 
 All numbers were measured on the current tree in one session, so before/after
 pairs are directly comparable. (The hard-set baseline here is 0.7914, not the
@@ -47,7 +48,7 @@ stated facet value the candidate contradicts, and the score subtracts
    a product that mentions no colour at all is not in conflict with "grey".
    Missing data is not disagreement.
 3. **The stated value appears nowhere in the candidate's text** as a
-   word-bounded substring, aliases included (`grey`↔`gray` is the only synonym
+   word-bounded substring, aliases included (`grey`/`gray` is the only synonym
    pair in the facet vocabulary). This guards against `extract()`'s
    first-match-wins behaviour: a "black/grey reversible" belt extracts
    `color: black` but still contains "grey", and must not be penalised.
@@ -87,7 +88,7 @@ check: a false conflict that demotes a true target would show up there first.
 Weight choice: dev scores 0.9224 at 0.4 and 0.9226 at 0.8 — a plateau, and a
 penalty term gets the smallest weight on it, so 0.4 shipped. At 0.4, one
 conflict (−0.4) can reorder saturated ties but cannot overturn a genuine span
-lead (each matched span is worth ≥ 1.12).
+lead (each matched span is worth at least 1.12).
 
 ### An honest note on the original hypothesis
 
@@ -125,7 +126,7 @@ heather grey*?"
 
 The obvious diagnosis is that eight fragments from one line over-weight that
 line, so three de-weighting variants were prototyped: per-utterance groups
-scored as sum/√k (public 0.9139), mean (0.9134), and best-single-span
+scored as sum over sqrt(k) (public 0.9139), mean (0.9134), and best-single-span
 (0.9025, −1.2 points). **All flat or worse.** The fragment gradient — target
 matches 8/8, impostor matches 5/8 — is load-bearing and must not be
 compressed. The fix is not to weaken the fragments but to *add* the
@@ -238,7 +239,79 @@ rounding), weight ~0.6.
 
 ---
 
-## 5. Housekeeping shipped alongside
+## 5. Challenged and upheld: the no-span early return
+
+`rerank()` returns the retrieval order untouched when `state.query_spans()` is
+empty, and `query_spans()` excludes turn 1. The objection is fair on its face:
+*"no spans" is not "no information"* — the opening always names a category, and
+in buying sessions it also states a hard requirement. Three situations were
+separated and measured.
+
+### How much is even at stake
+
+The early return fires on a turn that **actually shows a list** in only 20 of
+595 public turns (3.4%) and 18 of 372 hard turns (4.8%). Most no-span turns are
+turns 1-2, where the list is withheld anyway. That ceiling caps any possible
+gain before a single variant is written.
+
+### Case: the buying opening's hard requirement — a non-issue
+
+`intent_card()` inserts the matched material at position 0, so the
+`hard_constraints[0]` that the opening quotes is almost always a **single
+word**: "cotton", "leather", "silk", "Material:alloy". `constraint_spans()`
+requires `min_words=2`, so there is no span to extract even if turn 1 were
+included, and nothing is being discarded: that requirement already reaches
+ranking twice, as a BM25 query term and as a `material` facet via
+`extract_query_facets`. What turn 1 *would* add is mostly framing noise
+("i m looking for jewelry necklaces", "but i m still exploring"). The one real
+exception is `intent_override`, whose opening carries genuine product copy
+("stainless steel band", "buckle closure") — which is precisely the value the
+customer later discards.
+
+### Case: a later turn with no preference — already correct
+
+Declined turns are held out of spans *and* of `full_text()`, while earlier real
+constraints remain. Prior constraints therefore continue to drive ranking after
+a decline; the early return fires only when nothing was **ever** disclosed.
+
+### Case: vague opening with only a category — measured
+
+Two variants, and their combination:
+
+* **A** — when there are no spans, rescore with category signals only
+  (retrieval + popularity + category + tail, no span/pair/facet/conflict terms).
+* **B** — include turn-1 spans minus the leading framing fragment.
+
+| variant | dev | holdout | public | hard |
+|---|---:|---:|---:|---:|
+| baseline (shipped) | 0.9233 | 0.9048 | 0.9159 | 0.7944 |
+| A only | 0.9233 | 0.9070 | 0.9168 | 0.7938 |
+| B only | 0.9237 | 0.9048 | 0.9162 | 0.7940 |
+| A + B | 0.9237 | 0.9070 | 0.9170 | 0.7960 |
+
+A alone is dev-flat; B alone is holdout-flat; only the combination moves both,
+and the interaction has no mechanism behind it. The session counts show what
+the combination actually is: across 296 sessions it moves **4 better / 1 worse
+on public** and **5 better / 2 worse on hard**. The holdout +0.0022 is
+arithmetically one session going from rank 3 to rank 1 — an order of magnitude
+below the ~0.02 noise floor `tools/sweep.py` documents for that split. Per
+bucket, A+B trades `degenerate_card` (MRR 0.527 -> 0.555) against
+`generic_override` (0.680 -> **0.664**).
+
+The refinement the bucket split suggests — keep turn-1 spans but drop them once
+an override fires — was tested and made that bucket **worse** (0.623), not
+better. That independently re-confirms the reasoning already recorded in
+`apply_override` (src/state.py): in this evaluator the discarded preference is
+still derived from the target product, so erasing it destroys usable signal.
+
+**Not shipped.** With hit@10 already at 1.0, a change that moves 5 of 296
+sessions on an unexplained interaction, while regressing a bucket, is the
+overfitting signature this document exists to catch. The early return and the
+turn-1 exclusion stand.
+
+---
+
+## 6. Housekeeping shipped alongside
 
 * Deleted the dead commented-out block in `_facet_agreement` (the pre-lowercase
   `extract()` call kept as a `'''…'''` string).
@@ -250,7 +323,7 @@ rounding), weight ~0.6.
   (still showed span + bm25 + popularity over depth 200); now matches
   `RerankConfig`.
 
-## 6. Reproduction
+## 7. Reproduction
 
 ```bash
 python3 -m unittest discover -s tests            # 57 tests

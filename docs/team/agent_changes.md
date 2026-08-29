@@ -84,7 +84,7 @@ override to 0.11 in one iteration; the clear restores it to 1.00.
 
 ### Effect
 
-Public 0.891 (windowing) then elimination ≈ same on public but **fixes the
+Public 0.891 (windowing) then elimination about the same on public but **fixes the
 boundary-MRR regression** (0.756 -> 0.883) and is simpler. Public hit@10
 0.940 -> 0.990; only 2 misses left. On the adversarial set the two variants
 trade (windowing 0.764, elimination 0.725) — elimination re-ranks every
@@ -417,7 +417,7 @@ also matched "190 cotton" (1-4 catalog products per numeric span).
 
 **What was tried first and rejected:** the obvious diagnosis — eight fragments
 from one line over-weight that line — led to three de-weighting prototypes:
-per-utterance groups as sum/&#8730;k (public 0.9139), mean (0.9134), best-single-span
+per-utterance groups as sum over sqrt(k) (public 0.9139), mean (0.9134), best-single-span
 (0.9025). All flat or worse; the 8-of-8-vs-5-of-8 fragment gradient is
 load-bearing. The fix is adding the lost association, not weakening the
 fragments.
