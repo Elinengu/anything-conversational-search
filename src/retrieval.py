@@ -31,8 +31,10 @@ class RetrievalConfig:
     """Route weights and pool sizes. Tuned on the dev split by tools/sweep.py."""
 
     use_terms: bool = True
+    use_anchor: bool = True
     use_focused: bool = True
     weight_terms: float = 1.0
+    weight_anchor: float = 0.6
     weight_focused: float = 0.8
     pool_size: int = 300
 
@@ -50,6 +52,10 @@ def retrieve(
     """Return a fused candidate pool, best first."""
     config = config or RetrievalConfig()
     fused: dict[str, float] = {}
+
+    if config.use_anchor and state.opening:
+        _rrf(index.search_terms(state.opening, limit=config.pool_size),
+             config.weight_anchor, fused)
 
     if config.use_terms:
         _rrf(index.search_terms(state.full_text(), limit=config.pool_size),
