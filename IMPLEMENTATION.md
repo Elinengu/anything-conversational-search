@@ -424,9 +424,43 @@ mean, 19.8ms at the 95th percentile**.
   `description` match. This is probably the cheapest untapped gain in the repo: the harness
   exists, the parameter is a single tuple, and nobody has ever checked whether the baseline's
   guess was any good.
-- **Learn the boilerplate list instead of writing it.** `BOILERPLATE` in `src/text.py` is
-  hand-written. Computing document frequency across the catalog and dropping the top ~200 terms
-  would be principled rather than intuited, and would adapt if the catalog changed.
+- **Learn the boilerplate list instead of writing it.** ~~Compute document frequency across the
+  catalog and drop the top ~200 terms.~~ **Done, but not the way this originally proposed — the
+  original proposal was wrong.** Ranked by document frequency, `polyester` is 72nd, `cotton` 83rd,
+  `black` 97th, `leather` 111th and `spandex` 141st. Dropping the top 200 would delete every one
+  of them, and those are precisely the constraints the customer discloses, because `intent_card()`
+  inserts a material at position 0 and a colour at position 1 of every card (§S1 explains why the
+  customer quotes catalog copy). Meanwhile `asin` — a genuine member of the hand-written list —
+  sits at rank 10,379 with 0.0% document frequency. Frequency fails in both directions.
+
+  What works is *where* a token occurs, not how often. Amazon's structural metadata lives in the
+  `details` dict, and those tokens appear almost nowhere else — `department` 100% of its
+  occurrences, `dimensions` 99.6%, `manufacturer` 99.6%, `inches` 97.7% — while attribute values
+  are spread across title, features and description: `spandex` 1.2%, `cotton` 2.5%, `polyester`
+  3.3%, `black` 13.4%. The gap between 16% and 96% is empty of real attribute words, so the
+  threshold is read off the catalog's own distribution rather than tuned against a score.
+  `tools/build_stoplist.py` applies that rule and writes `src/stoplist.py`; it reads
+  `data/catalog.jsonl` and never opens `data/public_set.jsonl`, so it cannot fit the public
+  sessions. The learned list reproduces 14 of the 24 hand-written terms and finds 22 more that
+  nobody thought to write down — every month name and year 2014–2022, harvested from
+  "Date First Available: August 15, 2019".
+
+  **Half the list is not learnable, and `src/text.py` now says so.** `imported`, `machine`,
+  `wash`, `closure` and `care` are care-and-origin phrases in `features`/`description`. Two
+  statistics were tested and both fail to separate them from real attributes: by document
+  frequency `closure` (38.6% of products) outranks `polyester` (21.8%), and by spread across the
+  12 largest category buckets `polyester` (CV 0.51) falls between `imported` (0.49) and `wash`
+  (0.60), with `black`/`white` (0.34/0.31) landing inside the scaffolding band. What separates
+  them is that a shopper does not choose between "imported" and "not imported" — semantics, not
+  frequency. Those ten stay hand-written, with the evidence recorded beside them so the
+  experiment is not retried.
+
+  **Measured effect: none.** Public set identical to six decimal places (0.912526 both ways),
+  adversarial set −0.0001, dev and holdout flat. Boilerplate removal strips a median of one token
+  from a ten-token query and `MAX_QUERY_TERMS = 60` never binds — 0 of 200 sessions come close.
+  It ships for auditability and for robustness on a catalog nobody has hand-inspected, not for
+  points. Measurements were taken in one process with everything else held constant; see
+  `tests/test_stoplist.py` for the invariants that keep a future regeneration honest.
 - **Persist the index.** 4.1s of startup could become near-zero by writing the FTS5 index to a
   file instead of `:memory:`. Only worth it if startup time is ever judged.
 - **Dead code.** `search_phrases()` (`src/index.py:119`) has had no caller since the phrase route

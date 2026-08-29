@@ -13,9 +13,10 @@ public labels and API contract were **not** touched.
 | + tuned BM25 field weights | corainexia | 0.898 | 0.725 | merged onto the scan |
 | + elimination scan (turn 3) | KW | 0.898 | 0.725 | (this is what `main` carried) |
 | + facet-agreement rerank signal | corainexia | 0.903 | 0.788 | PR #3 |
-| + retrieval-recall fixes | KW | **0.903** | **0.788** | this branch; dev 0.909, holdout 0.895 |
+| + retrieval-recall fixes | KW | 0.903 | 0.788 | this branch; dev 0.909, holdout 0.895 |
+| + category tail matching | Elinengu | **0.913** | **0.801** | fixes the last public miss — public 200/200; `docs/category_tail_match.md` |
 
-Net: **public 0.859 -> 0.903, adversarial 0.684 -> 0.788.** 39/39 tests pass.
+Net: **public 0.859 -> 0.913, adversarial 0.684 -> 0.801.** 39/39 tests pass.
 The four core-agent changes are detailed below; supporting tooling and docs follow.
 
 ---
@@ -189,6 +190,7 @@ with Change 3.
 | `80bd4f8` | Elinengu | `tools/observe.py`, `tests/test_observe.py` — session observer / monitor |
 | `0f085ec` | Elinengu | `docs/intent_override_retrieval.{md,pdf}` |
 | `01ffdcb` | Elinengu | `docs/reranking_explained.{md,pdf}` |
+| (this change) | Elinengu | `docs/category_tail_match.{md,pdf}` — the last public-set miss, and the no-overfit evidence |
 
 ---
 
@@ -199,6 +201,7 @@ with Change 3.
 | S1 index | FTS5 field weights (title, cat, features, details, store, desc) | 8, 5, 6, 6, 0.5, 0.25 | `src/index.py` |
 | S5 retrieval | pool size / RRF k / focused-route weight | 300 / 60 / 0.8 | `src/retrieval.py` |
 | S6 rerank | span / retrieval / popularity / **facet** weight | 1.0 / 1.0 / 0.02 / **0.3** | `src/rerank.py` |
+| S6 rerank | category (ancestor) / **tail** weight | 0.4 / **0.8** | `src/rerank.py` |
 | S6 rerank | length bonus / **depth** | 0.12 / **300** | `src/rerank.py` |
 | S3 state | pre-override utterance weight | 0.35 (largely inert) | `src/state.py` |
 | S3 state | **declined utterances held out of every retrieval view** | — | `src/state.py` |
