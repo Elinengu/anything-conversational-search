@@ -22,7 +22,19 @@ from src.text import TOKEN_RE, flatten, terms
 FTS_COLUMNS = ("parent_asin", "title", "categories", "features", "details", "store", "description")
 
 # Tuned to favour title and categories over long marketing description text.
-DEFAULT_WEIGHTS = (0.0, 6.0, 4.0, 2.5, 2.5, 1.5, 1.0)
+# DEFAULT_WEIGHTS = (0.0, 6.0, 4.0, 2.5, 2.5, 1.5, 1.0)
+#DEFAULT_WEIGHTS = (0.0,6.0,6.0,3.0,3.0,1.0,0.5,)
+#DEFAULT_WEIGHTS = (0.0,6.0,4.0,5.0,4.0,1.0,0.5,)
+DEFAULT_WEIGHTS = (
+    0.0,
+    8.0,
+    5.0,
+    6.0,
+    6.0,
+    0.5,
+    0.25,
+)
+
 
 MAX_QUERY_TERMS = 60
 
