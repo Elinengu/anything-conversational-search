@@ -24,6 +24,7 @@ from dataclasses import dataclass
 
 from src.index import CatalogIndex
 from src.state import DialogState
+from src.facets import extract
 
 
 @dataclass
@@ -34,6 +35,8 @@ class RerankConfig:
     length_bonus: float = 0.12
     retrieval_weight: float = 1.0
     popularity_weight: float = 0.02
+    # Candidate facets matching the customer's stated facets (material, colour, ...).
+    facet_weight: float = 0.3
     # Rescore the whole retrieval pool (RetrievalConfig.pool_size), not a prefix -
     # ~12% of cluster-target sessions had the target in the pool but past rank 200,
     # where it was left in bm25 order and the span signal never applied.
@@ -48,6 +51,36 @@ def _popularity(product: dict) -> float:
         return (float(rating) / 5.0) * min(1.0, math.log10(float(count) + 1.0) / 4.0)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _facet_agreement(
+    customer_text: str,
+    product: dict,
+) -> float:
+    """
+    Count matching facet values between
+    customer constraints and product facets.
+    """
+
+    customer_facets = extract(
+        {
+            "text": customer_text,
+            "categories": [],
+            "store": "",
+            "price": None,
+        }
+    )
+
+    product_facets = extract(product)
+
+    score = 0.0
+
+    for key, value in customer_facets.items():
+
+        if product_facets.get(key) == value:
+            score += 1.0
+
+    return score
 
 
 def rerank(
@@ -80,10 +113,17 @@ def rerank(
         for span in spans:
             if span in text:
                 coverage += 1.0 + config.length_bonus * len(span.split())
+
+        facet_score = _facet_agreement(
+            state.full_text(),
+            product,
+        )
+        
         total = (
             config.span_weight * coverage
             + config.retrieval_weight * (retrieval_score / top_score)
             + config.popularity_weight * _popularity(product)
+            + config.facet_weight * facet_score
         )
         scored.append((parent_asin, total))
 
