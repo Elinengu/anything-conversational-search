@@ -7,7 +7,7 @@ import unittest
 from src.facets import extract
 from src.policy import ALLOWED_ATTRIBUTES, FixedPolicy, InfoGainPolicy
 from src.rerank import RerankConfig, rerank
-from src.router import classify
+from src.router import classify, detect_turn_intent, extract_opening_facets
 from src.state import PRE_OVERRIDE_WEIGHT, DialogState
 from src.text import constraint_spans, terms
 
@@ -127,8 +127,41 @@ class RouterTests(unittest.TestCase):
 
     def test_unknown_phrasing_defaults_to_browsing(self) -> None:
         # Misreading a vague customer as a buyer commits to constraints they never
-        # stated; the reverse costs at most one question.
+        # stated; the reverse costs at most one extra question.
         self.assertEqual(classify("hello there").name, "browsing")
+
+    def test_facet_density_triggers_buying(self) -> None:
+        route = classify("Looking for a 100% cotton black shirt size XL under $30.")
+        self.assertTrue(route.is_buying)
+        self.assertIn("material", route.detected_facets)
+        self.assertIn("color", route.detected_facets)
+        self.assertIn("price", route.detected_facets)
+
+    def test_browsing_hesitation_overrides_accidental_facets(self) -> None:
+        route = classify("I'm looking for some casual black shoes, but I'm not sure, just exploring ideas.")
+        self.assertTrue(route.is_browsing)
+        self.assertGreater(route.browsing_score, 0)
+
+    def test_scenario_hints(self) -> None:
+        override_route = classify("Actually, ignore my earlier choice. I need running shoes.")
+        self.assertEqual(override_route.scenario_hint, "intent_override")
+
+        boundary_route = classify("I don't have a preference for material, use your judgment.")
+        self.assertEqual(boundary_route.scenario_hint, "boundary")
+
+    def test_dynamic_turn_intent_transition(self) -> None:
+        # Turn 1: Browsing
+        t1_route = classify("I'm looking for shoes, but still exploring.")
+        self.assertTrue(t1_route.is_browsing)
+
+        # Turn 2: Customer provides concrete constraints -> transitions to buying
+        t2_route = detect_turn_intent(
+            "For that, what matters is: full grain leather; waterproof.",
+            turn=2,
+            current_track="browsing",
+            productive_turns=2,
+        )
+        self.assertTrue(t2_route.is_buying)
 
 
 class _StubFacets:
