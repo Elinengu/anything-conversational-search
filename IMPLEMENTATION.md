@@ -731,9 +731,11 @@ split (at least 25% of the pool resolves it, the top value holds no more than
 90% of the mass, two or more values present) are collected, ordered by split
 quality, and the one at `turn_count % count` is voiced — so a session that stays
 on this path asks about a different facet each turn rather than repeating one.
-It names the top two or three values in a rotated template:
+It names the top two or three values in one of ten complete sentence templates:
 
-> "For the material, I'm seeing leather and canvas — do you have a preference?"
+> "The materials I'm looking at come in leather and canvas — do you lean one way
+>  on material?"
+> "So far the list covers black, gold and silver — any steer on colour?"
 
 The turn-2 gate does **not** require a *productive* turn. Single-word
 disclosures ("leather", "black") never form a multi-word constraint span, so
@@ -744,12 +746,34 @@ against voicing a facet the pool has not split on. On the public set the
 grounded path now fires on 98% of turn-≥2 clarifications and in 199 of 200
 sessions.
 
-On turn 1, and whenever no facet qualifies, it falls back to a four-way rotation
-of the broad question so a session never repeats a sentence verbatim. The whole
-path is wrapped so a phrasing bug degrades to the broad question, never to an
-empty turn. `brand` and `budget` and `category` are excluded from the voiced
-facets — brand has thousands of values, budget is null for 79% of the catalog,
-and the `category` facet's values are path fragments ("women", "novelty").
+On turn 1, and whenever no facet qualifies, it falls back to a seven-way
+rotation of the broad question ("Anything else I should keep in mind?"); when a
+specific ladder rung is asked (`FixedPolicy.FALLBACK` after `other` is declined)
+it uses a three-way rotation of that attribute's own question ("Any must-have
+features?", "How should this fit?"). The whole path is wrapped so a phrasing bug
+degrades to a good question, never an empty turn. `brand` and `budget` and
+`category` are excluded from the *voiced* facets — brand has thousands of
+values, budget is null for 79% of the catalog, and the `category` facet's values
+are path fragments ("women", "novelty").
+
+**Lead-in and intent.** The old code prefixed every sentence with the router's
+one fixed tone string ("To point you in the right direction: "). Now the prefix
+is drawn from a bank keyed on `route.name`: browsing sessions get soft framings
+("To help me narrow things down, "), buying sessions get decisive ones ("To zero
+in on the right one, "), and half the bank is empty — so many turns carry no
+prefix at all, which is how people actually talk. On the turn the customer
+reverses course (`state.override_turn == turn_count`) the prefix is a distinct
+acknowledgement ("Okay, switching gears — ", "Got it, let's re-aim — ") and
+every turn after an override is treated as focused (buying prefixes), because a
+reversal is a decisive act.
+
+**Determinism.** Each of the three banks (lead-in, grounded template, broad
+question) is indexed by `zlib.crc32` of the *opening line* plus the turn number
+(and, for the grounded template, the voiced attribute). Keying on the opening
+rather than the evaluator's random `session_id` means the wording is fixed per
+session and reproducible across runs, while still differing turn-to-turn and
+session-to-session. `natural_questions=False` bypasses all of this through
+`_legacy_tone` and reproduces the old fixed strings byte-for-byte.
 
 This lives in S4 rather than S9 because it is the customer-facing half of the
 clarification decision, and it belongs *beside* `InfoGainPolicy` — it reuses the

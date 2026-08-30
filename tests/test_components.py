@@ -504,6 +504,45 @@ class PhrasingTests(unittest.TestCase):
             seen.add(clarify("other", state, [], _SplitFacets(), None, cfg))
         self.assertGreaterEqual(len(seen), 2)
 
+    def test_leadin_rotates_and_is_sometimes_absent(self) -> None:
+        from src.phrasing import clarify
+        from src.router import BROWSING
+
+        cfg = AgentConfig(natural_questions=True)
+        pool = [(str(i), 1.0) for i in range(40)]
+        seen = set()
+        bare = 0
+        for turn in range(2, 11):
+            state = DialogState("s")
+            state.observe(1, "I'm after a wallet")
+            for t in range(2, turn + 1):
+                state.observe(t, "leather")
+            msg = clarify("other", state, pool, _SplitFacets(), BROWSING, cfg)
+            seen.add(msg)
+            bare += int(msg[0].isupper() and not msg.startswith("To "))
+        self.assertGreaterEqual(len(seen), 4)   # varied wording turn to turn
+        self.assertGreaterEqual(bare, 1)        # some turns carry no prefix
+
+    def test_override_turn_is_acknowledged(self) -> None:
+        from src.phrasing import LEADIN_OVERRIDE, clarify
+        from src.router import BROWSING
+
+        cfg = AgentConfig(natural_questions=True)
+        pool = [(str(i), 1.0) for i in range(40)]
+        state = DialogState("s")
+        state.observe(1, "still exploring")
+        state.observe(2, "leather")
+        state.observe(3, "actually, forget that - something else")  # OVERRIDE_CUES
+        self.assertEqual(state.override_turn, 3)
+        msg = clarify("other", state, pool, _SplitFacets(), BROWSING, cfg)
+        self.assertTrue(any(msg.startswith(p) for p in LEADIN_OVERRIDE), msg)
+
+    def test_leading_pronoun_is_not_lowercased(self) -> None:
+        from src.phrasing import _apply
+
+        self.assertEqual(_apply("So, ", "I'm seeing a split."), "So, I'm seeing a split.")
+        self.assertEqual(_apply("So, ", "The options vary."), "So, the options vary.")
+
 
 if __name__ == "__main__":
     unittest.main()

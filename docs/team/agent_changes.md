@@ -26,7 +26,7 @@ public labels and API contract were **not** touched.
 | + popularity weight 0.02 → 0.4 | Elinengu | **0.9305** | **0.8020** | change 12; the tie-break regime fix — every split up, a hard-set miss converted; coordinate-ascent argmax measured and *not* shipped |
 | + pool-aware clarification wording | KW | 0.9305 | 0.8020 | change 13; **score-neutral by construction** — `ask_attribute` unchanged, simulator never reads `message`. Realism for Pillar II / Presentation |
 
-Net: **public 0.859 -> 0.9305, adversarial 0.684 -> 0.8020.** 70/70 tests pass.
+Net: **public 0.859 -> 0.9305, adversarial 0.684 -> 0.8020.** 73/73 tests pass.
 The thirteen core-agent changes are detailed below; supporting tooling and docs follow.
 Change 9 moved the score by exactly zero and is recorded in full anyway — a
 measured no-change is the evidence that keeps the shipped design chosen rather
@@ -817,6 +817,30 @@ varies the facet each turn. Result on the public set: the grounded path fires on
 98% of turn-≥2 clarifications and in 199 of 200 sessions (was ~0). Score
 unchanged — still zero by construction.
 
+### Follow-up — richer templates, rotated lead-in, override acknowledgement
+
+Feedback that the output was still stiff: every sentence opened with the same
+"To point you in the right direction: ", and the grounded questions ("for
+sizing, I'm seeing small, adjustable and large") read like slot-fills.
+
+- **Ten complete grounded templates** (was three `{lead}`-fragment templates),
+  each a full sentence with `{vals}` / `{noun}` / `{subject}` slots, e.g. "The
+  materials I'm looking at come in leather and canvas — do you lean one way on
+  material?", "So far the list covers black, gold and silver — any steer on
+  colour?".
+- **Lead-in bank keyed on `route.name`**: soft framings for browsing, decisive
+  ones for buying, and half the entries empty so most turns carry no prefix at
+  all. On the turn `state.override_turn == turn_count` the prefix is a distinct
+  acknowledgement ("Okay, switching gears — "); every turn after an override
+  uses the buying (focused) bank.
+- **Enriched fallbacks**: broad question is a 7-way rotation, and a specific
+  ladder rung (`feature`, `use_case`, …) gets a 3-way rotation of its own
+  question instead of the one fixed `QUESTION_TEXT` string.
+- **Deterministic**: every bank is indexed by `zlib.crc32` of the opening line +
+  turn (+ attribute for the grounded template) — stable across runs (the random
+  `session_id` is not the key), varied turn-to-turn. `natural_questions=False`
+  bypasses all of it via `_legacy_tone`, byte-for-byte identical to before.
+
 ### Effect
 
 | | before | after |
@@ -824,7 +848,7 @@ unchanged — still zero by construction.
 | Public set | 0.930502 | 0.930502 |
 | Adversarial set | 0.801978 | 0.801978 |
 | dev / holdout | 0.9418 / 0.9136 | 0.9418 / 0.9136 |
-| Tests | 64/64 | 70/70 |
+| Tests | 64/64 | 73/73 |
 
 **Exactly zero, by construction** — measured in one process (`tools/sweep.py`
 rows `natural_off` / `natural_on`), per-scenario components identical. The
@@ -836,22 +860,22 @@ Implements the "Question phrasing from the candidates" idea listed under S4.
 ### Example (real runs, `natural_questions` on)
 
 ```
-public_0198 [the latest-hitting public session - all broad before the follow-up]
-  T1 -> "To point you in the right direction: anything else you'd want me to factor in?"
-  T2 -> "...there's a mix of leather and canvas here - for the material, does one stand out?"
-  T3 -> "...for sizing, I'm seeing small, adjustable and large - do you have a preference?"
-  T4 -> "...style-wise, the pool is split across classic, casual and elegant. Does one matter more to you?"
-  T5 -> "...there's a mix of work, outdoor and travel here - for how you'll use it, does one stand out?"
+public_0198 [latest-hitting public session - every turn was broad before change 13]
+  T1  To point you the right way, anything else I should keep in mind?
+  T2  Just so I show you the right things, so far the list covers leather and canvas - any steer on material?
+  T3  So far the list covers small, adjustable and large - any steer on sizing?
+  T4  Got it, let's re-aim - these range across classic, casual and elegant for style - is one closer to what you had in mind?
+  T5  To zero in on the right one, these range across work, outdoor and travel for how you'll use it - is one closer to what you had in mind?
   ...                                                                                       -> HIT T9
 
-public_0002 [browsing]
-  T2 -> "To narrow this down: there's a mix of casual, classic and elegant here - style-wise, does one stand out?"
-  T3 -> "...on colour, I'm seeing black, brown and gold - do you have a preference?"
-  T4 -> "...for how you'll use it, the pool is split across work, everyday and party. Does one matter more to you?"
+public_0002 [intent_override at T3]
+  T2  I'm seeing casual, classic and elegant on style. Does one of those stand out?
+  T3  Okay, switching gears - so far the list covers black, brown and gold - any steer on colour?
+  T4  So I can tighten the shortlist, for how you'll use it I've got work, everyday and party in the running. Want me to favour one?
 ```
 
-Before, every one of those turns was "Is there anything else that matters for
-this one?".
+Before change 13, every one of those turns was "To point you in the right
+direction: is there anything else that matters for this one?".
 
 
 ## Supporting work (Kwong Weng)
