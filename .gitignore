@@ -219,3 +219,7 @@ __marimo__/
 
 # Session observation runs (regenerate with: python3 tools/observe.py)
 runs/
+
+# Neural cross-encoder weights - exported locally, never committed.
+# See tools/export_onnx.py and docs/submission_rules.md ("lightweight local assets").
+models/

@@ -35,6 +35,7 @@ from src.facets import FacetStore  # noqa: E402
 from src.policy import ALLOWED_ATTRIBUTES, FixedPolicy  # noqa: E402
 from src.rerank import RerankConfig, rerank  # noqa: E402
 from src.retrieval import RetrievalConfig, retrieve  # noqa: E402
+from src.semantic import SemanticConfig, semantic_rerank  # noqa: E402
 from src.router import classify  # noqa: E402
 from src.state import DialogState  # noqa: E402
 
@@ -45,6 +46,13 @@ class AgentConfig:
 
     retrieval: RetrievalConfig = field(default_factory=RetrievalConfig)
     rerank: RerankConfig = field(default_factory=RerankConfig)
+    # S6b - optional neural cross-encoder over ambiguous clusters. Disabled by
+    # default and excluded from every reported score: it is the one stage that
+    # needs a third-party runtime and downloaded weights, neither of which is
+    # guaranteed present when the organizer scores the submission
+    # (docs/submission_rules.md reserves the right to disable network access).
+    # With SemanticConfig.enabled False this costs one attribute lookup a turn.
+    semantic: SemanticConfig = field(default_factory=SemanticConfig)
     #: Left unset so the Agent can build the default policy against its own index.
     policy: object | None = None
     # Recommending before the customer has disclosed anything locks in a poor
@@ -150,6 +158,9 @@ class Agent:
         route = classify(state.opening) if self.config.use_router else None
         candidates = retrieve(self.index, state, self.config.retrieval)
         candidates = rerank(self.index, state, candidates, self.config.rerank)
+        # No-op unless explicitly enabled *and* the runtime and weights are both
+        # present; see src/semantic.py for the degradation contract.
+        candidates = semantic_rerank(self.index, state, candidates, self.config.semantic)
 
         attribute = self.config.policy.select(state, candidates)
         if attribute not in ALLOWED_ATTRIBUTES:

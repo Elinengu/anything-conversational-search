@@ -1,0 +1,21 @@
+# Dependencies for the OPTIONAL semantic reranking stage (S6b) only.
+#
+# The scored agent does not need this file. Its pipeline - index, router,
+# state, policy, retrieval, rerank, timing - is Python standard library plus
+# SQLite FTS5, runs offline, and is what every reported score was measured on.
+# src/semantic.py no-ops when these are absent, so a failed install here cannot
+# change a result.
+#
+#     pip install -r requirements.txt
+#     python3 tools/fetch_model.py
+#
+# No torch, no transformers, no sentence-transformers: the upstream repo
+# publishes int8 ONNX exports, so inference is onnxruntime over a 23 MB graph
+# and tokenisation is the Rust `tokenizers` package.
+#
+# See README.md "Optional: semantic reranking".
+
+onnxruntime>=1.17,<2
+numpy>=1.24,<3
+tokenizers>=0.15,<1
+huggingface_hub>=0.20

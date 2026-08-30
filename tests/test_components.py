@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 
 from src.facets import extract
 from src.policy import ALLOWED_ATTRIBUTES, FixedPolicy, InfoGainPolicy
 from src.rerank import RerankConfig, rerank
+from src.semantic import SemanticConfig, gate_stats, is_ambiguous, semantic_rerank
 from src.router import classify, detect_turn_intent, extract_opening_facets
 from src.state import PRE_OVERRIDE_WEIGHT, DialogState
 from src.text import constraint_spans, pair_spans, terms
@@ -366,6 +368,72 @@ class ShortlistRampTests(unittest.TestCase):
         self.assertEqual(first, [f"A{index:03d}" for index in range(4)])
         self.assertEqual(second, [f"A{index:03d}" for index in range(4, 14)])
         self.assertFalse(set(first) & set(second))
+
+
+class SemanticTests(unittest.TestCase):
+    """The S6b stage is optional, and its contract is that absence is free.
+
+    Every test here asserts a *no-op*, because on the scored path - and on any
+    machine without onnxruntime and an exported model - that is the only
+    behaviour that may ever occur. A regression that made this stage active by
+    accident would silently put a neural model in the scored pipeline.
+    """
+
+    def _state(self) -> DialogState:
+        state = DialogState(session_id="s")
+        state.observe(1, "I'm looking for a belt.")
+        state.observe(2, "For that, what matters is: full grain leather; buckle closure.")
+        return state
+
+    def _index(self) -> _StubIndex:
+        return _StubIndex({
+            f"a{n}": {"text": "full grain leather belt buckle closure", "categories": []}
+            for n in range(20)
+        })
+
+    def test_disabled_by_default(self) -> None:
+        self.assertFalse(SemanticConfig().enabled)
+        self.assertFalse(AgentConfig().semantic.enabled)
+
+    def test_disabled_stage_returns_pool_unchanged(self) -> None:
+        pool = [(f"a{n}", 1.0 / (n + 1)) for n in range(20)]
+        self.assertEqual(
+            semantic_rerank(self._index(), self._state(), pool, SemanticConfig()),
+            pool,
+        )
+
+    def test_enabled_without_runtime_or_weights_is_a_no_op(self) -> None:
+        # No exported model on a clean clone, so this exercises the degradation
+        # path whether or not onnxruntime happens to be installed.
+        pool = [(f"a{n}", 1.0 / (n + 1)) for n in range(20)]
+        config = SemanticConfig(
+            enabled=True, model_dir=Path("/nonexistent/model"), conditions_required=1
+        )
+        self.assertEqual(semantic_rerank(self._index(), self._state(), pool, config), pool)
+
+    def test_empty_pool_is_a_no_op(self) -> None:
+        config = SemanticConfig(enabled=True, model_dir=Path("/nonexistent/model"))
+        self.assertEqual(semantic_rerank(self._index(), self._state(), [], config), [])
+
+    def test_gate_detects_a_saturated_cluster(self) -> None:
+        # Twenty identical products: every span matches everything, so nothing
+        # is distinctive and the span leaders are all tied.
+        pool = [(f"a{n}", 1.0) for n in range(20)]
+        stats = gate_stats(self._index(), self._state(), pool, SemanticConfig())
+        self.assertEqual(stats["distinctive"], 0)
+        self.assertGreaterEqual(stats["tied_leaders"], 15)
+        self.assertTrue(is_ambiguous(stats, SemanticConfig()))
+
+    def test_gate_stays_quiet_when_one_candidate_is_distinctive(self) -> None:
+        products = {f"a{n}": {"text": "plain belt", "categories": []} for n in range(20)}
+        products["a0"] = {
+            "text": "full grain leather belt buckle closure",
+            "categories": [],
+        }
+        pool = [(f"a{n}", 1.0 / (n + 1)) for n in range(20)]
+        stats = gate_stats(_StubIndex(products), self._state(), pool, SemanticConfig())
+        self.assertGreater(stats["distinctive"], 0)
+        self.assertFalse(is_ambiguous(stats, SemanticConfig()))
 
 
 class _StubFacets:

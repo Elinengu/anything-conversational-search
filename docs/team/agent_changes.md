@@ -22,9 +22,10 @@ public labels and API contract were **not** touched.
 | + pair spans + word-bounded matching | Elinengu | **0.9159** | **0.7944** | keep key:value associations intact; worst hard bucket +4.7 MRR pts |
 | + constraint-ledger investigation | Elinengu | 0.9159 | 0.7944 | change 9; **no code shipped** — six ledger operations measured, all flat or worse; corrected a wrong diagnosis in `src/rerank.py`; two dead functions deleted |
 | + narrow first slate `(4,10)` | Elinengu | **0.9199** | **0.7981** | change 10; one config default. Started as a conditional-MMR assessment — MMR measured and rejected, the deferral it stumbled on kept |
+| + semantic reranking (S6b) | Elinengu | 0.9199 | 0.7981 | change 11; built, measured, **kept off** — cross-encoder loses on every split; oracle reranking ceiling established at +0.043 / +0.084 |
 
-Net: **public 0.859 -> 0.9199, adversarial 0.684 -> 0.7981.** 62/62 tests pass.
-The ten core-agent changes are detailed below; supporting tooling and docs follow.
+Net: **public 0.859 -> 0.9199, adversarial 0.684 -> 0.7981.** 68/68 tests pass.
+The eleven core-agent changes are detailed below; supporting tooling and docs follow.
 Change 9 moved the score by exactly zero and is recorded in full anyway — a
 measured no-change is the evidence that keeps the shipped design chosen rather
 than assumed. Change 10 is the same lesson from the other side: the proposal that
@@ -609,6 +610,94 @@ skill specifies; the evidence is that they are positive on four independent sets
 at once, not that any single split is decisive.
 
 ---
+
+## Change 11 — Neural cross-encoder reranking, built and measured off (Elinengu)
+
+**Files:** `src/semantic.py` (new), `tools/fetch_model.py` (new), `requirements.txt`
+(new), `starter/agent.py`, `tools/sweep.py`, `tests/test_components.py`,
+`README.md`, `ARCHITECTURE.md`, `.gitignore`
+
+### Problem
+
+Every rerank signal is lexical, and `docs/competition_specification.md` lists
+semantic reranking as an innovation direction. Before building anything, an
+**oracle** reranker (target forced to rank 1 whenever it is in the pool) fixed
+the ceiling for any reranking work at all:
+
+| | dev (120) | holdout (80) | public (200) | hard (96) | generated |
+|---|---|---|---|---|---|
+| baseline | 0.9268 | 0.9096 | 0.9199 | 0.7981 | 0.9197 |
+| oracle | 0.9638 | 0.9620 | 0.9631 | 0.8823 | 0.9590 |
+| **gap** | **+0.037** | **+0.052** | **+0.043** | **+0.084** | **+0.039** |
+
+The proposed ambiguity gate was measured before implementation too. At the
+suggested thresholds (`tied_leaders >= 8`) it fires on **73%** of public
+sessions — an always-on stage, not a fallback — though it does discriminate
+(mean RR 0.774 when firing against 0.987 when quiet). Shipped thresholds are
+tighter and fire on 28% of rerank calls.
+
+### What changed
+
+`src/semantic.py` (S6b) reranks ambiguous clusters with
+`cross-encoder/ms-marco-MiniLM-L6-v2` and fuses by RRF, not score addition —
+cross-encoder logits are uncalibrated and one matched span is worth ~1.12 on the
+symbolic scale. Runtime is `onnxruntime` + `tokenizers` over a **23.2 MB** int8
+graph: upstream publishes ONNX exports, so there is no torch, transformers or
+sentence-transformers dependency and no export step. Weights are gitignored;
+`tools/fetch_model.py` downloads them.
+
+Disabled by default, and every failure path is a no-op.
+
+### Effect
+
+| variant | dev (120) | hard (96) |
+|---|---|---|
+| **off (shipped)** | **0.9268** | **0.7981** |
+| on, weight 0.7 | 0.9211 | 0.7944 |
+| on, weight 0.3 | 0.9249 | 0.7959 |
+| on, depth 20 | 0.9236 | 0.7940 |
+
+| | before | after |
+|---|---|---|
+| Public set | 0.919892 | 0.919892 |
+| Adversarial set | 0.798056 | 0.798056 |
+| Tests | 62/62 | 68/68 |
+
+**Zero on the scored path, and negative everywhere the stage is on.** The weight
+column is the finding: 0.7 → 0.3 → 0 recovers baseline monotonically, and an
+optimum at zero means the signal carries no usable information. The mechanism is
+that on the 162 fired turns with the target in the rescored head, fusion moved it
+**up 46 and down 74** (mean rank 7.63 → 8.77) — anti-correlated, not merely
+miscalibrated. Domain mismatch is the likely cause: MS MARCO pairs a
+natural-language question with prose, while here the query is simulator
+boilerplate and the document a token-joined catalog blob.
+
+Cost: mean turn 30.7 ms → 389.8 ms, p95 73.7 → 1347.8 ms, max 1.48 s.
+
+Two things did *not* move, and both were verified rather than asserted. The
+scored path is bit-identical — checked by stashing the whole branch and re-running
+both sets, comparing every session's rank and turn, not just the totals. And the
+degradation path was exercised: with the stage **on** and the runtime
+uninstalled, results are identical at no latency cost.
+
+### Three implementation notes, all self-caught
+
+- The proposal's "protect strong lexical evidence" guard was built as a `+1.0`
+  bonus on the fused score. RRF scores here top out near 0.028, so that constant
+  did not protect, it *promoted* — hoisting a unique-span holder from symbolic
+  rank 40 to rank 1. Rewritten as a rank clamp. It changed nothing
+  (0.9211/0.7944 either way), because the guard fires on **0 of 8750** candidates
+  examined: inside a pool retrieved by those very spans, no span is unique.
+  Deleted rather than kept as an inert flag.
+- The first ablation grid was abandoned mid-run once the bonus bug was found,
+  rather than reporting numbers that measured a mistake.
+- Importing `onnxruntime` and then exiting the interpreter aborts intermittently
+  on macOS (`recursive_mutex lock failed`, SIGABRT) — enough to make the test
+  suite flaky at exit code 134 while still reporting 68/68 OK. The first version
+  imported the runtime before checking for weights. Reordered so the weights are
+  checked first, which means the no-weights path — the scored agent and the whole
+  test suite — never imports onnxruntime at all. Six consecutive clean runs after.
+
 
 ## Supporting work (Kwong Weng)
 
