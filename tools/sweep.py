@@ -151,6 +151,16 @@ def build_configs(catalog: str) -> dict[str, AgentConfig]:
         # score bit-for-bit identically - the row exists to prove that.
         "natural_off": AgentConfig(natural_questions=False),
         "natural_on": AgentConfig(natural_questions=True),
+        # Dual-track routing (branch dual_tracking). router_off is the flat
+        # single-track pipeline - it must score bit-for-bit like the pre-routing
+        # agent. router_on is the branch default: track drives policy, rerank and
+        # timing. router_on_hardfilter adds the buying-track candidate banish.
+        "router_off": AgentConfig(use_router=False),
+        "router_on": AgentConfig(use_router=True),
+        "router_on_hardfilter": AgentConfig(
+            use_router=True,
+            buying_rerank=RerankConfig(hard_filter=True),
+        ),
     }
 
 
