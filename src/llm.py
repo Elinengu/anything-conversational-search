@@ -37,7 +37,7 @@ else:
             os.environ.setdefault(key.strip(), value.strip())
 
 
-DEFAULT_GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+DEFAULT_GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 _DEFAULT_API_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 
 
@@ -89,6 +89,7 @@ class GeminiClient:
         if system_prompt:
             body["system_instruction"] = {"parts": [{"text": system_prompt}]}
 
+        response = None
         try:
             response = requests.post(
                 self._url(),
@@ -106,7 +107,11 @@ class GeminiClient:
                 return None
             text = parts[0].get("text")
             return text if isinstance(text, str) else None
-        except Exception:
+        except Exception as exc:  # pragma: no cover - debug aid for runtime configuration issues.
+            print(f"Gemini request failed for model {self.model}: {type(exc).__name__}: {exc}")
+            if response is not None:
+                print(f"Gemini status: {response.status_code}")
+                print(response.text[:500])
             return None
 
     def generate_json(self, prompt: str, *, system_prompt: str | None = None) -> dict[str, Any] | None:

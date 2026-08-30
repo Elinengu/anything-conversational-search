@@ -173,6 +173,34 @@ def extract_opening_facets(text: str) -> dict[str, tuple[str, ...]]:
     return results
 
 
+def route_with_tie_breaker(
+    buying_score: float,
+    browsing_score: float,
+    *,
+    tie_breaker: callable | None = None,
+    high_confidence_margin: float = 0.6,
+    strong_signal_threshold: float = 1.5,
+) -> str:
+    """Choose a route with a confidence gate and explicit tie-breaker fallback.
+
+    This matches the PR1 design: strong signals route immediately, ambiguous ones
+    defer to the tie-breaker rather than forcing a brittle all-or-nothing decision.
+    """
+    if buying_score >= strong_signal_threshold and buying_score >= browsing_score + high_confidence_margin:
+        return "buying"
+    if browsing_score >= strong_signal_threshold and browsing_score >= buying_score + high_confidence_margin:
+        return "browsing"
+
+    if buying_score > browsing_score:
+        return "buying"
+    if browsing_score > buying_score:
+        return "browsing"
+
+    if tie_breaker is not None:
+        return tie_breaker(buying_score, browsing_score)
+    return "browsing"
+
+
 def _llm_route_hint(text: str) -> Route | None:
     """Optional Gemini-backed routing hint. Returns None when the client is unavailable."""
     client = get_llm_client()
@@ -217,10 +245,6 @@ def classify(opening: str) -> Route:
     if not text:
         return BROWSING
 
-    llm_hint = _llm_route_hint(text)
-    if llm_hint is not None:
-        return llm_hint
-
     buying_matches = [m.group(0) for m in BUYING_CUES.finditer(text)]
     browsing_matches = [m.group(0) for m in BROWSING_CUES.finditer(text)]
     override_matches = [m.group(0) for m in OVERRIDE_CUES.finditer(text)]
@@ -254,22 +278,27 @@ def classify(opening: str) -> Route:
     browsing_conf = br_score / total
 
     # Decision rule:
-    # Explicit browsing cues are strong negative indicators of immediate buying.
-    if br_score > 0.0 and browsing_matches:
-        name = "browsing"
+    # Strong evidence returns immediately; ambiguous scores intentionally defer to
+    # the tie-breaker so that near-equal signals do not trigger a brittle route.
+    tie_breaker = lambda b_score, br_score: "browsing" if br_score >= b_score else "buying"
+    name = route_with_tie_breaker(b_score, br_score, tie_breaker=tie_breaker)
+
+    # Gemini is only used for genuinely ambiguous routing decisions, not for every
+    # message in the evaluator. This avoids burning quota on routine traffic while
+    # still allowing a single optional LLM tie-break on uncertain cases.
+    if abs(b_score - br_score) <= 0.75:
+        llm_hint = _llm_route_hint(text)
+        if llm_hint is not None:
+            return llm_hint
+
+    if name == "browsing":
         tone = "To point you in the right direction: "
-        confidence = browsing_conf
+        confidence = browsing_conf if br_score > 0.0 and browsing_matches else 0.5
         rec_turn = 3
-    elif b_score > 0.5:
-        name = "buying"
+    else:
         tone = "To narrow this down: "
         confidence = buying_conf
         rec_turn = 2 if buying_conf >= 0.75 else 3
-    else:
-        name = "browsing"
-        tone = "To point you in the right direction: "
-        confidence = 0.5
-        rec_turn = 3
 
     detected_cues = tuple(buying_matches + browsing_matches + override_matches + boundary_matches)
     return Route(

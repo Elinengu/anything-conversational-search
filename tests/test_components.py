@@ -7,7 +7,7 @@ import unittest
 from src.facets import extract
 from src.policy import ALLOWED_ATTRIBUTES, FixedPolicy, InfoGainPolicy
 from src.rerank import RerankConfig, rerank
-from src.router import classify, detect_turn_intent, extract_opening_facets
+from src.router import classify, detect_turn_intent, extract_opening_facets, route_with_tie_breaker
 from src.state import PRE_OVERRIDE_WEIGHT, DialogState
 from src.text import constraint_spans, pair_spans, terms
 from starter.agent import Agent, AgentConfig
@@ -330,6 +330,11 @@ class RouterTests(unittest.TestCase):
             productive_turns=2,
         )
         self.assertTrue(t2_route.is_buying)
+
+    def test_hybrid_router_confidence_gate(self) -> None:
+        self.assertEqual(route_with_tie_breaker(3.6, 2.1), "buying")
+        self.assertEqual(route_with_tie_breaker(2.2, 3.0), "browsing")
+        self.assertEqual(route_with_tie_breaker(2.0, 2.0, tie_breaker=lambda b, br: "browsing"), "browsing")
 
 
 class _StubShortlistState:
