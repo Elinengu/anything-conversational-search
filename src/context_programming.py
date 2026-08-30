@@ -24,6 +24,7 @@ from src.state import DialogState
 class DialogPhase(str, Enum):
     """Runtime interaction phase identified by the orchestrator."""
     EXPLORING = "exploring"         # Early turns / broad pool: active clarification
+    NARROWING = "narrowing"         # Useful constraints are accumulating
     CONVERGING = "converging"       # High confidence leader candidate: fast-path emission
     OVERRIDE_REVERSAL = "override"  # User reversed intent: context purging & focused routing
     STAGNATING = "stagnating"       # Information plateau: diversity / fallback probing
@@ -107,6 +108,11 @@ class DistilledShortTermContext:
     override_turn: int | None
     query_facets: dict[str, str]
     productive_turns: int
+    unproductive_streak: int
+    stable_pool_turns: int
+    over_general: bool
+    active_slots: dict[str, list[str]]
+    structured_query: str
 
 
 class ContextDistiller:
@@ -140,6 +146,11 @@ class ContextDistiller:
             override_turn=state.override_turn,
             query_facets=query_facets,
             productive_turns=state.productive_turns,
+            unproductive_streak=state.unproductive_streak,
+            stable_pool_turns=state.stable_pool_turns,
+            over_general=state.over_general,
+            active_slots=state.active_slot_values(),
+            structured_query=state.authoritative_text(),
         )
 
 
@@ -199,7 +210,11 @@ class AdaptiveOrchestrator:
             lead = (candidates[0][1] - candidates[1][1]) / candidates[0][1]
 
         # Phase 1: Intent Override Reversal Recovery
-        if context.is_override and context.override_turn is not None and turn >= context.override_turn:
+        # Recovery is a transition, not a permanent mode. The focused view is
+        # forced on the reversal turn; later turns can narrow or converge using
+        # the rewritten active slots while retrieval still retains its normal
+        # post-override focused route.
+        if context.is_override and context.override_turn is not None and turn == context.override_turn:
             return OrchestrationPlan(
                 phase=DialogPhase.OVERRIDE_REVERSAL,
                 pool_entropy=entropy,
@@ -231,20 +246,43 @@ class AdaptiveOrchestrator:
                 guidance_action="fast_path_recommendation",
             )
 
-        # Phase 3: Stagnation / Dead-End Exploration
-        if turn >= 4 and context.productive_turns <= 1:
+        # Phase 3: Stagnation / Dead-End Exploration. Recent consecutive failure
+        # is more informative than a lifetime total: five useful turns followed
+        # by one miss is not the same as one useful turn followed by five misses.
+        if (
+            context.unproductive_streak >= 2
+            and (context.stable_pool_turns >= 1 or context.over_general)
+        ):
             return OrchestrationPlan(
                 phase=DialogPhase.STAGNATING,
                 pool_entropy=entropy,
                 confidence_lead=lead,
                 gating_margin=config.confidence_margin,
-                retrieval_route="terms",
+                retrieval_route="structured",
                 recommendation_cutoff=(turn < config.first_recommend_turn),
                 recommended_slate_size=10,
                 guidance_action="diversify_and_fallback_probe",
             )
 
-        # Phase 4: Standard Information Seeking (Exploration)
+        # Phase 4: Evidence is arriving, but no candidate has decisively won.
+        if context.productive_turns > 0:
+            return OrchestrationPlan(
+                phase=DialogPhase.NARROWING,
+                pool_entropy=entropy,
+                confidence_lead=lead,
+                gating_margin=config.confidence_margin,
+                retrieval_route="terms",
+                recommendation_cutoff=(turn < config.first_recommend_turn),
+                recommended_slate_size=config.list_size_ramp[
+                    min(
+                        max(0, turn - config.first_recommend_turn),
+                        len(config.list_size_ramp) - 1,
+                    )
+                ],
+                guidance_action="targeted_disambiguation",
+            )
+
+        # Phase 5: Standard Information Seeking (Exploration)
         return OrchestrationPlan(
             phase=DialogPhase.EXPLORING,
             pool_entropy=entropy,

@@ -29,6 +29,9 @@ public labels and API contract were **not** touched.
 | + track-aware routing layer | KW | _0.9177_ | _0.7994_ | change 15; **branch `dual_tracking` only, not merged to `main`.** `use_router` widened from phrasing to behaviour (policy / rerank / timing). Costs ~0.013 on the cooperative public sim, gains nothing there; +0.147 overall / +0.43 browsing MRR on `tools/stress_harness.py --customer browse-gated`. `use_router=False` is bit-identical to the pre-branch agent. |
 | + length tie-break / no-span rescore | Elinengu | 0.9305 | 0.8020 | change 16; **both measured and rejected — no `src/` change.** Dev moves 0.000000 for one and clears the adversarial gate at a single isolated weight for the other. Recorded in `rerank_signals.md` §5 and §11 |
 | + merged `feat/dynamic-context-programming`; DeepSeek listwise rerank measured | Elinengu | 0.921016 | — | change 17; **not on the change-16 lineage** — this branch (`integration/gemini-stress-harness`) carries dual-track routing on by default, which the doc above (change 15) already prices at "costs ~0.013 on the cooperative public sim, gains nothing there" in exchange for the stress-harness robustness gain, so 0.921016 is not comparable to 0.9305 above. Within *this* branch the merge itself moved public 0.91868 → 0.921016 with the LLM off (default). `llm_weight` **stays 0.0 (off) by default** — measured with a real DeepSeek key for the first time: byte-identical on dev at `llm_weight=0.3`, **−0.0074 score / −0.026 MRR** under `paraphrase:heavy+browse-gated` (the practical/realistic stressor), −0.016 score on a public-set slice. Also fixed two tests that assumed no real API key would ever be present |
+| + live structured state and orchestration (branch `dynamic-state-slot`) | Elinengu | **0.9344** | — | change 15 on that branch's own lineage (see its section below); active/superseded slots, rolling pool signals (entropy, leader margin, stagnation streak), plan-driven questions/gating/retrieval, intent transitions and observable snapshots. Merged into `integration/gemini-stress-harness` as change 19, which also rewires change 18's LLM-rerank trigger-gate onto `DialogState.leader_margin` instead of a redundant second deterministic rerank pass |
+| + trigger-gate the LLM rerank on deterministic uncertainty | Elinengu | — | — | change 18; **measured worse than always-on, not better** — 0.78622 vs 0.79269 (both below the 0.80010 baseline) on `paraphrase:heavy+browse-gated`. A 7-session diagnostic (5 regressions demoting a correct #1, 2 rescues including one miss→#1) didn't generalize to the full 60-session set at `llm_trigger_margin=0.20`. Superseded by change 19, not reverted — see its section |
+| + rewire the trigger-gate onto `DialogState.leader_margin` (merge `dynamic-state-slot`) | Elinengu | 0.921497 | — | change 19; same gating *idea* as change 18, now reading the live pool-uncertainty signal `dynamic-state-slot` computes once per turn (`observe_pool`, post-orchestration-reroute) instead of a bespoke second rerank call. **Real gain under stress**: dev −0.0035 (0.9275→0.9240), holdout −0.0070 (0.9125→0.9055) — both inside the team's own "<0.02 is noise" band — vs. **+0.0471 score / hit@10 0.917→0.950 / MRR 0.6342→0.7157** on `paraphrase:heavy+browse-gated`, the practical/realistic stressor. `llm_weight` stays `0.0` (off) per the house rule (must not regress the public score); this is the measured case *for* turning it on as an opt-in Innovation/Presentation/Impact layer, not a default-on change |
 
 Net: **public 0.859 -> 0.9313, adversarial 0.684 -> 0.8028.** 77/77 tests pass.
 Change 15 is branch `dual_tracking` work (89/89 tests) and does not move the `main` number.
@@ -1422,6 +1425,164 @@ inspection of what the DeepSeek rerank actually changes per session.
 offline (no-key) code path — all bit-identical to pre-merge. 111/111 tests
 pass (`python3 -m unittest discover -s tests`).
 
+## Change 18 — Trigger-gate the LLM rerank on deterministic uncertainty, measured worse (Elinengu)
+
+**Files:** `src/rerank.py` (`RerankConfig.llm_trigger_margin`), `starter/agent.py`
+(`_rerank_uncertain`, two-pass rerank) — commit `4f45016`.
+
+### Problem
+
+Change 17 measured the always-on LLM rerank (`llm_weight=0.3` on every turn) as
+a real, if small, regression under `paraphrase:heavy+browse-gated`. A
+per-session diagnostic (7 sessions where it changed the outcome, out of 15
+browsing sessions traced) found the effect was not uniform: **5 sessions
+regressed** an already-correct deterministic #1 down to #2/#3, while **2
+improved**, one of them dramatically (a genuine miss rescued from pool-rank 8
+to #1). That matches `future_steps.md`'s own prediction — "LLM semantic
+ranking ... ~0. BM25 recall is already ~100%" — and its own idea list's
+suggestion to rerank with an LLM "only when span coverage saturates ... the
+one regime where it measurably helps," never tried until now.
+
+### What changed
+
+`RerankConfig.llm_trigger_margin` (default `0.20`, mirrors
+`AgentConfig.confidence_margin`'s "is the leader clear enough to trust" test).
+`starter/agent.py` computes a deterministic-only rerank pass first; the real
+DeepSeek call only fires when that pass's top1-vs-top2 margin is below the
+threshold — i.e. only when the deterministic signals haven't already settled
+the question.
+
+### Effect
+
+Measured on the same 60-session `paraphrase:heavy+browse-gated` slice as
+change 17:
+
+| | score | mrr |
+|---|---|---|
+| baseline (`llm_off`) | 0.80010 | 0.6426 |
+| change 17 (always-on) | 0.79269 | 0.6168 |
+| change 18 (trigger-gated, margin 0.20) | **0.78622** | **0.5941** |
+
+**Worse, not better.** The 7-session diagnostic that motivated the gate did
+not generalize to the full 60-session set (25 browsing + 23 buying + 3
+boundary + 9 intent_override): gating on "how close is the deterministic
+race" does not reliably select the cases where DeepSeek's judgment is
+*correct*, only the cases where it has the most *leverage* to move the
+ranking - for better or worse. This result stands as recorded, not reverted:
+change 19 keeps the trigger-gate mechanism (a legitimate cost/latency pattern
+regardless of ranking outcome) but rewires the gate condition itself onto a
+better-grounded uncertainty signal from branch `dynamic-state-slot`.
+
+## Change 19 — Merged `dynamic-state-slot`; the trigger-gate rewired onto live pool signals, now a real win (Elinengu)
+
+**Files:** `starter/agent.py` (`_respond`, `_route_for`, `_policy_for_state`,
+`_shortlist`), `src/state.py`, `src/context_programming.py`, `src/phrasing.py`,
+`src/retrieval.py`, `tools/observe.py`, `docs/team/agent_changes.md`,
+`IMPLEMENTATION.md` (merge conflict resolution) — merges branch
+`dynamic-state-slot` (its own commit `9921650`, "Implement observable
+adaptive conversation state") into `integration/gemini-stress-harness`.
+
+### What `dynamic-state-slot` brings
+
+A structured active/superseded slot ledger, per-turn intent evolution
+(`state.intent_history`, replacing the old `Agent._track()`/`_track_cache`
+dict with state that observably records *why* a promotion happened), rolling
+pool-uncertainty signals (`DialogState.observe_pool`: normalized score
+entropy, `leader_margin`, `over_general`, `stable_pool_turns`,
+`unproductive_streak`), and an `AdaptiveOrchestrator` plan that now actually
+controls retrieval rerouting, phase transitions, question policy, and
+recommendation gating instead of being computed and discarded (as change 17's
+own code left it — "Informational for now - not yet wired into gating").
+Full design writeup and its own measured effect
+(public dev/holdout: `0.914119`→`0.918010`, public: `0.931302`→`0.934371`,
+91/91 tests, on that branch's own lineage) is in that commit's
+`docs/team/agent_changes.md` section, preserved above this one.
+
+### Merge resolution
+
+Both branches had independently restructured `_respond()`. Rather than pick
+one side, every capability from both was kept:
+
+- **Track detection**: `_route_for` (dynamic-state-slot's stateful,
+  self-recording version) replaces `_track()`/`_track_cache`, but the
+  *frozen*-opening classification `_policy_for` needs (dual-track policy
+  selection - a decided buyer gets `FixedPolicy`, a browser gets
+  `InfoGainPolicy`, and this "keys off how the session opened and stays
+  there" by design, not the promotable track) is still computed separately
+  via `classify(state.opening)` each turn - collapsing the two would have
+  silently dropped the measured dual-track routing gain
+  (`docs/team/dual_track_routing.md`: +0.147 overall / +0.43 browsing MRR on
+  the realism harness).
+- **Rerank config / hard filter / recommendation timing**: stayed
+  track-specific (`_rerank_config(track)`, `buying_rerank`/`browsing_rerank`,
+  `_list_size_ramp(track)`), with the orchestration plan layered *on top of*
+  the track-aware ramp/timing rather than replacing it (`_shortlist` now
+  takes both `track` and `plan`).
+- **Question policy**: `_policy_for_state` now composes both — the dual-track
+  base policy, overridden by the stagnation-only targeted policy exactly as
+  dynamic-state-slot designed it, instead of dynamic-state-slot's version
+  which (correctly for its own single-track lineage, but not for this merge)
+  always fell back to the flat `self.config.policy` outside of stagnation.
+- **The LLM trigger-gate (change 18)** is rewired onto
+  `DialogState.leader_margin` - the same live signal `observe_pool` now
+  computes once per turn for the orchestration plan - instead of a bespoke
+  second deterministic `rerank()` call that duplicated work the merge already
+  does for a different reason.
+
+### Effect
+
+Public set (LLM off, the shipped default): `0.921016` → `0.921497` - flat,
+confirming the merge itself doesn't regress the default path.
+
+Re-measuring change 18's trigger-gate on the identical 60-session
+`paraphrase:heavy+browse-gated` slice, now gated on `state.leader_margin`
+instead of a redundant rerank pass:
+
+| | score | mrr | hit@10 |
+|---|---|---|---|
+| baseline (`llm_off`) | 0.78794 | 0.6342 | 0.917 |
+| change 18 (rerank-margin gate) | 0.78622 | 0.5941 | 0.917 |
+| **change 19 (`leader_margin` gate)** | **0.83506** | **0.7157** | **0.950** |
+
+(The baseline itself moved from change 17's `0.80010` to `0.78794` because the
+dynamic-state-slot merge changes deterministic behaviour too - not an
+apples-to-oranges comparison; `llm_off` in each row is that row's own matched
+control.)
+
+**+0.0471 score, +0.0815 MRR, +3.3pp hit@10 over the matched baseline** - a
+real, large improvement under the practical/realistic stressor, the opposite
+of change 18's result at the same nominal `llm_trigger_margin=0.20`. Checked
+against the house rule ("must not regress the public score"): dev moves
+`0.9275`→`0.9240` (−0.0035) and holdout `0.9125`→`0.9055` (−0.0070)
+(`tools/sweep.py --split dev|holdout --configs router_on,llm_off,llm_rerank`)
+- both inside the team's own "differences below ~0.02 are noise" convention,
+consistently in the same (small, negative) direction on both splits rather
+than pure noise, but well short of a regression by that standard.
+
+`llm_weight` **stays `0.0` (off) by default** regardless — the house rule
+gates on the automated score, and this result is exactly the case *for*
+enabling it as an opt-in layer for the Innovation/Impact/Presentation story
+("robust and practical on the harder, more realistic customer, at negligible
+cost on the cooperative one"), not a case for a default-on change. 125/125
+tests pass.
+
+### Why this worked where change 18 didn't
+
+`state.leader_margin` is computed *after* the full pipeline for the turn -
+including any `AdaptiveOrchestrator` retrieval reroute - so it reflects the
+same pool the rest of the turn's decisions are made from, refreshed exactly
+once (`observe_pool`) rather than recomputed ad hoc. Change 18's gate reran
+`rerank()` on the pre-orchestration candidates as a side calculation with no
+other purpose; on a paraphrase-degraded, browse-gated session the two views
+of "how confident is the pool" can disagree, and the second one is measurably
+the better predictor of when consulting DeepSeek is worth the risk. This is
+inference from the numbers, not something separately isolated — a follow-up
+ablation (gate on the pre- vs post-reroute pool alone) would confirm which
+half of the difference is the signal change and which is the merge's other
+concurrent changes (dual-track ramp/timing composition, structured retrieval
+route); not done here for cost (this write-up alone used ~2 hours of real
+DeepSeek-backed stress-harness and sweep runs).
+
 ## Not touched (organizer-owned)
 
 `evaluator/local_evaluator.py`, `data/catalog.jsonl`, `data/public_set.jsonl`, and the
@@ -1430,3 +1591,198 @@ five frozen files at the root of `docs/`: `agent_api_contract.json`,
 `submission_rules.md`.
 
 Everything under `docs/team/` is ours — see `docs/README.md` for the split.
+
+---
+
+## Change 15 — Live conversational state and adaptive execution (Elinengu)
+
+**Files:** `src/state.py`, `src/context_programming.py`, `src/retrieval.py`,
+`src/phrasing.py`, `starter/agent.py`, `tools/observe.py`,
+`tests/test_state_management.py`, `tests/test_components.py`,
+`tests/test_context_programming.py`, `IMPLEMENTATION.md`
+
+**Organizer-owned evaluator changes:** none.
+
+### The recommendation-system idea, in plain language
+
+A recommendation system starts with many possible products. Retrieval finds a
+large **candidate pool** that might fit. Reranking then sorts that pool so the
+best-looking products rise to the top. In a conversation, both steps need a
+reliable memory of what the shopper currently wants.
+
+Before this change, the agent remembered messages, declined attributes and one
+override turn, but its richer orchestration plan was advisory only: it was
+computed and then discarded. The agent now maintains explicit state, derives
+one plan from it each turn, and applies that plan to the real question,
+retrieval and recommendation decisions.
+
+The implementation followed the requested order below.
+
+### 1. Structured active/superseded slot ledger
+
+A **slot** is one usable fact about the request, such as `material=leather` or
+`color=black`. Each `SlotValue` records:
+
+| field | beginner meaning |
+|---|---|
+| `attribute` / `value` | what kind of preference it is and what the shopper said |
+| `source_turn` / `raw_text` | where the fact came from |
+| `confidence` | how directly the system extracted it |
+| `status` | whether it still controls retrieval |
+| `superseded_turn` | when an override retired it |
+
+New information accumulates in `active_slots`. On “Actually, ignore that…”, the
+old active objects move to `superseded_slots`; they are not silently deleted.
+The new facts become the only authoritative structured view. This gives both
+correct current behavior and an audit trail explaining the rewrite.
+
+```mermaid
+flowchart LR
+    A[New user fact] --> B[active slot]
+    B -->|more information| B
+    B -->|intent override| C[superseded archive]
+    D[replacement fact] --> E[new active slot]
+    C -. audit only .-> F[observable snapshot]
+    E --> G[structured retrieval view]
+```
+
+Declines such as “no preference for color” do not become product constraints.
+They instead mark `color` as a dead attribute so it is not asked again.
+
+### 2. Rolling stagnation and pool-state signals
+
+The old lifetime count `productive_turns` cannot tell recent momentum from a
+current dead end. The state now also records:
+
+- `unproductive_streak` and `max_unproductive_streak`;
+- pool size and normalized score entropy (how flat the ranking is);
+- leader margin (how far the first product leads the second);
+- top-pool overlap and consecutive stable-pool turns;
+- `over_general`, for a large, flat candidate pool with no clear leader.
+
+This explains the difference between the two sequences raised during review:
+
+| turn history | total productive | current failure streak | interpretation |
+|---|---:|---:|---|
+| one productive, then five failures | 1 | **5** | the conversation is stuck now |
+| five productive, then one failure | 5 | **1** | one weak turn after good progress |
+
+The transition model is not a trained neural model. It is a deterministic set
+of readable state rules. A stagnation transition requires at least two recent
+unproductive turns plus either a stable pool or an over-general pool. Any new
+slot resets the current streak to zero.
+
+### 3. The orchestration plan now controls execution
+
+`AdaptiveOrchestrator.align_strategy()` already returned a plan, but no
+downstream component read it. The plan is now applied in three places:
+
+| decision | plan field used | behavior |
+|---|---|---|
+| question | `phase` / `guidance_action` | unexplained stagnation switches to a specific information-gain question |
+| recommendation gate | `recommendation_cutoff` / `recommended_slate_size` | withhold an uncertain early list or choose the planned list size |
+| retrieval | `retrieval_route` | use the focused override view or compact structured recovery view |
+
+Two safety rules came from regression testing. A direct “no preference” keeps
+the existing ordered fallback (`feature`, then `use_case`, and so on), rather
+than replacing the user's answer with a catalog-only guess. Also, reretrieving
+within one customer turn updates that turn's pool snapshot without counting it
+as another stable turn.
+
+### 4. Per-turn intent evolution
+
+The router no longer treats the opening sentence as the session's permanent
+intent. It classifies each accumulated turn and records changes in
+`intent_history` with turn, confidence and reason.
+
+- A vague opening stays on the diverse **browsing** track.
+- Enough concrete constraints promote it to the precise **buying** track.
+- Buying stays sticky so a later polite or vague sentence does not erase hard
+  requirements.
+- An explicit override immediately becomes buying and rewrites the active slots.
+
+Long-term profile precedence was deliberately left as it was, per the review
+decision; this change does not let inferred profile preferences override an
+explicit current-session request.
+
+### 5. Distilled structured retrieval view
+
+`authoritative_text()` turns only the active slot ledger into a short search
+query. For example, after replacing “black leather” with “grey canvas”, the
+structured query contains `grey canvas` and not `black leather`.
+
+This view is a real reciprocal-rank-fusion retrieval route. It is intentionally
+adaptive rather than permanently enabled: normal turns keep the higher-recall
+full conversation route, while a `structured` orchestration hint activates the
+slot-only route when progress has stalled. The focused post-override route is
+forced on the reversal turn.
+
+### 6. Observable snapshots and transition diagrams
+
+`DialogState.snapshot()` now returns a JSON-serializable record containing the
+active ledger with provenance, superseded archive, structured query, intent
+history, phase history, productivity streak, pool signals, asked attributes and
+declined attributes. `tools/observe.py` captures the plan and retrieval route and
+renders these fields into its Markdown transcript and HTML viewer.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Exploring
+    Exploring --> Narrowing: a new slot arrives
+    Exploring --> Stagnating: 2+ failures and stable/flat pool
+    Narrowing --> Converging: clear candidate leader
+    Narrowing --> Stagnating: recent progress stops
+    Stagnating --> Narrowing: new information resets streak
+    Stagnating --> Converging: reroute produces clear leader
+    Exploring --> OverrideRecovery: explicit reversal
+    Narrowing --> OverrideRecovery: explicit reversal
+    Converging --> OverrideRecovery: explicit reversal
+    Stagnating --> OverrideRecovery: explicit reversal
+    OverrideRecovery --> Narrowing: replacement evidence accumulates
+    OverrideRecovery --> Converging: replacement request has clear leader
+```
+
+The live turn order is:
+
+```mermaid
+flowchart TD
+    U[User message] --> S[Update slots, decline and streak]
+    S --> I[Update per-turn intent]
+    I --> R[Retrieve and rerank candidate pool]
+    R --> P[Measure entropy, margin and stability]
+    P --> D[Distill structured context]
+    D --> O[Create orchestration plan]
+    O --> RR[Optional focused or structured reroute]
+    RR --> Q[Choose matching ask_attribute and message]
+    Q --> G[Apply recommendation cutoff and slate size]
+    G --> X[Write observable state snapshot]
+```
+
+Example artifact from the verification run:
+`runs/state_observability/state-ledger-20260830-221500/viewer.html`. It was
+generated in a separate output directory so observing a run does not edit the
+observer implementation or create merge-conflict noise there.
+
+### Message and `ask_attribute` consistency
+
+The customer-facing `message` now follows the machine-readable
+`ask_attribute`. A `material` ask only talks about material, a `color` ask only
+talks about color, and `other` stays genuinely open-ended. Candidate-aware
+examples may be voiced only for the same requested attribute. Tests pin this
+contract so the text cannot suggest one question while the evaluator receives
+another.
+
+### Verification and measured effect
+
+| check | result |
+|---|---|
+| full unit/regression suite | **91/91 passed** |
+| observer control comparison | traced and untraced score identical (`0.960000`, one boundary session) |
+| committed-main holdout before | `0.914119`, Hit@10 `1.000` |
+| after this change, holdout | **`0.918010`**, Hit@10 **`1.000`** |
+| public set before | `0.931302`, Hit@10 `1.000` |
+| after this change, public set | **`0.934371`**, Hit@10 **`1.000`** |
+
+The score is not the only purpose of this work—the main result is that state can
+now be inspected and the plan changes real behavior—but the measurements show
+that wiring it in did not buy the architecture by sacrificing retrieval quality.

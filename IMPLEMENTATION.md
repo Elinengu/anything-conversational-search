@@ -750,9 +750,9 @@ Agent(catalog, AgentConfig(policy=InfoGainPolicy(agent.facets)))
 Separate from *what to ask* is *how to say it*. `FixedPolicy` keeps
 `ask_attribute="other"` because that is the score-optimal extraction (§3
 consequence: the simulator returns two constraints of any type for `other` and
-can return zero for a specific attribute, which also retires that attribute), and
-the simulator never reads the English `message` field at all. So the sentence is
-free to be a real, guiding question while the machine-readable field stays put.
+can return zero for a specific attribute, which also retires that attribute).
+The simulator never reads the English `message`, but the two outputs still form a
+public contract: the natural question now always agrees with the structured field.
 
 `clarify()` (`src/phrasing.py`) builds the message. From turn 2 onward — once
 the retrieval pool has been shaped by something the shopper actually said — it
@@ -762,13 +762,17 @@ declined, measures how evenly the pool is split on it — the same `gain_ratio`
 (entropy ÷ maximum entropy) the `InfoGainPolicy` uses. Facets that are genuinely
 split (at least 25% of the pool resolves it, the top value holds no more than
 90% of the mass, two or more values present) are collected, ordered by split
-quality, and the one at `turn_count % count` is voiced — so a session that stays
-on this path asks about a different facet each turn rather than repeating one.
-It names the top two or three values in one of ten complete sentence templates:
+quality, and the one at `turn_count % count` is voiced as optional guidance for
+an open `other` question. It names the top two or three values while explicitly
+allowing the customer to provide another detail:
 
-> "The materials I'm looking at come in leather and canvas — do you lean one way
->  on material?"
-> "So far the list covers black, gold and silver — any steer on colour?"
+> "The shortlist differs on material: leather and canvas. Is that important, or
+>  is there another detail I should prioritize?"
+
+When `ask_attribute` is specific, the grounded path is restricted to that exact
+facet: a `material` action may name leather and canvas; a `size` action can never
+voice a material split. Non-voiceable attributes use their matching specific
+question bank.
 
 The turn-2 gate does **not** require a *productive* turn. Single-word
 disclosures ("leather", "black") never form a multi-word constraint span, so
@@ -784,7 +788,8 @@ rotation of the broad question ("Anything else I should keep in mind?"); when a
 specific ladder rung is asked (`FixedPolicy.FALLBACK` after `other` is declined)
 it uses a three-way rotation of that attribute's own question ("Any must-have
 features?", "How should this fit?"). The whole path is wrapped so a phrasing bug
-degrades to a good question, never an empty turn. `brand` and `budget` and
+degrades to a question for the same `ask_attribute`, never an unrelated broad
+question or an empty turn. `brand` and `budget` and
 `category` are excluded from the *voiced* facets — brand has thousands of
 values, budget is null for 79% of the catalog, and the `category` facet's values
 are path fragments ("women", "novelty").
@@ -810,7 +815,7 @@ session-to-session. `natural_questions=False` bypasses all of this through
 
 This lives in S4 rather than S9 because it is the customer-facing half of the
 clarification decision, and it belongs *beside* `InfoGainPolicy` — it reuses the
-same pool-split measure, just to choose what to voice rather than what to ask.
+same pool-split measure while preserving the question/action contract.
 
 It is deterministic and template-based on purpose: the facet vocabularies are
 small (§S1) so the space is enumerable, exactly like the rest of the pipeline.
@@ -847,10 +852,10 @@ clarification prompts"), not score. Default on;
 - **Two-step lookahead.** The policy is greedy, picking the best single question. Some pairs of
   questions are worth more together than either is alone.
 - **Question phrasing from the candidates.** *Done — `src/phrasing.py`, see "Phrasing" above.*
-  The `message` now names the facet the live pool is most split on and its top values
-  ("For the material, I'm seeing leather and canvas — do you have a preference?"), rotated so
-  it does not repeat, while `ask_attribute` stays `other`. Deterministic, no model, score
-  unchanged by construction. An LLM polish layer would slot in as `_grounded`'s replacement.
+  For `ask_attribute="other"`, the message can name a useful live-pool split but
+  explicitly remains open to another detail. A specific action only voices that
+  same facet. Deterministic, no model, score unchanged by construction. An LLM
+  polish layer would slot in as `_grounded`'s replacement.
 
 ---
 
@@ -1054,17 +1059,24 @@ recorded per change in `agent_changes.md`.
   words has little rarity spread left to exploit. The code was deleted rather than kept as a
   dead option; see §6. Also rejected: the document-length tie-break in three forms, and
   category-path precision, which one session made irresistible and 37 killed (§6).
-- ~~**LLM listwise semantic rerank.**~~ **Built, wired, measured for real — not shipped
-  enabled.** `src/llm.py`'s `LLMClient.rerank_candidates` sends the top-15 candidates and the
-  conversation text to DeepSeek and fuses the returned ranking into `total` at
-  `RerankConfig.llm_weight`. Real DeepSeek calls, real `parent_asin`-keyed scores confirmed
-  end-to-end (`docs/team/agent_changes.md` change 17) — but at `llm_weight=0.3` it is
-  byte-identical to the deterministic baseline on the cooperative dev split (the signals
-  already separate the target cleanly, so a 0.3-weighted re-score never flips top-1) and
-  **costs** score on the two harder measurements: −0.0074 / −0.026 MRR under
-  `tools/stress_harness.py --customer paraphrase:heavy+browse-gated`, −0.016 on a public-set
-  slice. `llm_weight` stays `0.0` (off) by default; it is available as an opt-in
-  Innovation/Presentation knob, not a technical-score lever.
+- ~~**LLM listwise semantic rerank.**~~ **Built, wired, trigger-gated, measured for real —
+  not shipped enabled.** `src/llm.py`'s `LLMClient.rerank_candidates` sends the top-15
+  candidates and the conversation text to DeepSeek and fuses the returned ranking into
+  `total` at `RerankConfig.llm_weight`. Real DeepSeek calls, real `parent_asin`-keyed scores
+  confirmed end-to-end (`docs/team/agent_changes.md` change 17). Called on *every* turn
+  (`llm_weight=0.3`) it is byte-identical to baseline on the cooperative dev split and
+  **costs** score under stress (`paraphrase:heavy+browse-gated`: −0.0074 score / −0.026
+  MRR). A per-session diagnosis found the effect concentrated in exactly the cases
+  deterministic signals are weak on - so change 19 trigger-gates the real call on
+  `DialogState.leader_margin` (a live pool-uncertainty signal from the
+  `dynamic-state-slot` merge, computed once per turn), calling DeepSeek only when the
+  deterministic rerank hasn't separated #1 confidently. That flips the result: **+0.0471
+  score / +0.0815 MRR / +3.3pp hit@10** under the same stress condition, at a cost of
+  −0.0035 (dev) / −0.0070 (holdout) - both inside the team's own "<0.02 is noise" band.
+  `llm_weight` stays `0.0` (off) by default per the house rule (must not regress the
+  public score); it is available as an opt-in Innovation/Impact/Presentation knob -
+  "robust on the harder, more realistic customer, at negligible cost on the cooperative
+  one" - not a technical-score lever.
 
 ---
 
