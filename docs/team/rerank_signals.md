@@ -27,9 +27,16 @@ hard — that bounds every future reranking idea in this document. §10 dissects
 where that ceiling actually lives (a pure tie-break regime in which the
 retrieval score picks the impostor 33/33 and popularity picks the target
 31/33) and carries the weight re-fit that follows from it.
+§11 closes the other half of that tie-break and fails: document length is a real,
+popularity-independent discriminator in the near-miss anatomy (33/37 on dev) and
+does not survive contact with the adversarial set in any of three forms. §5 was
+re-opened in the same round — change 12 looked like it should revive the no-span
+rescore — and upheld a second time, on a dev split that does not move by a single
+digit.
 The negative results are documented with the same care as the positive ones —
 knowing *why* a plausible signal does not work is what stops it being rebuilt
-later.
+later. Three of the last four rounds shipped no code at all; that is the method
+working, not the method failing.
 
 **This doc is the decision log: what was tried and what the measurements said.**
 Its companion `signal_descriptions.md` is the as-built spec — every shipped
@@ -386,6 +393,57 @@ sessions on an unexplained interaction, while regressing a bucket, is the
 overfitting signature this document exists to catch. The early return and the
 turn-1 exclusion stand.
 
+### Re-opened after change 12, and upheld a second time
+
+Change 12 raised `popularity_weight` 0.02 -> 0.4, which looked like it should
+revive variant A: the whole point of A is to rescore with the non-span signals,
+and popularity is the strongest of them. `public_0198` is the motivating case -
+its four disclosed constraints (`leather`, `color: black`, `PU`, `Imported`) are
+all single words, so `constraint_spans` (min 2) and `pair_spans` (min 3) both
+return nothing for the entire session, the early return fires on every turn, and
+the pool is served in raw RRF order. The target sits at pool rank 51 and only
+surfaces at **turn 9** via the elimination scan. Replayed with A, it ranks 1 at
+turn 4 - and the margin is 0.003, entirely popularity (4.7*/4718 ratings against
+the impostor's 2.8*/6). At weight 0.02 the target loses that comparison; at 0.4
+it wins it.
+
+Measured at the shipped 0.4, on the splits:
+
+| | dev (120) | holdout (80) | hard (96) |
+|---|---:|---:|---:|
+| baseline | 0.941757 | 0.913619 | **0.801978** |
+| variant A | **0.941757** | 0.918765 | 0.799968 |
+
+**Dev is bit-for-bit unchanged.** The regime change did not revive it: A was
+dev-flat at 0.02 and is still exactly dev-flat at 0.4. Everything that moves is
+on the holdout (4 sessions better, 0 worse - `public_0145`, `public_0149`,
+`public_0162`, `public_0198`) against 5 hard-set sessions worse
+(`hard_degenerate_card_{01,07,10,15}`, `hard_generic_override_13`). A change
+whose selector split does not move while the gate split gains is not a candidate;
+it is the thing the split exists to detect.
+
+The natural explanation - that popularity causes the hard-set loss, because
+`hard_cases.py` draws thin, unreviewed targets - was tested and is **wrong**:
+
+| variant A on the hard set | score |
+|---|---:|
+| baseline (early return) | **0.801978** |
+| popularity x1.0 | 0.799968 |
+| popularity x0.5 | 0.797753 |
+| popularity x0.0 | 0.799299 |
+
+Damping the prior makes it worse. The cost is in `_tail_match` /
+`_category_match` / `_facet_agreement` / `_facet_conflicts` firing as the *only*
+evidence on `degenerate_card`, where the customer has disclosed almost nothing.
+
+`public_0198` is worth naming because it is the honest hard case for this
+document's own method: a real nine-turn efficiency cost, with a real fix, that
+the protocol nonetheless refuses. The untried variant, if anyone re-opens this a
+third time, is a **separability gate** - rescore only when the non-span signals
+actually discriminate within this pool, rather than whenever spans are absent -
+which is selective reranking / query-performance prediction in its cheapest
+form. It needs a dev-side win to justify the work. There isn't one yet.
+
 ---
 
 ## 6. Measured and rejected: turn-1 exclusion from facet extraction
@@ -619,7 +677,7 @@ path and a macOS teardown quirk for code that never ran.
 
 So the code moved to the **`semantic-rerank`** branch and this section kept the
 numbers. Nothing measured is lost: the branch is one `git checkout` away and
-§12 carries the commands. The oracle ceiling this work established (+0.043
+§13 carries the commands. The oracle ceiling this work established (+0.043
 public, +0.084 hard) outlived the code and directly produced §10.
 
 ### One sub-signal that was deleted
@@ -755,7 +813,114 @@ measured. The argmax is kept reproducible as the `weights_argmax` sweep row —
 a documented trade (public +0.012 more, hard −0.020) that the private set's
 uniform sampling might justify, but the no-bucket-regresses rule does not.
 
-## 11. Housekeeping shipped alongside
+## 11. Built, measured, and rejected: the document-length tie-break
+
+§10 named BM25 length normalization as the mechanism that hands rank 1 to the
+impostor — the thin listing where the same matched words are a larger share of
+the document — but fixed only the other half of the tie-break, by raising
+`popularity_weight`. This section is the attempt to fix the length half, and the
+reason it does not ship.
+
+### The signal is real, and it is not popularity in disguise
+
+Near-miss anatomy on the **dev split only** (target at rank 2-10 at a slate
+turn, against the impostor holding rank 1), re-run on the post-change-12 tree:
+
+| | dev (n=37) |
+|---|---|
+| popularity picks the target | 31/37 |
+| **text length picks the target** | **33/37** |
+| mean tokens, target vs impostor | **221.4 vs 103.8** |
+| of the 6 near-misses popularity gets wrong, length rescues | **5** |
+
+The two are complementary rather than redundant: their deltas correlate 0.418,
+and together they cover 36 of 37. This is exactly the shape of
+Singhal, Buckley & Mitra's pivoted length normalisation (SIGIR 1996) — here
+P(relevance) *rises* with length while BM25's normalisation makes P(retrieval)
+*fall*, which is the gap pivoting exists to close.
+
+The same anatomy killed one candidate signal before implementation:
+**category-path precision**. `public_0002` makes it look irresistible — the
+target is `Men > Accessories > Belts` while the impostors are
+`Sport Specific Clothing > Golf > Women > Accessories > Belts`, so penalising
+category levels the customer never named would separate them, and neither
+`_category_match` nor `_tail_match` can (both score every one of them 2.0). It
+ties on **34 of 37** dev near-misses. One vivid session is not a signal.
+
+### Three forms, all measured, all rejected
+
+**Additive log-length** (`+ w · log10(len)/3`, unconditional): directionally
+positive and numerically negligible. Normalised log-length separates target from
+impostor by ~0.09 against a retrieval gap of ~0.5, so even at w=0.4 it moves
+0.036. Not enough to matter.
+
+**Percentile within the pool** (unconditional), which fixes the scale by
+spreading the same ordering across [0, 1]:
+
+| | dev | holdout | hard |
+|---|---:|---:|---:|
+| baseline | 0.941757 | 0.913619 | **0.801978** |
+| w=0.2 | 0.942375 | 0.915806 | 0.795164 |
+| w=0.5 | 0.936694 | 0.916896 | 0.794613 |
+| w=1.0 | 0.931583 | 0.903760 | 0.787850 |
+
+Best dev result +0.0006, inside the noise floor, against −0.0068 on the hard
+set, and no plateau — dev falls off a cliff between 0.2 and 0.5.
+
+The mismatch is in the reading, and naming it is the useful part. The anatomy
+measures length **conditionally**: among near-misses, where every content signal
+is already tied, the longer document is the target. Applying it *unconditionally*
+asserts something stronger and false — "longer is better" — and the hard set,
+whose targets are deliberately thin, is precisely where that is wrong.
+
+**Percentile applied only inside a content tie**, which is the form the anatomy
+actually supports. Content evidence (`span + pair + facet + category + tail −
+conflict`) is summed separately from the priors; candidates whose content
+subtotal is within `length_tie_tolerance` of the leader's get
+`length_weight × pool_length_percentile`, everyone else gets nothing. This works
+on the motivating session — `public_0002` (a dev session) moves the target from
+rank 9 to 6 at w=0.1 and to 3 at w=0.3 — and on dev it is worth about +0.0015
+across the whole bracket. On the hard set at exact-tie tolerance:
+
+| length_weight (tolerance 0.0) | dev | hard | hard hit |
+|---|---:|---:|---:|
+| 0.0 (baseline) | 0.941757 | **0.801978** | 0.896 |
+| 0.05 | 0.943042 | 0.800511 | 0.896 |
+| 0.08 | 0.943146 | 0.800381 | 0.896 |
+| **0.10** | 0.943229 | **0.805064** | 0.896 |
+| 0.12 | 0.943354 | 0.799075 | 0.885 |
+| 0.15 | 0.943979 | 0.795659 | 0.885 |
+| 0.20 | 0.942604 | 0.791179 | 0.885 |
+
+**This is why it does not ship.** One point clears the hard-set gate and both its
+neighbours fail, on either side. Dev is flat-to-rising across the whole range
+while hard swings non-monotonically by 0.014 — a spread of roughly one session on
+a 96-session set. `w=0.10` is an argmax on noise, not a plateau, and the rule
+this document has applied since change 12 is that a rounded, plateau-checked
+value ships and an argmax does not. A looser tolerance (0.5, roughly half a
+matched span) is worse still: every weight from 0.05 up regresses hard, and
+hit@10 drops 0.896 → 0.885 from w=0.1.
+
+### What would have to change
+
+The term reaching the reranker as `retrieval_score` is an **RRF score**
+(`src/retrieval.py`), i.e. a function of BM25 *rank*, not BM25 itself. Rank
+fusion has already discarded the score magnitudes that pivoted normalisation
+operates on, so every form above is a correction bolted onto fused ranks rather
+than a corrected scorer. The faithful version — and the one the literature
+actually describes — is to recompute a length-corrected BM25 over the
+300-candidate pool inside the reranker, where `k1` and `b` are yours to choose;
+SQLite FTS5's `bm25()` fixes them and exposes no knob. That is ~30 lines and
+still stdlib-only. It is the one untried route, and it is the right one to try
+before anybody re-derives the additive prior a fourth time.
+
+The code for the three rejected forms is not kept: dead options are deleted, not
+parked. Rebuilding it is a `length_weight` / `length_tie_tolerance` pair on
+`RerankConfig`, a pool-local length percentile, and splitting the existing
+`total` in `rerank()` into a content subtotal plus priors so the tie can be
+tested without the priors masking it.
+
+## 12. Housekeeping shipped alongside
 
 * Deleted the dead commented-out block in `_facet_agreement` (the pre-lowercase
   `extract()` call kept as a `'''…'''` string).
@@ -767,7 +932,7 @@ uniform sampling might justify, but the no-bucket-regresses rule does not.
   (still showed span + bm25 + popularity over depth 200); now matches
   `RerankConfig`.
 
-## 12. Reproduction
+## 13. Reproduction
 
 ```bash
 python3 -m unittest discover -s tests            # 57 tests
@@ -784,7 +949,25 @@ python3 tools/sweep.py --split dev \
     --configs pop002,pop010,pop030,pop050           # §10 step-1 bracket
 python3 tools/fit_weights.py                        # §10 step-2 fit (dev only)
 python3 tools/observe.py --only public_0020      # the motivating session, now rank 1
+python3 tools/observe.py --only public_0002,public_0198   # §5 and §11 diagnostics
 ```
+
+### The split discipline these numbers were measured under
+
+`tools/sweep.py:split_samples` partitions the **public set** into dev (120) and
+holdout (80). "Public 200" therefore *contains* the holdout, so a variant chosen
+by reading a public score has already spent the gate. §5's re-opening is the
+cautionary example: on public 200 the no-span rescore reads +0.0021 and looks
+shippable, and every point of that comes from the holdout half while dev does not
+move at all. Select on dev; run holdout once, on the final candidate; report
+public last. §11's near-miss anatomy was re-derived on dev alone for the same
+reason — the first pass was computed over all 200 sessions, which would have made
+the feature-selection step itself a read of the test set.
+
+The hard set has now been read across changes 11 and 12 and §§5, 11, so it is
+partially spent as an independent test. `tools/generate_adversarial_set.py` can
+draw a fresh one; doing so before the next weight re-fit is worth the few
+minutes.
 
 §6-§8 were measured with a throwaway harness rather than `tools/sweep.py` rows,
 because the variants change the *shape* of `_facet_agreement` /

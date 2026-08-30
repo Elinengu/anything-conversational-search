@@ -1003,13 +1003,24 @@ recorded per change in `agent_changes.md`.
   is the single change the fit and the near-miss anatomy both pointed at: `popularity_weight`
   0.02 → 0.4. Public 0.9199 → 0.9305, every split up. The honest lesson: the fit finds the
   direction; the gates decide the magnitude.
-- **A negative-evidence signal.** Nothing currently penalises a candidate that *contradicts* a
-  stated constraint. A customer who said "leather" and a candidate whose material is explicitly
-  canvas should be pushed down, not merely left unrewarded.
+- ~~**A negative-evidence signal.**~~ **Done.** Nothing used to penalise a candidate that
+  *contradicts* a stated constraint — a customer who said "grey" and a candidate whose text
+  never mentions grey was merely left unrewarded, not pushed down. This ships as
+  `RerankConfig.facet_conflict_weight` (`_facet_conflicts`), judged against `focused_text()`
+  and guarded so that silence is never punished.
+- **Correct the retrieval score's length bias at its source.** The near-miss anatomy says the
+  impostor wins on the retrieval score alone, and the reason is BM25's length normalisation
+  favouring thin listings. Three attempts to correct it *after* the fact — as an additive
+  document-length prior — all failed the adversarial gate (see §6). The untried route is to
+  recompute a length-corrected BM25 over the 300-candidate pool inside the reranker, choosing
+  the normalisation strength directly: SQLite's `bm25()` fixes it, and the fused score the
+  reranker sees is built from BM25 *ranks*, which have already discarded the magnitudes any
+  correction needs. ~30 lines, still standard library.
 - **What was already tried and rejected here:** weighting phrases by how rare they are within the
   shortlist. It moved dev by `0.0002` and holdout not at all — a pool retrieved by those same
   words has little rarity spread left to exploit. The code was deleted rather than kept as a
-  dead option; see §6.
+  dead option; see §6. Also rejected: the document-length tie-break in three forms, and
+  category-path precision, which one session made irresistible and 37 killed (§6).
 
 ---
 
@@ -1238,6 +1249,57 @@ not repeat the experiment.
 | **Multi-valued facet extraction** | agreement −0.0006 public / −0.0023 hard; conflict-only 0.0000 | Rejected. The agreement half dilutes the signal by matching more candidates; the conflict half is exactly neutral and was not shipped, because a code path no measurement justifies does not earn its place. |
 | **Explicit constraint ledger (S3)** | not built | Cancelled after specifying and measuring all six operations — see below. |
 | **Neural cross-encoder reranking (S6b)** | dev 0.9268 → 0.9211, hard 0.7981 → 0.7944 | Built, measured, removed. Loses on every split and every setting; the optimum semantic weight is zero. Code preserved on branch `semantic-rerank`. |
+| **No-span rescore, re-opened after change 12** | dev 0.941757 → 0.941757 (bit-identical), holdout 0.9136 → 0.9188, hard 0.8020 → 0.8000 | Rejected a second time. Change 12 looked like it should revive it; dev did not move by a single digit, and everything that gained was on the gate split. See below. |
+| **Document-length tie-break** | dev 0.941757 → 0.943229, hard 0.801978 → 0.805064 at `w=0.10` only | Built in three forms, rejected. The hard-set gate is cleared at one weight with both neighbours failing — an argmax on noise, not a plateau. See below. |
+
+**Document length, and the difference between a signal and a shippable signal.** The
+near-miss anatomy asks a narrow question: when the target sits at rank 2-10 behind an
+impostor, what separates them? On the dev split, 37 sessions, the answer is that every
+*content* signal is exactly tied and only two things differ — how many reviews the
+product has, and how long its description is. The target averages 221 tokens, the
+impostor 104. Length picks the target 33 times out of 37, and it rescues 5 of the 6
+sessions where the review count points the wrong way, so it is not the review signal
+wearing a second hat.
+
+The mechanism is BM25's document-length normalisation. BM25 divides a document's match
+score by its length, on the reasoning that a long document mentioning "leather" three
+times is less about leather than a short one mentioning it three times. That reasoning
+is right in general and wrong here: the products a real customer actually bought tend to
+be the ones with a filled-out listing, so length correlates with *being the answer*. This
+is a textbook case of what the IR literature calls pivoted length normalisation (Singhal,
+Buckley & Mitra, 1996) — the correction exists precisely to close the gap between how
+likely a document is to be relevant and how likely the scorer is to retrieve it.
+
+Three ways of applying it were built and measured, and none shipped. Adding a term
+proportional to `log(length)` is too small to matter — target and impostor differ by
+0.09 on that scale against a retrieval gap of 0.5. Replacing it with the candidate's
+length *percentile within the retrieved pool* fixes the scale and then overshoots: it
+gains 0.0006 on dev and costs the adversarial set 0.0068, because the adversarial set
+deliberately draws thin, sparsely-described targets. Restricting the term to candidates
+whose content evidence is exactly tied — the regime the anatomy actually measured — is
+the honest form, and it works on the motivating session (`public_0002`, a dev session,
+moves the target from rank 9 to rank 3). But across the weight bracket the adversarial
+set swings non-monotonically by 0.014, roughly one session on a 96-session set, and only
+`w=0.10` lands above baseline while `0.08` and `0.12` both fall below it.
+
+That is the whole finding: **a single weight clearing a gate with both its neighbours
+failing is an argmax on noise, and this project ships plateaus, not argmaxes.** The same
+rule kept the coordinate-ascent weight vector out of the tree in change 12. The one route
+not yet tried is to recompute a length-corrected BM25 inside the reranker over the
+300-candidate pool, where the normalisation strength is ours to choose — SQLite's
+built-in `bm25()` fixes it and offers no knob, and the fused retrieval score the reranker
+currently sees is built from BM25 *ranks*, which have already thrown away the magnitudes
+the correction needs. `docs/team/rerank_signals.md` §11 carries the tables.
+
+**The category-path idea that one session made irresistible, and 37 killed.** In
+`public_0002` the target is a men's belt (`Men > Accessories > Belts`) and the impostors
+above it are women's golf belts (`Sport Specific Clothing > Golf > Women > Accessories >
+Belts`). The customer said only "Accessories Belts", so the impostors carry three
+category levels the customer never mentioned and the target carries one — penalising that
+would separate them instantly, and neither existing category signal can, because both
+only look at the last two levels and score every one of these candidates identically.
+Measured across the 37 dev near-misses, it ties on 34. It was never built. One vivid
+session is a hypothesis, not evidence, and the anatomy is what tells the two apart.
 
 **The constraint ledger, and why measuring a design beats arguing about it.** A typed
 `Constraint` ledger (slot, value, turn, polarity, status) with CARRY / UPDATE / ADD / DELETE /
