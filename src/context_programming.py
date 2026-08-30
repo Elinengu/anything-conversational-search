@@ -18,6 +18,7 @@ from enum import Enum
 from typing import Any
 
 from src.facets import extract_query_facets
+from src.llm import get_llm_client
 from src.state import DialogState
 
 
@@ -173,6 +174,26 @@ class AdaptiveOrchestrator:
             if p > 0.0:
                 entropy -= p * math.log2(p)
         return entropy / math.log2(len(scores))
+
+    @staticmethod
+    @staticmethod
+    def _llm_phase_hint(context: DistilledShortTermContext, candidates: list[tuple[str, float]], phase: DialogPhase) -> DialogPhase:
+        """Optional Gemini-backed phase correction for ambiguous orchestration states."""
+        client = get_llm_client()
+        if not client.is_configured:
+            return phase
+        prompt = (
+            "You are the orchestrator for a shopping assistant. Determine whether the customer is "
+            "exploring, converging, recovering from an override, or stagnating. "
+            "Return strict JSON with a single key 'phase' and one of: 'exploring', 'converging', 'override', 'stagnating'. "
+            f"Current phase guess: {phase.value}. Turn: {context.turn}. Candidate_count: {len(candidates)}."
+        )
+        payload = client.generate_json(prompt)
+        if isinstance(payload, dict):
+            phase_name = payload.get("phase")
+            if phase_name in {item.value for item in DialogPhase}:
+                return DialogPhase(phase_name)
+        return phase
 
     @staticmethod
     def align_strategy(
