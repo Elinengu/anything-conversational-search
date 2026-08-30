@@ -113,6 +113,19 @@ class RerankConfig:
     # fragments saturate. 0.4-1.5 score identically; mid-plateau. 0.0 disables.
     pair_weight: float = 0.8
 
+    # Dual-track routing (opt-in, off unless AgentConfig.use_router routes a
+    # "buying" track and hands rerank() a track-specific config with this set).
+    # A decided buyer has stated a hard requirement, so a candidate that
+    # *positively contradicts* an authoritative stated facet is not a ranking
+    # question - it is not the target. When True and track == "buying", such
+    # candidates are dropped from the head instead of merely penalised by
+    # facet_conflict_weight. Same three-part conflict test as _facet_conflicts
+    # (silence is never a contradiction), judged against focused_text() so an
+    # overridden-away or misparsed constraint cannot evict the target. Browsing
+    # keeps every candidate and the soft penalty. Default False = today's
+    # behaviour on every track.
+    hard_filter: bool = False
+
     # Rescore the whole retrieval pool (RetrievalConfig.pool_size), not a prefix -
     # ~12% of cluster-target sessions had the target in the pool but past rank 200,
     # where it was left in bm25 order and the span signal never applied.
@@ -268,6 +281,7 @@ def rerank(
     state: DialogState,
     candidates: list[tuple[str, float]],
     config: RerankConfig | None = None,
+    track: str | None = None,
 ) -> list[tuple[str, float]]:
     config = config or RerankConfig()
     if not config.enabled or not candidates:
@@ -305,6 +319,33 @@ def rerank(
     # focused_text() happens to do here - is the best of the three.
     # docs/team/rerank_signals.md records all four variants.
     authoritative_facets = extract_query_facets(state.focused_text())
+
+    # Dual-track hard filter: on the buying track, a candidate that positively
+    # contradicts an authoritative stated facet is banished to the very bottom of
+    # the list rather than merely penalised by facet_conflict_weight. Guarded
+    # exactly like the soft penalty (_facet_conflicts): needs the stated value
+    # AND the attribute resolved on the candidate AND the value absent from its
+    # text - silence is never a contradiction. Banished candidates are appended
+    # after the tail, not removed, so retrieval recall is never lost; in practice
+    # a shown slate is <= 10, so this makes the contradiction decisive without a
+    # recall cliff. Browsing keeps every candidate rankable on its other signals.
+    banished: list[tuple[str, float]] = []
+    if track == "buying" and config.hard_filter and authoritative_facets:
+        survivors: list[tuple[str, float]] = []
+        for asin, score in head:
+            product = index.products.get(asin)
+            if product is not None and _facet_conflicts(
+                authoritative_facets, extract(product), product["text"]
+            ) > 0.0:
+                banished.append((asin, score))
+            else:
+                survivors.append((asin, score))
+        if survivors:
+            head = survivors
+        else:
+            # Every candidate contradicts - the extraction is almost certainly
+            # wrong. Rank them all normally rather than banish the whole pool.
+            banished = []
 
     scored: list[tuple[str, float]] = []
     for parent_asin, retrieval_score in head:
@@ -356,4 +397,4 @@ def rerank(
         scored.append((parent_asin, total))
 
     scored.sort(key=lambda item: (-item[1], item[0]))
-    return scored + tail
+    return scored + tail + banished

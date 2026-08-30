@@ -287,6 +287,47 @@ class RerankTests(unittest.TestCase):
         old = rerank(index, state, pool, RerankConfig(popularity_weight=0.02))
         self.assertEqual(old[0][0], "thin")
 
+    def test_track_kwarg_defaults_to_todays_behaviour(self) -> None:
+        # A bare call and track=None must be byte-identical, and hard_filter is
+        # inert on any track but "buying".
+        index = _StubIndex({
+            "wrong": {"text": "cotton shirt classic fit black only"},
+            "right": {"text": "cotton shirt classic fit heather grey"},
+        })
+        state = DialogState("s")
+        state.observe(1, "I'm looking for shirts")
+        state.observe(2, "For that, what matters is: cotton shirt; color: grey.")
+        pool = [("wrong", 1.0), ("right", 0.9)]
+        base = rerank(index, state, list(pool), RerankConfig(hard_filter=True))
+        self.assertEqual(base, rerank(index, state, list(pool), RerankConfig(hard_filter=True), track=None))
+        self.assertEqual(base, rerank(index, state, list(pool), RerankConfig(hard_filter=True), track="browsing"))
+
+    def test_hard_filter_banishes_a_contradicting_candidate_on_the_buying_track(self) -> None:
+        index = _StubIndex({
+            "wrong": {"text": "cotton shirt classic fit black only"},
+            "right": {"text": "cotton shirt classic fit heather grey"},
+        })
+        state = DialogState("s")
+        state.observe(1, "I'm looking for shirts")
+        state.observe(2, "For that, what matters is: cotton shirt; color: grey.")
+        # Retrieval strongly prefers the black-only impostor.
+        ranked = rerank(index, state, [("wrong", 9.0), ("right", 0.1)],
+                        RerankConfig(hard_filter=True), track="buying")
+        self.assertEqual(ranked[0][0], "right")
+        self.assertEqual(ranked[-1][0], "wrong")
+
+    def test_hard_filter_keeps_the_slate_when_every_candidate_contradicts(self) -> None:
+        index = _StubIndex({
+            "a": {"text": "cotton shirt black only"},
+            "b": {"text": "cotton shirt navy only"},
+        })
+        state = DialogState("s")
+        state.observe(1, "I'm looking for shirts")
+        state.observe(2, "For that, what matters is: cotton shirt; color: grey.")
+        pool = [("a", 1.0), ("b", 0.9)]
+        ranked = rerank(index, state, list(pool), RerankConfig(hard_filter=True), track="buying")
+        self.assertEqual(sorted(a for a, _ in ranked), ["a", "b"])  # no drop, no duplicate
+
 
 class RouterTests(unittest.TestCase):
     def test_cue_based_classification(self) -> None:
