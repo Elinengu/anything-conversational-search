@@ -161,32 +161,9 @@ def build_configs(catalog: str) -> dict[str, AgentConfig]:
             use_router=True,
             buying_rerank=RerankConfig(hard_filter=True),
         ),
-        # Dense sentence-embedding cosine as an S6 rerank signal (branch
-        # dense_rerank). The only S6 term that scores meaning rather than exact
-        # tokens - the paraphrase hypothesis. 0.0 is router_on; these bracket the
-        # weight. `_spans` encodes the disclosed spans instead of full_text.
-        "dense_rr_02": AgentConfig(use_router=True, rerank=RerankConfig(dense_weight=0.2)),
-        "dense_rr_05": AgentConfig(use_router=True, rerank=RerankConfig(dense_weight=0.5)),
-        "dense_rr_10": AgentConfig(use_router=True, rerank=RerankConfig(dense_weight=1.0)),
-        "dense_rr_15": AgentConfig(use_router=True, rerank=RerankConfig(dense_weight=1.5)),
-        "dense_rr_05_spans": AgentConfig(
-            use_router=True, rerank=RerankConfig(dense_weight=0.5, dense_query="spans")),
-        "dense_rr_05_rns": AgentConfig(   # also rescore when no verbatim span exists
-            use_router=True,
-            rerank=RerankConfig(dense_weight=0.5, rescore_without_spans=True)),
-        # Per-track dense *retrieval* route (S5, branch dense_rerank). The
-        # stress-harness diagnostic puts the paraphrase recall tail on the
-        # browsing track, so dense_route_browse fuses the dense route into
-        # browsing only and leaves buying BM25-only - THE hypothesis.
-        # dense_route_all is the both-tracks control; _w10 pushes the dense
-        # route weight to parity with the terms route. See docs/team/dense_route.md.
-        "dense_route_browse": AgentConfig(
-            use_router=True, browsing_retrieval=RetrievalConfig(use_dense=True)),
-        "dense_route_all": AgentConfig(
-            use_router=True, retrieval=RetrievalConfig(use_dense=True)),
-        "dense_route_browse_w10": AgentConfig(
-            use_router=True,
-            browsing_retrieval=RetrievalConfig(use_dense=True, weight_dense=1.0)),
+        # A bge-small dense retrieval route and a dense rerank term were built and
+        # measured on branch `dense_rerank`: neither helped (docs/team/dense_rerank.md,
+        # dense_route.md). This branch is BM25 only and does not carry those rows.
     }
 
 

@@ -44,19 +44,12 @@ mv catalog.jsonl data/catalog.jsonl
 
 Expected: `wc -l data/catalog.jsonl` → `50000`.
 
-### Optional: the dense signal
+### Dependencies
 
-The agent runs on the Python standard library alone. Only the *optional* dense
-sentence-embedding signal (`src/embed.py`, and the `dense_*` sweep configs) needs
-extra wheels:
-
-```bash
-pip install -r requirements.txt      # numpy, onnxruntime, tokenizers
-```
-
-If these are missing the dense signal self-disables and the pipeline is the
-pure-stdlib BM25 one. You do **not** need them for the official score or for any
-test except the `dense_*` sweep rows.
+None. The agent, the evaluator, the sweep harness and the stress harness all run
+on the Python standard library alone — no `pip install`, no network at scoring
+time. (A `bge-small` embedding signal was tried on branch `dense_rerank`; it did
+not help and this branch does not carry it — see `docs/team/dense_rerank.md`.)
 
 ### Confirm you're set up
 
@@ -161,8 +154,7 @@ argmax — that fits the 200 public sessions through the back door, and the priv
 | `conflict00/04/08`, `pair00/08/15`, `ramp_flat/3/4/5/55`, `pop002/010/030/040/050` | Weight brackets for negative-facet-evidence, pair-span, first-slate size ramp, and popularity. Each brackets its shipped default (`0.4` / `0.8` / `(4,10)` / `0.4`). |
 | `weights_argmax` | The coordinate-ascent dev argmax — higher on dev/holdout/public, **regresses the hard set**; kept as a row, not shipped. |
 | `natural_off` / `natural_on` | Pool-aware clarification wording (`src/phrasing.py`). Must score **bit-for-bit identical** — the simulator never reads `message`. The row exists to prove that. |
-| `router_off` / `router_on` / `router_on_hardfilter` | Dual-track routing (branch `dual_tracking`). `router_off` must match the flat pre-routing agent bit-for-bit; `router_on` lets the track drive policy/rerank/timing; `_hardfilter` adds the buying-track candidate banish. |
-| `dense_rr_02/05/10/15`, `dense_rr_05_spans`, `dense_rr_05_rns` | Dense-cosine S6 rerank term at several weights (branch `dense_rerank`). **Needs `pip install -r requirements.txt`.** |
+| `router_off` / `router_on` / `router_on_hardfilter` | Dual-track routing. `router_off` is the flat single-track pipeline (bit-for-bit like the pre-routing agent); `router_on` lets the buying/browsing track drive policy/rerank/timing; `_hardfilter` adds the buying-track candidate banish. |
 
 Add a row to `build_configs()` to test your own change.
 
@@ -247,8 +239,7 @@ between two runs, not just the score.
 
 `tools/stress_harness.py` drives the **unmodified** agent through a faithful copy
 of the evaluator loop with customers the official simulator cannot produce:
-paraphrasing, non-cooperative browsers, genuine decoys. Pure stdlib **unless** a
-`dense_*` config is used (then it needs `onnxruntime` + `tokenizers`).
+paraphrasing, non-cooperative browsers, genuine decoys. Pure standard library.
 
 **Always run `--verify` first:**
 
