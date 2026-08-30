@@ -1,0 +1,105 @@
+"""Guards for tools/stress_harness.py - the composable customer stressors.
+
+Pinned without loading the 50,000-row catalog.
+"""
+
+from __future__ import annotations
+
+import random
+import unittest
+
+from tools.stress_harness import StressCustomer, parse_spec, paraphrase_disclosure
+
+CARD = {
+    "hard_constraints": ["100% Leather", "color: black"],
+    "soft_preferences": ["Buckle closure", "Wide width"],
+}
+CATS = {"T": ["Clothing, Shoes & Jewelry", "Men", "Belts"]}
+
+
+def _customer(scenario: str, **spec) -> StressCustomer:
+    full = {"paraphrase": "", "browse_gated": False, "decoy": False}
+    full.update(spec)
+    return StressCustomer(
+        sample={"scenario_type": scenario, "user_profile": {}},
+        card=CARD, behavior={}, categories=CATS, target="T",
+        rng=random.Random(0), index_products=None, **full,
+    )
+
+
+class SpecParsingTests(unittest.TestCase):
+    def test_official_is_all_off(self) -> None:
+        self.assertEqual(parse_spec("official"),
+                         {"paraphrase": "", "browse_gated": False, "decoy": False})
+
+    def test_compound_spec(self) -> None:
+        self.assertEqual(
+            parse_spec("paraphrase:medium+browse-gated"),
+            {"paraphrase": "medium", "browse_gated": True, "decoy": False},
+        )
+
+    def test_unknown_stressor_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            parse_spec("teleport")
+
+
+class BaseBehaviourTests(unittest.TestCase):
+    def test_no_stressor_matches_the_official_customer(self) -> None:
+        c = _customer("buying")
+        self.assertIn("A key requirement is: 100% Leather.", c.opening())
+        msg = c.reply(2, "other")
+        self.assertEqual(msg, "For that, what matters is: color: black; Buckle closure.")
+
+    def test_boundary_decline_is_unchanged(self) -> None:
+        c = _customer("browsing")  # boundary shares the browsing opening
+        c.scenario = "boundary"
+        self.assertIn("judgment", c.reply(2, "color"))
+
+
+class BrowseGatedTests(unittest.TestCase):
+    def test_broad_ask_reveals_nothing(self) -> None:
+        c = _customer("browsing", browse_gated=True)
+        msg = c.reply(2, "other")
+        self.assertIn("still just browsing", msg)
+        self.assertEqual(c.disclosed, set())
+
+    def test_pointed_ask_reveals_one_constraint(self) -> None:
+        c = _customer("browsing", browse_gated=True)
+        msg = c.reply(2, "material")
+        self.assertEqual(c.disclosed, {"100% Leather"})
+        self.assertIn("100% Leather", msg)
+
+    def test_buyer_is_untouched_by_browse_gating(self) -> None:
+        c = _customer("buying", browse_gated=True)
+        c.opening()  # discloses the first hard constraint, as the official sim does
+        c.reply(2, "other")  # ... and "other" still drains two more
+        self.assertEqual(c.disclosed, {"100% Leather", "color: black", "Buckle closure"})
+
+
+class ParaphraseTests(unittest.TestCase):
+    def test_medium_rewords_the_constraint(self) -> None:
+        out = paraphrase_disclosure(["color: black"], "medium", random.Random(1))
+        self.assertNotIn("color: black", out)
+        self.assertIn("black", out)
+
+    def test_light_keeps_tokens_changes_frame(self) -> None:
+        out = paraphrase_disclosure(["100% Leather"], "light", random.Random(1))
+        self.assertIn("100% Leather", out)
+        self.assertNotIn("For that, what matters is", out)
+
+    def test_paraphrase_composes_with_browse_gating(self) -> None:
+        c = _customer("browsing", browse_gated=True, paraphrase="medium")
+        msg = c.reply(2, "material")
+        self.assertEqual(c.disclosed, {"100% Leather"})
+        self.assertNotIn("For that, what matters is", msg)
+
+
+class DecoyTests(unittest.TestCase):
+    def test_decoy_needs_a_real_override_and_a_product(self) -> None:
+        # No index_products -> nothing to derive a decoy from; must not crash.
+        c = _customer("intent_override", decoy=True)
+        self.assertIsInstance(c, StressCustomer)
+
+
+if __name__ == "__main__":
+    unittest.main()

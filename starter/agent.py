@@ -95,7 +95,7 @@ class AgentConfig:
     #: When use_router, pick the policy by track (buying -> FixedPolicy,
     #: browsing -> InfoGainPolicy). False keeps ``policy`` on both tracks. This is
     #: the one track lever left ON by default: it is what the realism harness
-    #: (tools/dual_track_harness.py) exists to justify. The other three levers
+    #: (tools/stress_harness.py, --customer browse-gated) exists to justify. The other three levers
     #: below default to values identical to the single-track pipeline - measured
     #: net-negative on the fully-cooperative public simulator (it over-rewards the
     #: broad "other" question and early recommendations), they are switches for
