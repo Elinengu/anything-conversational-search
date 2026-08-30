@@ -373,6 +373,80 @@ class RouterTests(unittest.TestCase):
         self.assertTrue(t2_route.is_buying)
 
 
+class TrackRoutingTests(unittest.TestCase):
+    """``Agent._track`` - the per-turn buying/browsing decision (use_router)."""
+
+    @staticmethod
+    def _agent() -> Agent:
+        agent = Agent.__new__(Agent)
+        agent.config = AgentConfig()
+        agent._track_cache = {}
+        return agent
+
+    def test_opening_sets_the_track(self) -> None:
+        agent = self._agent()
+        buy = DialogState("a")
+        buy.observe(1, "I need boots. A key requirement is: leather.")
+        self.assertEqual(agent._track(buy), "buying")
+        brow = DialogState("b")
+        brow.observe(1, "I'm looking for boots, but I'm still exploring.")
+        self.assertEqual(agent._track(brow), "browsing")
+
+    def test_browsing_is_promoted_to_buying_after_real_disclosure(self) -> None:
+        agent = self._agent()
+        state = DialogState("s")
+        state.observe(1, "I'm looking for boots, but I'm still exploring.")
+        self.assertEqual(agent._track(state), "browsing")
+        state.observe(2, "For that, what matters is: full grain leather; waterproof.")
+        state.observe(3, "For that, what matters is: lace up closure; ankle height.")
+        self.assertEqual(agent._track(state), "buying")
+
+    def test_promotion_is_one_way(self) -> None:
+        agent = self._agent()
+        state = DialogState("s")
+        state.observe(1, "I need boots. A key requirement is: leather.")
+        self.assertEqual(agent._track(state), "buying")
+        state.observe(2, "I don't have a preference for colour.")
+        self.assertEqual(agent._track(state), "buying")  # never flips back
+
+    def test_override_forces_the_buying_track(self) -> None:
+        agent = self._agent()
+        state = DialogState("s")
+        state.observe(1, "I'm looking for boots, but I'm still exploring.")
+        state.observe(2, "Actually, ignore my earlier preference. What I need is: colour: grey.")
+        self.assertEqual(agent._track(state), "buying")
+
+
+class DualTrackConfigTests(unittest.TestCase):
+    """The three levers below the policy split default to single-track values."""
+
+    @staticmethod
+    def _agent(config: AgentConfig) -> Agent:
+        agent = Agent.__new__(Agent)
+        agent.config = config
+        agent.config.policy = FixedPolicy()
+        return agent
+
+    def test_untracked_calls_use_the_shared_config(self) -> None:
+        agent = self._agent(AgentConfig())
+        self.assertIs(agent._rerank_config(None), agent.config.rerank)
+        self.assertIs(agent._policy_for(None), agent.config.policy)
+        self.assertEqual(agent._first_recommend_turn(None, None), agent.config.first_recommend_turn)
+        self.assertEqual(agent._list_size_ramp(None), agent.config.list_size_ramp)
+
+    def test_buying_timing_defaults_match_the_single_track(self) -> None:
+        agent = self._agent(AgentConfig())
+        self.assertEqual(agent._first_recommend_turn("buying", None),
+                         agent.config.first_recommend_turn)
+        self.assertEqual(agent._list_size_ramp("buying"), agent.config.list_size_ramp)
+        self.assertEqual(agent._list_size_ramp("browsing"), agent.config.list_size_ramp)
+
+    def test_route_policies_off_keeps_one_policy(self) -> None:
+        agent = self._agent(AgentConfig(route_policies=False))
+        self.assertIs(agent._policy_for("buying"), agent.config.policy)
+        self.assertIs(agent._policy_for("browsing"), agent.config.policy)
+
+
 class _StubShortlistState:
     """The only state ``Agent._shortlist`` reads once the first turn has passed."""
 

@@ -33,10 +33,10 @@ if str(_REPO_ROOT) not in sys.path:
 from src.index import load_index  # noqa: E402
 from src.facets import FacetStore  # noqa: E402
 from src.phrasing import clarify  # noqa: E402
-from src.policy import ALLOWED_ATTRIBUTES, FixedPolicy  # noqa: E402
+from src.policy import ALLOWED_ATTRIBUTES, FixedPolicy, InfoGainPolicy  # noqa: E402
 from src.rerank import RerankConfig, rerank  # noqa: E402
 from src.retrieval import RetrievalConfig, retrieve  # noqa: E402
-from src.router import classify  # noqa: E402
+from src.router import classify, detect_turn_intent  # noqa: E402
 from src.state import DialogState  # noqa: E402
 
 
@@ -80,8 +80,38 @@ class AgentConfig:
     # sits mid-plateau rather than at either split's argmax.
     confidence_margin: float = 0.20
     earliest_recommend_turn: int = 2
-    #: Route the customer-facing phrasing by detected intent.
+    # Dual-track routing. When True (the default), src/router.py classifies the
+    # opening as "buying" or "browsing" and that track now drives *behaviour*, not
+    # only phrasing: which clarification policy runs (S4), which RerankConfig and
+    # whether the buying hard-filter applies (S6), and when recommendations start
+    # and how wide the first slate is (S7). The track is re-checked every turn via
+    # detect_turn_intent, so a browsing session that discloses enough - and any
+    # post-override turn - is promoted to buying (never demoted). When False, none
+    # of that fires and the agent is the flat, single-track pipeline: identical
+    # scored output to the pre-routing agent. False is kept as the measurement
+    # baseline and the guaranteed-safe fallback (the respond() exception path is
+    # flat regardless). See docs/team/dual_track_routing.md.
     use_router: bool = True
+    #: When use_router, pick the policy by track (buying -> FixedPolicy,
+    #: browsing -> InfoGainPolicy). False keeps ``policy`` on both tracks. This is
+    #: the one track lever left ON by default: it is what the realism harness
+    #: (tools/dual_track_harness.py) exists to justify. The other three levers
+    #: below default to values identical to the single-track pipeline - measured
+    #: net-negative on the fully-cooperative public simulator (it over-rewards the
+    #: broad "other" question and early recommendations), they are switches for
+    #: harness experiments, not the public path. See docs/team/dual_track_routing.md.
+    route_policies: bool = True
+    #: Per-track rerank weights (S6). None on a track -> reuse ``rerank``.
+    buying_rerank: RerankConfig | None = None
+    browsing_rerank: RerankConfig | None = None
+    #: Per-track recommendation timing (S7), used only when use_router. A buying
+    #: turn of None falls back to the router's suggested_first_recommend_turn;
+    #: default 3 == the single-track value (suggested=2 was measured -0.11 buying
+    #: MRR on the public sim - recommending before turn 3 freezes a worse rank).
+    buying_first_recommend_turn: int | None = 3
+    browsing_first_recommend_turn: int = 3
+    buying_list_size_ramp: tuple[int, ...] = (4, 10)
+    browsing_list_size_ramp: tuple[int, ...] = (4, 10)
     # Elimination scan: any product shown and not hit on is a confirmed
     # non-target (the session ends on a hit), so each turn we drop everything
     # already shown and return the top 10 of the re-ranked survivors. This walks
@@ -126,7 +156,22 @@ class Agent:
             # (0.8349 vs 0.8119). InfoGainPolicy is the more interesting design and
             # ties on dev; see README "Clarification policy" for the measurements.
             self.config.policy = FixedPolicy()
+        # Dual-track policies, built once, consulted only when use_router.
+        # Buying keeps the broad question - a decided customer recites everything
+        # on "anything else?". Browsing asks the highest-information-gain
+        # attribute *once broad questions stop paying off*: InfoGainPolicy already
+        # prefers broad while it yields (src/policy.py select()), so on the
+        # cooperative public simulator - where broad always yields - it tracks
+        # FixedPolicy closely, and on a realistic browser who volunteers nothing
+        # it pivots to targeted questions on the first turn. expected_broad_answers
+        # is raised so the pivot waits out the public sim's full 4-constraint
+        # disclosure.
+        self._buying_policy = FixedPolicy()
+        self._browsing_policy = InfoGainPolicy(self.facets, expected_broad_answers=4.0)
         self._states: dict[str, DialogState] = {}
+        # last track decided per session - promotion to "buying" is sticky and
+        # one-way (see _track).
+        self._track_cache: dict[str, str] = {}
         # parent_asins already shown this session - excluded from later turns
         # (see AgentConfig.elimination_scan).
         self._shown: dict[str, set[str]] = {}
@@ -143,6 +188,7 @@ class Agent:
         self._shown.pop(session_id, None)
         self._shown_override.pop(session_id, None)
         self._disclosed_count.pop(session_id, None)
+        self._track_cache.pop(session_id, None)
 
     def respond(self, session_id: str, user_message: str, turn: int, top_k: int) -> dict:
         try:
@@ -164,19 +210,88 @@ class Agent:
         state.observe(turn, user_message)
 
         route = classify(state.opening) if self.config.use_router else None
+        # The promotable track (buying once enough is disclosed, or after an
+        # override) drives S6 weights / hard-filter and S7 timing. The
+        # clarification policy instead keys off how the session *opened* and stays
+        # there: InfoGainPolicy already self-adapts (broad while broad pays off,
+        # targeted once it stops), so a browser who turns decisive keeps a policy
+        # that will still dig for the constraints they have left to give.
+        track = self._track(state) if self.config.use_router else None
+        opening_track = route.name if route is not None else None
         candidates = retrieve(self.index, state, self.config.retrieval)
-        candidates = rerank(self.index, state, candidates, self.config.rerank)
+        candidates = rerank(
+            self.index, state, candidates, self._rerank_config(track), track=track
+        )
 
-        attribute = self.config.policy.select(state, candidates)
+        attribute = self._policy_for(opening_track).select(state, candidates)
         if attribute not in ALLOWED_ATTRIBUTES:
             attribute = "other"
         state.record_ask(attribute)
 
-        recommendations = self._shortlist(state, candidates, turn, top_k)
+        recommendations = self._shortlist(state, candidates, turn, top_k, track, route)
         # ``ask_attribute`` (above) is what the simulator reads and is unchanged;
         # ``clarify`` only builds the English ``message`` - see src/phrasing.py.
         message = clarify(attribute, state, candidates, self.facets, route, self.config)
         return self._envelope(message, attribute, recommendations)
+
+    # ---- dual-track helpers --------------------------------------------------
+
+    def _track(self, state: DialogState) -> str:
+        """Buying or browsing for this turn. Promotion to buying is one-way.
+
+        Turn 1 is the opening classification. Later turns re-check with
+        ``detect_turn_intent``: a session that opened vague but has since
+        disclosed real constraints is now a buyer, and so is every turn from the
+        override onward. It never flips back - mistaking a decided customer for a
+        browser costs at most a broad question, the reverse commits to
+        constraints they never stated (see src/router.py, IMPLEMENTATION.md S2).
+        """
+        sid = state.session_id
+        current = self._track_cache.get(sid, "browsing")
+        if current == "buying":
+            return "buying"
+        if state.override_turn is not None:
+            self._track_cache[sid] = "buying"
+            return "buying"
+        if state.turn_count <= 1:
+            track = classify(state.opening).name
+        else:
+            track = detect_turn_intent(
+                state.full_text(), state.turn_count, current, state.productive_turns
+            ).name
+        track = track if track in ("buying", "browsing") else "browsing"
+        self._track_cache[sid] = track
+        return track
+
+    def _policy_for(self, opening_track: str | None):
+        if opening_track is None or not self.config.route_policies:
+            return self.config.policy
+        return self._buying_policy if opening_track == "buying" else self._browsing_policy
+
+    def _rerank_config(self, track: str | None) -> RerankConfig:
+        if track == "buying" and self.config.buying_rerank is not None:
+            return self.config.buying_rerank
+        if track == "browsing" and self.config.browsing_rerank is not None:
+            return self.config.browsing_rerank
+        return self.config.rerank
+
+    def _first_recommend_turn(self, track: str | None, route: object) -> int:
+        if track == "buying":
+            configured = self.config.buying_first_recommend_turn
+            if configured is not None:
+                return configured
+            suggested = getattr(route, "suggested_first_recommend_turn", None)
+            return suggested if isinstance(suggested, int) else self.config.first_recommend_turn
+        if track == "browsing":
+            return self.config.browsing_first_recommend_turn
+        return self.config.first_recommend_turn
+
+    def _list_size_ramp(self, track: str | None) -> tuple[int, ...]:
+        if track == "buying":
+            return self.config.buying_list_size_ramp
+        if track == "browsing":
+            return self.config.browsing_list_size_ramp
+        return self.config.list_size_ramp
 
     def _shortlist(
         self,
@@ -184,9 +299,11 @@ class Agent:
         candidates: list[tuple[str, float]],
         turn: int,
         top_k: int,
+        track: str | None = None,
+        route: object = None,
     ) -> list[dict]:
         top_limit = top_k if isinstance(top_k, int) and top_k > 0 else 10
-        first_turn = self.config.first_recommend_turn
+        first_turn = self._first_recommend_turn(track, route)
         sid = state.session_id
 
         if turn < first_turn and not self._confident(candidates, turn):
@@ -200,7 +317,7 @@ class Agent:
             if rising:
                 return []
 
-        ramp = self.config.list_size_ramp
+        ramp = self._list_size_ramp(track)
         size = ramp[min(max(0, turn - first_turn), len(ramp) - 1)]
         limit = min(size, top_limit)
 
