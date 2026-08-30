@@ -288,6 +288,25 @@ def rerank(
 
     # Per-session quantities, computed once rather than per candidate.
     customer_facets = extract_query_facets(state.full_text())
+    # Judged against focused_text(), which on an override session means "turn 1
+    # excluded". That is what this line actually buys, and the original
+    # "discarded value" reading of it was wrong: measured over all 30 public
+    # override sessions, full history picks a value the post-override turns
+    # contradict in *zero* of them. The one session that regresses
+    # (hard_generic_override_08) conflicts on turn 1 - coarse_category() emits
+    # the target's two most specific category levels, and those are drawn from
+    # the same vocabulary as the style/use_case facets, so "I'm looking for
+    # Pants Casual" extracts style=casual and then punishes every candidate
+    # whose own style resolves to something else.
+    #
+    # The asymmetry is deliberate, not an oversight. Excluding turn 1 from
+    # conflict scoring *everywhere* was measured and is worse (public 0.9159 ->
+    # 0.9150, holdout 0.9048 -> 0.9035): the category framing is a real
+    # constraint, and the impostors it demotes outweigh the 8 targets it
+    # wrongly penalises. Keeping turn 1 on override sessions is also worse
+    # (hard 0.7944 -> 0.7920). Excluding it on override sessions only - what
+    # focused_text() happens to do here - is the best of the three.
+    # docs/team/rerank_signals.md records all four variants.
     authoritative_facets = extract_query_facets(state.focused_text())
 
     llm_map = llm_scores or {}

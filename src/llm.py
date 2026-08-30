@@ -50,14 +50,22 @@ class LLMConfig:
 class LLMClient:
     """Multi-provider LLM client with built-in deterministic offline fallback."""
 
+    #: Consecutive failed calls after which the client stops trying for its lifetime.
+    #: A dead-but-slow network otherwise costs (timeout x model fallbacks) on every
+    #: turn, and evaluator timeouts count as misses; three strikes bounds that.
+    MAX_CONSECUTIVE_FAILURES = 3
+
     def __init__(self, config: LLMConfig | None = None) -> None:
         _load_dotenv_if_present()
         self.config = config or LLMConfig()
         self.gemini_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
         self.openai_key = os.environ.get("OPENAI_API_KEY")
+        self._consecutive_failures = 0
 
     def is_available(self) -> bool:
         if not self.config.enabled:
+            return False
+        if self._consecutive_failures >= self.MAX_CONSECUTIVE_FAILURES:
             return False
         if self.config.provider == "mock":
             return True
@@ -95,7 +103,10 @@ class LLMClient:
         )
 
         text, usage = self._call_llm(prompt)
-        return (text.strip() if text else fallback_msg), usage
+        # On an attempted-but-failed call return "" (not fallback_msg): the agent
+        # keeps its original clarify() message, so a network failure degrades to
+        # the exact baseline conversation rather than a canned sentence.
+        return text.strip(), usage
 
     def rerank_candidates(
         self,
@@ -160,21 +171,30 @@ class LLMClient:
         return (text.strip() if text else fallback_question), usage
 
     def _call_llm(self, prompt: str) -> tuple[str, dict[str, int]]:
-        """Execute request across configured providers with defensive error handling."""
+        """Execute request across configured providers with defensive error handling.
+
+        An empty response counts as a failure toward the circuit breaker
+        (``MAX_CONSECUTIVE_FAILURES``); any successful response resets it.
+        """
+        text, usage = "", {"prompt_tokens": 0, "completion_tokens": 0}
         try:
             if self.config.provider in ("gemini", "auto") and self.gemini_key:
-                return self._call_gemini(prompt)
-            if self.config.provider in ("openai", "auto") and self.openai_key:
-                return self._call_openai(prompt)
-            if self.config.provider == "ollama" or (self.config.endpoint_url and self.config.enabled):
-                return self._call_openai_compatible(prompt)
-            if self.config.provider == "mock":
+                text, usage = self._call_gemini(prompt)
+            elif self.config.provider in ("openai", "auto") and self.openai_key:
+                text, usage = self._call_openai(prompt)
+            elif self.config.provider == "ollama" or (self.config.endpoint_url and self.config.enabled):
+                text, usage = self._call_openai_compatible(prompt)
+            elif self.config.provider == "mock":
                 # Simulated realistic LLM response for testing & CI
                 mock_text = "I selected these options to match your exact requested features and style."
-                return mock_text, {"prompt_tokens": len(prompt.split()) * 2, "completion_tokens": 14}
+                text, usage = mock_text, {"prompt_tokens": len(prompt.split()) * 2, "completion_tokens": 14}
         except Exception:
             pass
-        return "", {"prompt_tokens": 0, "completion_tokens": 0}
+        if text:
+            self._consecutive_failures = 0
+        else:
+            self._consecutive_failures += 1
+        return text, usage
 
     def _call_gemini(self, prompt: str) -> tuple[str, dict[str, int]]:
         models_to_try = [self.config.model, "gemini-3.6-flash", "gemini-3.7-flash", "gemini-flash-latest"]

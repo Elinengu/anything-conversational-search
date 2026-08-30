@@ -102,9 +102,9 @@ def install_probes():
         _PROBE["pool"] = pool
         return pool
 
-    def rerank_probe(index, state, candidates, config=None):
+    def rerank_probe(index, state, candidates, config=None, **kwargs):
         started = time.perf_counter()
-        ranked = original["rerank"](index, state, candidates, config)
+        ranked = original["rerank"](index, state, candidates, config, **kwargs)
         _PROBE["rerank_ms"] = (time.perf_counter() - started) * 1000.0
         _PROBE["ranked"] = ranked
         return ranked
