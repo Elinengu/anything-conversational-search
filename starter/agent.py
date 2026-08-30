@@ -43,6 +43,7 @@ from src.context_programming import (  # noqa: E402
     LongTermProfileStore,
     UserProfile,
 )
+from src.llm import LLMClient, LLMConfig  # noqa: E402
 from src.state import DialogState  # noqa: E402
 
 
@@ -118,6 +119,8 @@ class AgentConfig:
     natural_questions: bool = True
     #: Candidates inspected when choosing which facet to voice (see phrasing).
     phrasing_depth: int = 40
+    #: Optional LLM integration for transparent reasoning and conversational generation.
+    llm: LLMConfig = field(default_factory=LLMConfig)
 
 
 class Agent:
@@ -131,6 +134,7 @@ class Agent:
         self.config = config or AgentConfig()
         self.index = load_index(catalog_path)
         self.facets = FacetStore(self.index.products)
+        self.llm = LLMClient(self.config.llm)
         if self.config.policy is None:
             # FixedPolicy is the default because it wins on the held-out split
             # (0.8349 vs 0.8119). InfoGainPolicy is the more interesting design and
@@ -191,7 +195,14 @@ class Agent:
         distilled_ctx = ContextDistiller.distill(state, user_prof, intent_track=track_name)
 
         candidates = retrieve(self.index, state, self.config.retrieval)
-        candidates = rerank(self.index, state, candidates, self.config.rerank)
+
+        llm_scores = {}
+        llm_rerank_usage = {"prompt_tokens": 0, "completion_tokens": 0}
+        if self.config.rerank.llm_weight > 0.0 and self.llm.is_available() and candidates:
+            cand_objs = [self.index.products.get(asin, {}) for asin, _ in candidates[:15]]
+            llm_scores, llm_rerank_usage = self.llm.rerank_candidates(state.full_text(), cand_objs)
+
+        candidates = rerank(self.index, state, candidates, self.config.rerank, llm_scores=llm_scores)
 
         # Adaptive Orchestration: Dynamic strategy alignment
         plan = AdaptiveOrchestrator.align_strategy(distilled_ctx, user_prof, candidates, self.config)
@@ -205,7 +216,20 @@ class Agent:
         # ``ask_attribute`` (above) is what the simulator reads and is unchanged;
         # ``clarify`` only builds the English ``message`` - see src/phrasing.py.
         message = clarify(attribute, state, candidates, self.facets, route, self.config)
-        return self._envelope(message, attribute, recommendations)
+
+        usage = {
+            "prompt_tokens": llm_rerank_usage.get("prompt_tokens", 0),
+            "completion_tokens": llm_rerank_usage.get("completion_tokens", 0),
+        }
+        if recommendations and self.llm.is_available():
+            top_prods = [self.index.products.get(r["parent_asin"], {}) for r in recommendations[:3]]
+            explanation, llm_usage = self.llm.explain_recommendations(state.query_spans(), top_prods)
+            if explanation:
+                message = explanation
+            usage["prompt_tokens"] += llm_usage.get("prompt_tokens", 0)
+            usage["completion_tokens"] += llm_usage.get("completion_tokens", 0)
+
+        return self._envelope(message, attribute, recommendations, usage=usage)
 
     def _shortlist(
         self,
@@ -283,11 +307,15 @@ class Agent:
         return sum(1 for span in state.query_spans() if "preference for" not in span)
 
     @staticmethod
-    def _envelope(message: str, attribute: str | None, recommendations: list[dict]) -> dict:
+    def _envelope(
+        message: str,
+        attribute: str | None,
+        recommendations: list[dict],
+        usage: dict[str, int] | None = None,
+    ) -> dict:
         return {
             "message": message,
             "ask_attribute": attribute,
             "recommendations": recommendations,
-            # No model is used on the offline path, so the honest count is zero.
-            "usage": {"prompt_tokens": 0, "completion_tokens": 0},
+            "usage": usage or {"prompt_tokens": 0, "completion_tokens": 0},
         }
