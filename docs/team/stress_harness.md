@@ -155,9 +155,13 @@ buyer-as-browser 1.00 / 0.83 — ~10× asymmetric. See `docs/team/dual_track_rou
    shrinking it drops them).
 
 3. **Robustness fix worth pursuing:** loosen the reranker's constraint match from
-   exact substring to token-set overlap, and/or enable the `bge-small` dense
-   route for the browsing track only. Re-run this harness to confirm the
-   paraphrase gap closes.
+   exact substring to token-set overlap. A `bge-small` **bi-encoder cosine** was
+   added as an S6 term and tested here (`docs/team/dense_rerank.md`): it helps
+   only on the fully-degenerate tail (`--targets generic` +0.021) and is a wash
+   to −0.003 on the realistic full set, because the retrieved pool is already
+   category-homogeneous so the embedding discriminates attributes weakly. The
+   real semantic lever is a **cross-encoder** (branch
+   `semantic-rerank-experiment`), never tested under paraphrase.
 
 4. **Write-up:** "Innovation & Problem Insight" (20% of judging) is scored on how
    clearly the challenge is framed. This harness + these numbers are that section:

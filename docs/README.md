@@ -41,6 +41,7 @@ Everything under [`team/`](team/) is ours to edit freely.
 | [`team/bm25.md`](team/bm25.md) | How BM25 / BM25F lexical scoring works, grounded in `src/index.py`, and why recall is ~100% on the public set but brittle to paraphrase |
 | [`team/stress_harness.md`](team/stress_harness.md) | (branch `stress_harness`) `tools/stress_harness.py` — paraphrase / browsing-gated / decoy customer stressors and the retrieval-vs-ranking diagnostic |
 | [`team/dual_track_routing.md`](team/dual_track_routing.md) | (branch `dual_tracking`) making Buying/Browsing routing drive behaviour, and why it stayed on a branch |
+| [`team/dense_rerank.md`](team/dense_rerank.md) | (branch `dense_rerank`) `bge-small` embedding cosine as an S6 rerank signal, tested under paraphrase: helps only the degenerate tail, wash on the full set |
 
 Each `.md` has a `.pdf` rendering beside it; regenerate with
 `python3 tools/md_to_pdf.py <file>.md <file>.pdf` (a lightweight reportlab
