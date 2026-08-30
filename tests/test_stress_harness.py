@@ -8,7 +8,12 @@ from __future__ import annotations
 import random
 import unittest
 
-from tools.stress_harness import StressCustomer, parse_spec, paraphrase_disclosure
+from tools.stress_harness import (
+    StressCustomer,
+    parse_spec,
+    paraphrase_disclosure,
+    _synonym_sub,
+)
 
 CARD = {
     "hard_constraints": ["100% Leather", "color: black"],
@@ -41,6 +46,14 @@ class SpecParsingTests(unittest.TestCase):
     def test_unknown_stressor_raises(self) -> None:
         with self.assertRaises(ValueError):
             parse_spec("teleport")
+
+    def test_bad_paraphrase_level_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            parse_spec("paraphrase:extreme")
+
+    def test_heavy_level_parses(self) -> None:
+        self.assertEqual(parse_spec("paraphrase:heavy+browse-gated"),
+                         {"paraphrase": "heavy", "browse_gated": True, "decoy": False})
 
 
 class BaseBehaviourTests(unittest.TestCase):
@@ -92,6 +105,23 @@ class ParaphraseTests(unittest.TestCase):
         msg = c.reply(2, "material")
         self.assertEqual(c.disclosed, {"100% Leather"})
         self.assertNotIn("For that, what matters is", msg)
+
+    def test_heavy_substitutes_a_synonym(self) -> None:
+        # across many seeds the phrase is rewritten most of the time.
+        changed = sum(
+            _synonym_sub("a waterproof leather strap", random.Random(s)) != "a waterproof leather strap"
+            for s in range(40)
+        )
+        self.assertGreater(changed, 30)
+
+    def test_heavy_rewrite_is_deterministic_per_seed(self) -> None:
+        a = paraphrase_disclosure(["100% Leather", "Buckle closure"], "heavy", random.Random(7))
+        b = paraphrase_disclosure(["100% Leather", "Buckle closure"], "heavy", random.Random(7))
+        self.assertEqual(a, b)
+
+    def test_heavy_drops_the_verbatim_token(self) -> None:
+        out = paraphrase_disclosure(["100% Cotton"], "heavy", random.Random(3))
+        self.assertNotIn("100% Cotton", out)
 
 
 class DecoyTests(unittest.TestCase):

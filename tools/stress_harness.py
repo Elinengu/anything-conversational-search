@@ -15,6 +15,10 @@ This harness drives the **unmodified** `Agent` through a faithful copy of
   paraphrase:light   - same constraints, verbatim tokens kept, carrier sentence
                        reworded ("For that, what matters is: X" -> "It should be X.")
   paraphrase:medium  - the constraint itself reworded ("color: blue" -> "in blue")
+  paraphrase:heavy   - medium + broad synonym substitution (leather -> genuine
+                       hide, waterproof -> water-repellent, gym -> working out ...)
+                       + clause shuffle/fusion + spoken filler. Rule-based; an
+                       offline LLM rewriter would be the real "heavy".
   browse-gated       - the *browsing* customer discloses a constraint only when
                        asked a pointed question whose classify_constraint bucket
                        matches - never on the broad "anything else?". Makes
@@ -83,12 +87,91 @@ _LEADINS = [
     "I'd also want it to be {}.", "It should be {}.", "Also important: {}.",
     "One more thing - {}.", "{} matters to me as well.", "Ideally it's {}.",
 ]
+#: Looser, more spoken frames, used only at level=heavy.
+_LEADINS_HEAVY = _LEADINS + [
+    "honestly I just want {}.", "the main thing is {}.", "oh and {} if possible.",
+    "gotta be {} for me.", "leaning towards {}.", "something {} would be great.",
+]
 _HYPHEN = {
     "stainless steel": "stainless-steel", "full grain": "full-grain",
     "long sleeve": "long-sleeved", "short sleeve": "short-sleeved",
     "high waisted": "high-waisted", "slim fit": "slim-fit",
     "water resistant": "water-resistant",
 }
+
+#: Whole-phrase synonyms for level=heavy. Applied by longest key first so
+#: "full grain leather" wins over "leather". A human reads the substitute as the
+#: same requirement; none of them is verbatim catalog text.
+_SYNONYMS: dict[str, list[str]] = {
+    # materials - at least one option per entry departs from the key token, so
+    # heavy erodes FTS5 recall and not only the verbatim-span signal.
+    "full grain leather": ["full-grain hide", "top-grain cowhide"],
+    "genuine leather": ["real hide", "actual cowhide"],
+    "leather": ["genuine hide", "cowhide", "a tanned-hide build"],
+    "suede": ["brushed nap", "a soft napped finish"],
+    "cotton": ["a pure natural-fibre weave", "an all-cotton knit", "combed 100 percent cotton"],
+    "polyester": ["a synthetic blend", "man-made fibre"],
+    "nylon": ["a ripstop synthetic", "a technical shell fabric"],
+    "denim": ["jean material", "a sturdy indigo twill"],
+    "wool": ["merino knit", "a woollen weave"],
+    "cashmere": ["a soft luxury knit", "fine goat-hair yarn"],
+    "stainless steel": ["surgical-grade metal", "a brushed silver alloy"],
+    "sterling silver": ["925 fine metal", "solid precious metal"],
+    "rubber": ["a flexible compound", "moulded gum"],
+    "canvas": ["heavy woven cotton", "a duck-cloth upper"],
+    "mesh": ["an open knit", "a breathable net weave"],
+    # colours
+    "black": ["jet black", "matte black", "a dark black"],
+    "white": ["off-white", "a clean white", "bright white"],
+    "grey": ["gray", "charcoal", "a heather grey"],
+    "gray": ["grey", "charcoal", "slate"],
+    "blue": ["a mid blue", "royal blue"],
+    "navy": ["navy blue", "a deep navy"],
+    "red": ["a true red", "crimson"],
+    "green": ["forest green", "a muted green"],
+    "brown": ["chocolate brown", "a tan brown"],
+    "beige": ["tan", "sand", "a beige tone"],
+    "pink": ["blush pink", "a soft pink"],
+    "gold": ["a gold tone", "yellow gold"],
+    "silver": ["a silver finish", "brushed silver"],
+    # features / construction
+    "waterproof": ["water-resistant", "water-repellent", "weatherproof"],
+    "adjustable": ["a customizable fit", "resizable", "adjusts to fit"],
+    "lightweight": ["light", "barely any weight", "featherweight"],
+    "breathable": ["airy", "well-ventilated", "it breathes well"],
+    "wireless": ["cordless", "no wires"],
+    "buckle": ["clasp", "snap fastener"],
+    "zipper": ["zip", "zip fastener"],
+    "pockets": ["pouches", "storage compartments"],
+    "insulated": ["thermal", "keeps warmth in"],
+    "non slip": ["grippy", "a no-slip sole"],
+    "quick dry": ["fast-drying", "dries quickly"],
+    "hypoallergenic": ["skin-safe", "gentle on sensitive skin"],
+    # use cases
+    "hiking": ["trail use", "trekking", "the trails"],
+    "running": ["jogging", "road running"],
+    "workout": ["training", "the gym"],
+    "gym": ["the gym", "working out"],
+    "yoga": ["yoga practice", "a yoga class"],
+    "travel": ["trips", "traveling", "the road"],
+    "office": ["work", "the office", "day-to-day work"],
+    "wedding": ["a formal event", "a black-tie thing"],
+    "outdoor": ["being outside", "outdoors"],
+    "winter": ["the cold months", "cold weather"],
+    "summer": ["hot days", "the warmer months"],
+}
+_SYNONYM_KEYS = sorted(_SYNONYMS, key=len, reverse=True)
+
+
+def _synonym_sub(text: str, rng: random.Random, rate: float = 0.75) -> str:
+    """Replace recognised whole-word phrases with a spoken synonym."""
+    for key in _SYNONYM_KEYS:
+        if re.search(rf"\b{re.escape(key)}\b", text) and rng.random() < rate:
+            text = re.sub(rf"\b{re.escape(key)}\b", rng.choice(_SYNONYMS[key]), text, count=1)
+    return text
+
+
+_FILLERS = ["", "", "something ", "ideally ", "a bit ", "really ", "kind of "]
 
 
 def _reword_one(value: str, rng: random.Random) -> str:
@@ -121,12 +204,40 @@ def _reword_one(value: str, rng: random.Random) -> str:
     return low
 
 
+def _tidy(text: str) -> str:
+    """Kill the compounding artefacts of stacked rewrites - a real messy customer
+    is disfluent, not ungrammatical to the point of noise."""
+    text = re.sub(r"\bit does up with a\b", "with a", text)
+    text = re.sub(r"\b(a|an|the) (a|an|the)\b", r"\1", text)
+    text = re.sub(r"\b(\w+) \1\b", r"\1", text)          # "fastening fastening"
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _reword_heavy(value: str, rng: random.Random) -> str:
+    """medium's pattern rewrites, then broad synonym substitution, then a filler."""
+    v = _synonym_sub(_reword_one(value, rng), rng)
+    if rng.random() < 0.4:
+        v = rng.choice(_FILLERS) + v
+    return _tidy(v)
+
+
 def paraphrase_disclosure(matches: list[str], level: str, rng: random.Random) -> str:
     if level == "light":
-        parts = [rng.choice(_LEADINS).format(m) for m in matches]
+        return " ".join(rng.choice(_LEADINS).format(m) for m in matches)
+    if level == "medium":
+        return " ".join(rng.choice(_LEADINS).format(_reword_one(m, rng)) for m in matches)
+    # heavy: reword + synonyms, shuffle the clauses, and often fuse them into one
+    # reordered sentence instead of one crisp statement per constraint.
+    pieces = [_reword_heavy(m, rng) for m in matches]
+    rng.shuffle(pieces)
+    if len(pieces) > 1 and rng.random() < 0.6:
+        body = rng.choice([", and ", ", plus ", " - also ", ", and honestly "]).join(pieces)
+        out = rng.choice(["I'm after something {}.", "Ideally {}.",
+                          "What I care about: {}.", "Looking for {} really.",
+                          "So, {} - that's the gist."]).format(body)
     else:
-        parts = [rng.choice(_LEADINS).format(_reword_one(m, rng)) for m in matches]
-    return " ".join(parts)
+        out = " ".join(rng.choice(_LEADINS_HEAVY).format(p) for p in pieces)
+    return _tidy(out)
 
 
 # --------------------------------------------------------------------------------
@@ -241,7 +352,8 @@ class StressCustomer(Customer):
         if self.paraphrase and "A key requirement is:" in text:
             head, c = text.split("A key requirement is:", 1)
             c = c.strip().rstrip(".")
-            reworded = c if self.paraphrase == "light" else _reword_one(c, self.rng)
+            reworded = {"light": c, "medium": _reword_one(c, self.rng)}.get(
+                self.paraphrase) or _reword_heavy(c, self.rng)
             return f"{head.strip()} I really need it to be {reworded}."
         return text
 
@@ -274,7 +386,10 @@ def parse_spec(spec: str) -> dict:
         if not part or part == "official":
             continue
         if part.startswith("paraphrase"):
-            out["paraphrase"] = part.split(":", 1)[1] if ":" in part else "medium"
+            level = part.split(":", 1)[1] if ":" in part else "medium"
+            if level not in ("light", "medium", "heavy"):
+                raise ValueError(f"paraphrase level must be light|medium|heavy, got {level!r}")
+            out["paraphrase"] = level
         elif part == "browse-gated":
             out["browse_gated"] = True
         elif part == "decoy":
@@ -515,13 +630,11 @@ def main() -> None:
         _print_scenarios(last)
         return
 
-    runs = ([("official", parse_spec("official")),
-             ("paraphrase:light", parse_spec("paraphrase:light")),
-             ("paraphrase:medium", parse_spec("paraphrase:medium")),
-             ("browse-gated", parse_spec("browse-gated")),
-             ("paraphrase:medium+browse-gated", parse_spec("paraphrase:medium+browse-gated")),
-             ("decoy", parse_spec("decoy"))]
-            if args.all else [(args.customer, parse_spec(args.customer))])
+    _MATRIX = ["official", "paraphrase:light", "paraphrase:medium", "paraphrase:heavy",
+               "browse-gated", "paraphrase:medium+browse-gated",
+               "paraphrase:heavy+browse-gated", "decoy"]
+    runs = ([(n, parse_spec(n)) for n in _MATRIX] if args.all
+            else [(args.customer, parse_spec(args.customer))])
 
     print(f"dataset={args.dataset}  sessions={len(samples)}\n{hdr}\n" + "-" * len(hdr))
     base = None
