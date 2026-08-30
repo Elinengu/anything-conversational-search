@@ -25,8 +25,10 @@ public labels and API contract were **not** touched.
 | + semantic reranking (S6b) | Elinengu | 0.9199 | 0.7981 | change 11; built, measured, **removed** (code on branch `semantic-rerank`) — cross-encoder loses on every split; oracle reranking ceiling established at +0.043 / +0.084 |
 | + popularity weight 0.02 → 0.4 | Elinengu | **0.9305** | **0.8020** | change 12; the tie-break regime fix — every split up, a hard-set miss converted; coordinate-ascent argmax measured and *not* shipped |
 | + pool-aware clarification wording | KW | 0.9305 | 0.8020 | change 13; **score-neutral by construction** — `ask_attribute` unchanged, simulator never reads `message`. Realism for Pillar II / Presentation |
+| + track-aware routing layer | KW | _0.9177_ | _0.7994_ | change 14; **branch `dual_tracking` only, not merged to `main`.** `use_router` widened from phrasing to behaviour (policy / rerank / timing). Costs ~0.013 on the cooperative public sim, gains nothing there; +0.147 overall / +0.43 browsing MRR on `tools/dual_track_harness.py`. `use_router=False` is bit-identical to the pre-branch agent. |
 
-Net: **public 0.859 -> 0.9305, adversarial 0.684 -> 0.8020.** 73/73 tests pass.
+Net **on `main`**: **public 0.859 -> 0.9305, adversarial 0.684 -> 0.8020.** 73/73 tests pass.
+Change 14 is branch `dual_tracking` work (89/89 tests) and does not move the `main` number.
 The thirteen core-agent changes are detailed below; supporting tooling and docs follow.
 Change 9 moved the score by exactly zero and is recorded in full anyway — a
 measured no-change is the evidence that keeps the shipped design chosen rather
@@ -878,13 +880,69 @@ Before change 13, every one of those turns was "To point you in the right
 direction: is there anything else that matters for this one?".
 
 
+## Change 14 — Track-aware routing layer (Kwong Weng) — branch `dual_tracking`, not merged
+
+**Files:** `starter/agent.py` (`AgentConfig` fields, `_track` / `_policy_for` /
+`_rerank_config` / `_first_recommend_turn` / `_list_size_ramp`, `_shortlist`
+threading), `src/rerank.py` (`track` kwarg, `RerankConfig.hard_filter`, banish
+branch), `tools/dual_track_harness.py` (new), `tools/sweep.py` (`router_off` /
+`router_on` / `router_on_hardfilter`), `tests/test_components.py` (+10),
+`tests/test_dual_track_harness.py` (new, +6). `src/router.py` unchanged.
+
+### Problem
+
+Pillar I asks for Buying/Browsing routing. `classify()` produced a `Route` that
+only ever reached `src/phrasing.py` (a lead-in phrase), and the public simulator
+discards `message`, so routing was score-neutral by construction
+(`docs/team/future_steps.md:18`). It also *cannot* be scored by that simulator:
+after turn 1, `evaluator/local_evaluator.py:customer_reply` is scenario-agnostic
+and hands over every undisclosed constraint on `ask_attribute="other"` (`:180`),
+so `FixedPolicy("other")` is unbeatable and a browser and a buyer are drained
+identically.
+
+### What changed
+
+1. **Harness** `tools/dual_track_harness.py`: wraps `local_evaluator.customer_reply`
+   (restored in `finally`; `evaluator/` and `data/` untouched) so the **browsing**
+   customer discloses a constraint only when asked a *pointed* question whose
+   `classify_constraint` bucket matches — never on the broad "anything else?".
+   `--verify` runs it as a no-op and asserts parity with the official evaluator
+   (delta `0.00e+00`). `--misroute-matrix` forces each track and tabulates
+   true × routed.
+2. **`AgentConfig.use_router` widened**: the track (re-checked each turn by
+   `detect_turn_intent`, promoted one-way to buying) drives the clarification
+   policy (buying `FixedPolicy` / browsing `InfoGainPolicy`), per-track rerank
+   configs, an optional buying-track `hard_filter` (banishes a candidate that
+   contradicts an authoritative facet), and per-track timing. The policy keys off
+   the *opening* classification and stays put (InfoGain self-adapts); the other
+   levers follow the promotable track. `use_router=False` bypasses everything.
+
+### Effect
+
+| set | `use_router=False` | `use_router=True` | note |
+|---|---|---|---|
+| Public set | 0.930502 | 0.917680 | Hit@10 200/200 held; cost is concentrated in the boundary scenario (opens like a browser, routed to InfoGain, then declines) |
+| Adversarial set | 0.801978 | 0.799380 | noise overall; `boilerplate_soft` bucket 0.893 → 0.880 is a real −0.013 regression |
+| dev / holdout | 0.9418 / 0.9136 | 0.9268 / 0.9041 | `router_off` reproduces the left column bit-for-bit |
+| **Harness — overall** | **0.7308** | **0.8775** | the realistic browsing customer |
+| **Harness — browsing** | 0.59 / 0.24 (hit/mrr) | **0.95 / 0.67** | MTTC 7.4 → 4.2 |
+| Harness — buying | 1.00 / 0.90 | 1.00 / 0.90 | identical — buyers unaffected |
+| Misroute (harness) | — | — | browser-as-buyer −0.66 MRR vs buyer-as-browser −0.07: ~10× asymmetric |
+
+On the cooperative public simulator behaviour-routing is a net cost (~0.013) with
+no measurable upside — that simulator rewards nothing but broad-question spam. The
+value is entirely on the harness, where a less cooperative browser makes routing
+load-bearing. It stays on the branch; `main` is unchanged. Full analysis and the
+"what is not claimed" list: `docs/team/dual_track_routing.md`.
+
 ## Supporting work (Kwong Weng)
 
 | file | what |
 |---|---|
 | `tools/hard_cases.py` | Adversarial session generator + per-bucket scorer. Scans the frozen catalog, buckets every product by an adversarial property, samples 16 each. `--run` scores the agent grouped by bucket. |
 | `data/hard_set.jsonl` | 96 generated sessions (6 buckets: homogeneous_cluster, budget_only_signal, boilerplate_soft, degenerate_card, generic_override, cross_category_collision). Public-set schema; scored by the unmodified evaluator. |
-| `tools/sweep.py` | `build_configs()` — added `plain`, `elim1/2/3`, `elim_hold1/2` for the start-turn sweep. |
+| `tools/sweep.py` | `build_configs()` — added `plain`, `elim1/2/3`, `elim_hold1/2` for the start-turn sweep; `router_off` / `router_on` / `router_on_hardfilter` for change 14. |
+| `tools/dual_track_harness.py` | (branch `dual_tracking`) Realism harness — patches the browsing customer to disclose only on a pointed question, runs the unmodified `evaluate()`, `--configs` / `--misroute-matrix` / `--verify`. |
 | `docs/team/ideas.md` / `ideas.pdf` | Reranking & recommendation-strategy ideas, each with the measured result: elimination scan (1a/1b), decline filter (1c), facet / category / MMR / learned-weights (2-6). |
 | `docs/team/hard_cases.md` / `.pdf` | Failure analysis of the adversarial set and the prioritised fix plan. |
 | `agent_summary.pdf` | Rewritten (`c7757af`) for the current elimination-scan workflow: the loop, one turn stage-by-stage, recommendation timing, and a round-by-round table per scenario. |
