@@ -20,6 +20,10 @@ from facet extraction and multi-valued facet extraction were both measured and
 rejected, and the explicit constraint ledger was specified operation by
 operation and not built. That round also corrected the stated diagnosis in §1 —
 the `focused_text()` guard is right, but not for the reason first recorded.
+§9 is the one signal that was fully built and still not switched on: a neural
+cross-encoder, which loses on every split and every setting, and whose optimum
+weight is zero. It also establishes the oracle ceiling — +0.043 public, +0.084
+hard — that bounds every future reranking idea in this document.
 The negative results are documented with the same care as the positive ones —
 knowing *why* a plausible signal does not work is what stops it being rebuilt
 later.
@@ -515,7 +519,105 @@ express — and the `PRE_OVERRIDE_WEIGHT` tuning / slot-erasure ideas in
 
 ---
 
-## 9. Housekeeping shipped alongside
+---
+
+## 9. Built, measured and kept off: neural cross-encoder reranking (S6b)
+
+### The ceiling, measured first
+
+Every signal above is lexical. Before writing a semantic one, an **oracle**
+reranker — target forced to rank 1 whenever it is anywhere in the pool — fixed
+how much any reranking work could possibly be worth:
+
+| | dev (120) | holdout (80) | public (200) | hard (96) | generated |
+|---|---|---|---|---|---|
+| baseline | 0.9268 | 0.9096 | 0.9199 | 0.7981 | 0.9197 |
+| oracle | 0.9638 | 0.9620 | 0.9631 | 0.8823 | 0.9590 |
+| **gap** | **+0.037** | **+0.052** | **+0.043** | **+0.084** | **+0.039** |
+
+Worth having, and also the whole prize. The addressable population is small and
+hard: at the first slate, 100 of 142 public sessions already have the target at
+rank 1, and 25 of the remaining 42 need a rank-2-to-4 promotion among
+near-identical cluster-mates.
+
+### The gate, also measured first
+
+The proposal gated the model on ambiguity:
+`tied_span_leaders >= 8 or same_facet_cluster >= 10 or distinctive_span_count == 0`.
+Implemented and measured at the first slate turn:
+
+| | fires | mean RR firing | mean RR quiet |
+|---|---|---|---|
+| public | 104/142 (73%) | 0.774 | 0.987 |
+| hard | 50/69 (72%) | 0.576 | 0.947 |
+
+It discriminates well and gates badly — at 73% it is an always-on stage with
+extra steps. Shipped thresholds are tighter (`tied_leaders >= 15`,
+`facet_cluster >= 12`, two of three conditions) and fire on 28% of rerank calls.
+
+### The signal
+
+`src/semantic.py`: `cross-encoder/ms-marco-MiniLM-L6-v2` (22.7M parameters,
+Apache-2.0), fused with the symbolic ranking by RRF rather than score addition —
+logits are uncalibrated and unbounded while one matched span is worth ~1.12, so
+adding them puts an arbitrary scale in charge. Runtime is `onnxruntime` +
+`tokenizers` over a 23.2 MB int8 graph; upstream publishes ONNX exports, so no
+torch, no transformers, no export step.
+
+### Measurements
+
+| variant | dev (120) | hard (96) | sec |
+|---|---|---|---|
+| **off** | **0.9268** / 0.885 | **0.7981** / 0.725 | 26 |
+| on, semantic weight 0.7 | 0.9211 / 0.872 | 0.7944 / 0.713 | 347 |
+| on, semantic weight 0.3 | 0.9249 / 0.882 | 0.7959 / 0.717 | 341 |
+| on, depth 20 | 0.9236 / 0.879 | 0.7940 / 0.711 | 146 |
+
+Latency: mean turn 30.7 ms → 389.8 ms, p95 73.7 → 1347.8 ms, max 1.48 s.
+
+### Why it failed
+
+Read the weight column downward: 0.7 → 0.3 → 0.0 recovers the baseline
+monotonically. **The optimum weight is zero**, which is what a signal carrying no
+usable information looks like — there is no threshold to tune toward, and no
+plateau to sit mid-way along.
+
+The mechanism is one number. On the 162 fired turns where the target was in the
+rescored head, fusion moved it **up 46 times and down 74**, mean rank 7.63 →
+8.77. The model is anti-correlated with the target here, not miscalibrated.
+
+The likely cause is domain mismatch, which was flagged as the principal risk
+before building and turned out to be the one that mattered. MS MARCO pairs a
+natural-language question with a prose passage. Here the query is simulator
+boilerplate (*"For that, what matters is: full grain leather; buckle closure"*)
+and the document is a token-joined blob of title, features, description and
+details. The task it was handed — separating cluster-mates that share every
+stated facet — is also the hardest discrimination in the pool, which is exactly
+why it was chosen and exactly why a mismatched model has nothing to add.
+
+### Kept, not deleted
+
+Unlike the rejected signals above, this module stays in the tree, disabled. The
+reproducible measurement is the deliverable against the "semantic reranking"
+innovation direction, and `requirements.txt` plus `tools/fetch_model.py` let
+anyone re-run it. It is not a parked option: nothing selects it, no reported
+score depends on it, and with the stage off every session's rank and turn is
+bit-identical to the pipeline without it — verified by stashing the branch and
+re-running both sets.
+
+### One sub-signal that was deleted
+
+"Protect strong lexical evidence" — a candidate matching a span no other
+candidate matches is never demoted by the neural score. Built first as a `+1.0`
+bonus on the fused score, which was wrong: RRF scores here top out near 0.028,
+so the constant did not protect, it promoted, hoisting a unique-span holder from
+symbolic rank 40 to rank 1. Rewritten as a rank clamp. Then measured: it fires on
+**0 of 8750** candidates examined, because inside a pool retrieved by those very
+spans no span is unique. Removed rather than kept as an inert flag.
+
+---
+
+## 10. Housekeeping shipped alongside
 
 * Deleted the dead commented-out block in `_facet_agreement` (the pre-lowercase
   `extract()` call kept as a `'''…'''` string).
@@ -527,7 +629,7 @@ express — and the `PRE_OVERRIDE_WEIGHT` tuning / slot-erasure ideas in
   (still showed span + bm25 + popularity over depth 200); now matches
   `RerankConfig`.
 
-## 10. Reproduction
+## 11. Reproduction
 
 ```bash
 python3 -m unittest discover -s tests            # 57 tests
@@ -536,6 +638,9 @@ python3 -m evaluator.local_evaluator \
     --dataset data/hard_set.jsonl                # 0.7944
 python3 tools/sweep.py --split dev \
     --configs conflict00,conflict04,pair00,pair08   # the ablation rows
+pip install -r requirements.txt && python3 tools/fetch_model.py
+python3 tools/sweep.py --split dev \
+    --configs semantic_off,semantic_on              # §9, needs the model
 python3 tools/observe.py --only public_0020      # the motivating session, now rank 1
 ```
 

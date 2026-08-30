@@ -92,7 +92,8 @@ enhancement ideas at the end of each stage.
 
 ## Setup
 
-Python 3.10 or newer. **No third-party packages are required.**
+Python 3.10 or newer. **No third-party packages are required** to run the agent
+or reproduce any score in this README.
 
 ```bash
 # 1. Download catalog.jsonl.gz from the repository's GitHub Release, then:
@@ -104,6 +105,44 @@ mv catalog.jsonl data/catalog.jsonl
 
 There is nothing else to install, no API key to set, and no environment variable
 to configure.
+
+### Optional: semantic reranking (S6b)
+
+One stage sits outside that guarantee, and it is **off by default and excluded
+from every score reported here**. `src/semantic.py` reranks ambiguous candidate
+clusters with a neural cross-encoder
+([`cross-encoder/ms-marco-MiniLM-L6-v2`](https://huggingface.co/cross-encoder/ms-marco-MiniLM-L6-v2),
+Apache-2.0, 22.7M parameters). It exists to answer one question: how much of the
+remaining ranking headroom can a zero-shot semantic model recover?
+
+```bash
+pip install -r requirements.txt     # onnxruntime, numpy, tokenizers, huggingface_hub
+python3 tools/fetch_model.py        # 23.9 MB into models/ (gitignored)
+
+python3 tools/sweep.py --split dev --configs semantic_off,semantic_on
+```
+
+Enable it in code with `AgentConfig(semantic=SemanticConfig(enabled=True))`.
+
+The weights are **not committed**. Upstream publishes int8 ONNX exports, so
+there is no export step and no torch, transformers or sentence-transformers
+dependency — inference is `onnxruntime` over a 23.2 MB graph and tokenisation is
+the Rust `tokenizers` package.
+
+Three properties are enforced by tests (`tests/test_components.py`,
+`SemanticTests`), because the whole point is that this stage can never cost
+anything on the scored path:
+
+- with the stage off, results are **bit-identical** to the stdlib pipeline —
+  verified session by session on both the public and adversarial sets;
+- with the stage **on** but the runtime or weights absent, it silently no-ops
+  and results are again bit-identical, at no measurable latency cost;
+- any load, tokenisation or inference failure returns the candidate pool
+  untouched.
+
+So a clone with no `pip install` behaves exactly as this README documents, which
+is also why the submission is unaffected if the organizer scores with the
+network disabled.
 
 ## Reproducing the results
 
@@ -253,8 +292,8 @@ private ones deciding everything, picking a split's argmax is how you buy noise.
 
 | | |
 |---|---|
-| Model / API | **None.** No LLM, no network, no credentials. |
-| Dependencies | Python standard library only |
+| Model / API | **None** on the scored path. No LLM, no network, no credentials. An optional, off-by-default cross-encoder stage is documented under [Setup](#optional-semantic-reranking-s6b). |
+| Dependencies | Python standard library only. `requirements.txt` covers the optional stage alone. |
 | Estimated cost | $0.00 |
 | Token usage | 0 prompt, 0 completion — `usage` is reported honestly as zero |
 | Index build | 4.1s one-time, at `Agent.__init__` |
@@ -262,10 +301,13 @@ private ones deciding everything, picking a split's argmax is how you buy noise.
 | Peak memory | ~282 MB resident |
 | Full public evaluation | ~28s for 200 sessions |
 
-The agent runs identically with the network disabled; there is no fallback path
-because there is no online path. This was a deliberate choice: the submission rules
-reserve the right to score under network restrictions, and an agent that scores
-zero in that environment is worth less than one that scores `0.8592` everywhere.
+The agent runs identically with the network disabled; on the scored path there is
+no fallback because there is no online path. This was a deliberate choice: the
+submission rules reserve the right to score under network restrictions, and an
+agent that scores zero in that environment is worth less than one that scores
+`0.8592` everywhere. The optional semantic stage does not change this — it is
+disabled by default, its weights are not committed, and its absence is a no-op
+rather than an error, so the scored configuration is the offline one either way.
 
 ## Limitations and what we would do next
 

@@ -1115,6 +1115,7 @@ not repeat the experiment.
 | **Turn-1 exclusion from facet extraction** | public 0.9159 → 0.9150, holdout 0.9048 → 0.9035 | Rejected. Removes every false conflict against the target (8 public, 5 hard) and still loses — the opening's category words are a real constraint, and the impostors they demote outweigh the targets they cost. |
 | **Multi-valued facet extraction** | agreement −0.0006 public / −0.0023 hard; conflict-only 0.0000 | Rejected. The agreement half dilutes the signal by matching more candidates; the conflict half is exactly neutral and was not shipped, because a code path no measurement justifies does not earn its place. |
 | **Explicit constraint ledger (S3)** | not built | Cancelled after specifying and measuring all six operations — see below. |
+| **Neural cross-encoder reranking (S6b)** | dev 0.9268 → 0.9211, hard 0.7981 → 0.7944 | Built, measured, kept off. Loses on every split and every setting; the optimum semantic weight is zero. `src/semantic.py`. |
 
 **The constraint ledger, and why measuring a design beats arguing about it.** A typed
 `Constraint` ledger (slot, value, turn, polarity, status) with CARRY / UPDATE / ADD / DELETE /
@@ -1141,6 +1142,52 @@ target. Measured: single-value extraction over full history picks a contradicted
 keeping `focused_text()`, and exclude turn 1 using full history — scored **bit-identically on all
 four splits**, which is the proof. The guard stays; only its comment changed. Full measurements in
 `docs/team/rerank_signals.md` §6-§8.
+
+**The cross-encoder, and what "the model is wrong" actually looks like.** Every rerank signal in
+this agent is lexical — it counts words the customer said that also appear in a product's text. The
+obvious next move is a *semantic* model that scores how well a product matches a request even when
+the words differ. `src/semantic.py` does exactly that, with a small neural cross-encoder
+(`cross-encoder/ms-marco-MiniLM-L6-v2`, 22.7M parameters, Apache-2.0) that reads a (request,
+product) pair together and emits one relevance score.
+
+Before building it, we measured the ceiling. An **oracle** reranker — one that cheats by forcing
+the true target to position 1 whenever it is anywhere in the candidate pool — scores 0.9631 on the
+public set against the shipped 0.9199, and 0.8823 on the adversarial set against 0.7981. So *any*
+reranking improvement, neural or not, is playing for +0.043 and +0.084. That is worth having, and
+it is also the whole prize: 70% of public sessions already rank the target first.
+
+The result was negative on every split and every setting:
+
+| variant | dev (120) | hard (96) |
+|---|---|---|
+| **off (shipped)** | **0.9268** | **0.7981** |
+| cross-encoder, weight 0.7 | 0.9211 | 0.7944 |
+| cross-encoder, weight 0.3 | 0.9249 | 0.7959 |
+| cross-encoder, depth 20 | 0.9236 | 0.7940 |
+
+Read the weight column downward: 0.7 → 0.3 → 0 recovers the baseline monotonically. **When the
+best setting for a signal's weight is zero, the signal carries no usable information.** There is no
+threshold to tune toward.
+
+The mechanism is one number. On the 162 turns where the gate fired and the target was in the
+rescored group, the model moved it **up 46 times and down 74** — mean position 7.63 → 8.77. It is
+not slightly miscalibrated; it is pointing the wrong way more often than the right way. The likely
+reason is a mismatch between what the model was trained on and what it was asked to do here. Its
+training data pairs a natural-language question ("how tall is the Eiffel tower") with a prose
+passage. Here the "question" is simulator boilerplate — *"For that, what matters is: full grain
+leather; buckle closure"* — and the "passage" is a token-joined blob of title, features and
+description. On top of that, the job it was given is the hardest discrimination in the pool:
+separating near-identical products that share every stated attribute, which is precisely where the
+lexical signals had already saturated.
+
+Cost, for the record: mean turn latency 30.7 ms → 389.8 ms, p95 73.7 ms → 1347.8 ms, worst turn
+1.48 s, with the gate firing on 28% of rerank calls. `docs/competition_specification.md` notes that
+timeouts may count as a miss, so even a *positive* result at this latency would have needed care.
+
+The stage stays in the tree, disabled, because the measurement is the deliverable — full numbers in
+`docs/team/rerank_signals.md`. It is not a parked option: nothing selects it, no reported score
+depends on it, and with it off every session's rank and turn is bit-identical to the pipeline
+without it.
 
 **A bug worth learning from.** The first version of `InfoGainPolicy` opened every conversation by
 asking the customer's preferred *brand*. The cause was using raw entropy: brand has thousands of

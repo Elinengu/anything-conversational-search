@@ -32,6 +32,7 @@ from src.index import load_index  # noqa: E402
 from src.policy import FixedPolicy, InfoGainPolicy  # noqa: E402
 from src.rerank import RerankConfig  # noqa: E402
 from src.retrieval import RetrievalConfig  # noqa: E402
+from src.semantic import SemanticConfig  # noqa: E402
 from starter.agent import Agent, AgentConfig  # noqa: E402
 
 
@@ -127,6 +128,21 @@ def build_configs(catalog: str) -> dict[str, AgentConfig]:
         "ramp4": AgentConfig(list_size_ramp=(4, 10)),
         "ramp5": AgentConfig(list_size_ramp=(5, 10)),
         "ramp55": AgentConfig(list_size_ramp=(5, 5, 10)),
+        # S6b neural cross-encoder (off by default, needs requirements.txt +
+        # tools/export_onnx.py). semantic_off is the baseline these are read
+        # against; it must score bit-identically to every other default row.
+        # The gate thresholds bracket the measured ambiguity distribution: at
+        # tied_leaders=8 the gate fired on 73% of public sessions, which is an
+        # always-on stage with extra steps, so 15/25 tighten it.
+        "semantic_off": AgentConfig(semantic=SemanticConfig(enabled=False)),
+        "semantic_on": AgentConfig(semantic=SemanticConfig(enabled=True)),
+        "semantic_loose": AgentConfig(
+            semantic=SemanticConfig(enabled=True, tied_leaders=8, conditions_required=1)
+        ),
+        "semantic_tight": AgentConfig(
+            semantic=SemanticConfig(enabled=True, tied_leaders=25, facet_cluster=16)
+        ),
+        "semantic_d20": AgentConfig(semantic=SemanticConfig(enabled=True, depth=20)),
     }
 
 

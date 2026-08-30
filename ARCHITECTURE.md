@@ -99,7 +99,10 @@ default only because it currently wins on held-out data.
   would attach here.
 - **A new clarification policy** implements `select(state, candidates) -> str` and
   `question(attribute) -> str`, and is passed via `AgentConfig(policy=...)`.
-- **An LLM reranker** implements the same signature as `rerank.rerank()` and would
-  be selected in `AgentConfig`. It is deliberately absent: the core path carries a
-  no-network guarantee, so any model call must be an opt-in layer above it that
-  falls back to the local scorer, never a dependency inside it.
+- **A neural reranker** implements the same signature as `rerank.rerank()` and is
+  selected in `AgentConfig`. This point is now occupied by `src/semantic.py` (S6b),
+  a cross-encoder over ambiguous clusters — built exactly to the constraint stated
+  here: the core path carries a no-network guarantee, so a model call is an opt-in
+  layer *above* the local scorer that falls back to it, never a dependency inside
+  it. It is off by default, its weights are gitignored, and a missing runtime is a
+  no-op rather than an error. An LLM reranker would attach the same way.
