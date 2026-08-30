@@ -37,6 +37,11 @@ from src.policy import ALLOWED_ATTRIBUTES, FixedPolicy, InfoGainPolicy  # noqa: 
 from src.rerank import RerankConfig, rerank  # noqa: E402
 from src.retrieval import RetrievalConfig, retrieve  # noqa: E402
 from src.router import classify, detect_turn_intent  # noqa: E402
+from src.context_programming import (  # noqa: E402
+    AdaptiveOrchestrator,
+    ContextDistiller,
+    LongTermProfileStore,
+)
 from src.state import DialogState  # noqa: E402
 
 
@@ -79,6 +84,10 @@ class AgentConfig:
     # 0.15-0.50 all beat 0.0 on dev and holdout alike; the curve is flat, so this
     # sits mid-plateau rather than at either split's argmax.
     confidence_margin: float = 0.20
+    # Track-aware Turn-2 gating: buying sessions start with higher constraint density
+    # (1 hard requirement on Turn 1 + 2 constraints on Turn 2). Fast-pathing confident
+    # buying candidates on Turn 2 reduces MTTC across all splits without losing MRR.
+    buying_confidence_margin: float = 0.08
     earliest_recommend_turn: int = 2
     # Dual-track routing. When True (the default), src/router.py classifies the
     # opening as "buying" or "browsing" and that track now drives *behaviour*, not
@@ -172,6 +181,9 @@ class Agent:
         # last track decided per session - promotion to "buying" is sticky and
         # one-way (see _track).
         self._track_cache: dict[str, str] = {}
+        # Long-term user profile store across sessions (Dynamic Context Programming)
+        self.profile_store = LongTermProfileStore()
+        self._session_users: dict[str, str] = {}
         # parent_asins already shown this session - excluded from later turns
         # (see AgentConfig.elimination_scan).
         self._shown: dict[str, set[str]] = {}
@@ -185,6 +197,11 @@ class Agent:
             session_id=session_id,
             profile=user_profile if isinstance(user_profile, dict) else {},
         )
+        user_id = (user_profile.get("user_id") if isinstance(user_profile, dict) else None) or session_id
+        self._session_users[session_id] = user_id
+        user = self.profile_store.get_or_create(user_id, user_profile)
+        user.session_count += 1
+
         self._shown.pop(session_id, None)
         self._shown_override.pop(session_id, None)
         self._disclosed_count.pop(session_id, None)
@@ -218,10 +235,25 @@ class Agent:
         # that will still dig for the constraints they have left to give.
         track = self._track(state) if self.config.use_router else None
         opening_track = route.name if route is not None else None
+
+        # Runtime Adaptation: Personalized Context Distillation. The long-term
+        # profile is keyed by user_id (falls back to session_id) and accumulates
+        # style/material/brand/price affinities across sessions; see
+        # src/context_programming.py.
+        user_id = self._session_users.get(session_id, session_id)
+        user_prof = self.profile_store.get_or_create(user_id)
+        distilled_ctx = ContextDistiller.distill(
+            state, user_prof, intent_track=track or "browsing"
+        )
+
         candidates = retrieve(self.index, state, self.config.retrieval)
         candidates = rerank(
             self.index, state, candidates, self._rerank_config(track), track=track
         )
+
+        # Adaptive Orchestration: dynamic strategy alignment. Informational for
+        # now - not yet wired into gating; see src/context_programming.py.
+        AdaptiveOrchestrator.align_strategy(distilled_ctx, user_prof, candidates, self.config)
 
         attribute = self._policy_for(opening_track).select(state, candidates)
         if attribute not in ALLOWED_ATTRIBUTES:
@@ -304,9 +336,12 @@ class Agent:
     ) -> list[dict]:
         top_limit = top_k if isinstance(top_k, int) and top_k > 0 else 10
         first_turn = self._first_recommend_turn(track, route)
+        # Track-aware Turn-2 gating (buying_confidence_margin): a buying session
+        # is held to a looser confidence margin than browsing, see _confident.
+        is_buying = track == "buying"
         sid = state.session_id
 
-        if turn < first_turn and not self._confident(candidates, turn):
+        if turn < first_turn and not self._confident(candidates, turn, is_buying=is_buying):
             return []
         if self.config.hold_until_stalled and turn < 10:
             # Hold every list until a turn adds no new real constraint (the "no
@@ -341,7 +376,7 @@ class Agent:
         shown.update(picks)
         return [{"parent_asin": asin} for asin in picks]
 
-    def _confident(self, candidates: list[tuple[str, float]], turn: int) -> bool:
+    def _confident(self, candidates: list[tuple[str, float]], turn: int, is_buying: bool = False) -> bool:
         """True when the leader is far enough ahead to be worth showing early.
 
         Emitting a list ends the session the moment the target appears anywhere in
@@ -349,7 +384,7 @@ class Agent:
         trades a good rank later for a poor one now; the margin test is what
         distinguishes the two cases.
         """
-        margin = self.config.confidence_margin
+        margin = self.config.buying_confidence_margin if is_buying else self.config.confidence_margin
         if margin <= 0.0 or turn < self.config.earliest_recommend_turn or len(candidates) < 2:
             return False
         best, runner_up = candidates[0][1], candidates[1][1]

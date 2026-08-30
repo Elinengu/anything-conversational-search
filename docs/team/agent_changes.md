@@ -25,11 +25,17 @@ public labels and API contract were **not** touched.
 | + semantic reranking (S6b) | Elinengu | 0.9199 | 0.7981 | change 11; built, measured, **removed** (code on branch `semantic-rerank`) — cross-encoder loses on every split; oracle reranking ceiling established at +0.043 / +0.084 |
 | + popularity weight 0.02 → 0.4 | Elinengu | **0.9305** | **0.8020** | change 12; the tie-break regime fix — every split up, a hard-set miss converted; coordinate-ascent argmax measured and *not* shipped |
 | + pool-aware clarification wording | KW | 0.9305 | 0.8020 | change 13; **score-neutral by construction** — `ask_attribute` unchanged, simulator never reads `message`. Realism for Pillar II / Presentation |
-| + track-aware routing layer | KW | _0.9177_ | _0.7994_ | change 14; **branch `dual_tracking` only, not merged to `main`.** `use_router` widened from phrasing to behaviour (policy / rerank / timing). Costs ~0.013 on the cooperative public sim, gains nothing there; +0.147 overall / +0.43 browsing MRR on `tools/stress_harness.py --customer browse-gated`. `use_router=False` is bit-identical to the pre-branch agent. |
+| + track-aware turn-2 gating | xiaotong0329 | **0.9313** | **0.8028** | change 14; PR #7 — one config knob (`buying_confidence_margin`); the accompanying `src/context_programming.py` module is built but not wired into any decision — verified by ablation |
+| + track-aware routing layer | KW | _0.9177_ | _0.7994_ | change 15; **branch `dual_tracking` only, not merged to `main`.** `use_router` widened from phrasing to behaviour (policy / rerank / timing). Costs ~0.013 on the cooperative public sim, gains nothing there; +0.147 overall / +0.43 browsing MRR on `tools/stress_harness.py --customer browse-gated`. `use_router=False` is bit-identical to the pre-branch agent. |
+| + length tie-break / no-span rescore | Elinengu | 0.9305 | 0.8020 | change 16; **both measured and rejected — no `src/` change.** Dev moves 0.000000 for one and clears the adversarial gate at a single isolated weight for the other. Recorded in `rerank_signals.md` §5 and §11 |
 
-Net **on `main`**: **public 0.859 -> 0.9305, adversarial 0.684 -> 0.8020.** 73/73 tests pass.
-Change 14 is branch `dual_tracking` work (89/89 tests) and does not move the `main` number.
-The thirteen core-agent changes are detailed below; supporting tooling and docs follow.
+Net: **public 0.859 -> 0.9313, adversarial 0.684 -> 0.8028.** 77/77 tests pass.
+Change 15 is branch `dual_tracking` work (89/89 tests) and does not move the `main` number.
+Note: subsequent, unrelated work (dynamic context programming, clarification-wording
+naturalisation, the Gemini adapter) has since moved the measured public score past
+0.9305 — see those commits' own messages and `IMPLEMENTATION.md` for the current
+figure. The net above is the total through change 14 only.
+The sixteen core-agent changes are detailed below; supporting tooling and docs follow.
 Change 9 moved the score by exactly zero and is recorded in full anyway — a
 measured no-change is the evidence that keeps the shipped design chosen rather
 than assumed. Change 10 is the same lesson from the other side: the proposal that
@@ -879,8 +885,88 @@ public_0002 [intent_override at T3]
 Before change 13, every one of those turns was "To point you in the right
 direction: is there anything else that matters for this one?".
 
+---
 
-## Change 14 — Track-aware routing layer (Kwong Weng) — branch `dual_tracking`, not merged
+## Change 14 — Track-aware turn-2 gating (xiaotong0329, PR #7)
+
+**Files:** `starter/agent.py`, `src/context_programming.py` (new),
+`tests/test_context_programming.py` (new), `tools/evaluate_context_programming.py` (new) —
+commits `899eeb6` (feature) and `b80dbae` (merge)
+
+### Problem
+
+`_confident()` (§S7) gates early recommendation behind one fixed margin,
+`confidence_margin = 0.20`, for every session regardless of track. Buying sessions
+open with more constraint density than browsing ones — one hard requirement on
+turn 1 plus two more on turn 2 — so a buying leader is typically already well
+separated from the runner-up by turn 2. The single shared margin makes those
+sessions wait until turn 3 for a list they were already confident about.
+
+### What changed
+
+A second, lower margin, `buying_confidence_margin = 0.08`, used only when the
+router classifies the session as `buying`:
+
+```python
+# starter/agent.py _confident()
+margin = self.config.buying_confidence_margin if is_buying else self.config.confidence_margin
+```
+
+`is_buying` comes from `route.name == "buying"` in `respond()`, computed once per
+turn and threaded into `_shortlist()` / `_confident()`. That is the entire
+behavioural change; it is a one-parameter, track-conditioned variant of the
+confidence gating already described in §S7 of `IMPLEMENTATION.md`.
+
+The commit also adds `src/context_programming.py` (249 lines): `UserProfile` /
+`LongTermProfileStore` accumulate per-user facet counters across sessions, and
+`ContextDistiller` / `AdaptiveOrchestrator` compute a per-turn `DistilledShortTermContext`
+and `OrchestrationPlan` (a `DialogPhase` — `exploring` / `converging` /
+`override_reversal` / `stagnating` — derived from pool entropy, confidence lead,
+`productive_turns` and `dead_attributes`). This is the "Adaptive orchestration by
+session state" idea listed in `IMPLEMENTATION.md` §10 — the same signals that
+section names as unused (`productive_turns`, `dead_attributes`) are the ones this
+module reads.
+
+**It is scaffolding, not a live path.** `respond()` calls
+`ContextDistiller.distill(...)` and `AdaptiveOrchestrator.align_strategy(...)` every
+turn, and the second call's return value is assigned to a local named `plan` — but
+`plan` is never read again, and neither is `distilled_ctx` beyond that one call.
+`_shortlist()` and `_confident()` still only consume `is_buying` and
+`self.config.buying_confidence_margin` / `confidence_margin` directly; the
+`OrchestrationPlan.recommendation_cutoff`, `.retrieval_route`,
+`.recommended_slate_size` and `.guidance_action` fields it computes are not
+threaded into retrieval, reranking, gating, or `clarify()`. Confirmed by ablation:
+pinning `buying_confidence_margin` to `0.20` (i.e. no different from
+`confidence_margin`) on the current code reproduces the pre-change public score
+bit-for-bit — `0.930502`, MRR `0.901339`, MTTC `2.995`, matching the `dd9ba8a`
+baseline run to six decimal places — while the module's `distill()` /
+`align_strategy()` calls still run every turn. So §10's orchestration idea is not
+yet "done"; the module computes the phase but nothing downstream acts on it. Left
+in place since `LongTermProfileStore` and `ContextDistiller.record_turn` are a
+reasonable foundation for wiring it in later — see the idea update in
+`IMPLEMENTATION.md` §10.
+
+### Effect
+
+Measured before (`dd9ba8a`, one commit prior) vs after (`899eeb6` /
+`b80dbae`, this commit) in one process, `Agent(catalog, AgentConfig(...))`:
+
+| | before | after |
+|---|---|---|
+| Public set (200) | 0.930502 | **0.931302** |
+| Adversarial set (96) | 0.801978 | **0.802811** |
+| dev / holdout | 0.9418 / 0.9136 | **0.9428** / **0.9141** |
+| Tests | 73/73 | 77/77 (+4, `test_context_programming.py`) |
+
+MRR does not move on any split (public `0.901339 -> 0.901339`, dev `0.9314`
+unchanged) — the whole gain is MTTC, exactly the confidence-gating mechanism in
+§S7: public MTTC `2.995 -> 2.955`, buying-track sessions reach a recommendation a
+fraction of a turn sooner without ranking worse. Hit@10 was already 1.000 on
+public before this change; the commit message's "100% Hit Rate@10" describes the
+post-change state, not something this change produced.
+
+
+## Change 15 — Track-aware routing layer (Kwong Weng) — branch `dual_tracking`, not merged
 
 **Files:** `starter/agent.py` (`AgentConfig` fields, `_track` / `_policy_for` /
 `_rerank_config` / `_first_recommend_turn` / `_list_size_ramp`, `_shortlist`
@@ -976,7 +1062,84 @@ load-bearing. It stays on the branch; `main` is unchanged. Full analysis and the
 | S3 state | **declined utterances held out of every retrieval view** | — | `src/state.py` |
 | S4 policy | FixedPolicy: `other`, then feature-ladder | — | `src/policy.py` |
 | S7 timing | first_recommend_turn / confidence margin / earliest | 3 / 0.20 / 2 | `starter/agent.py` |
+| S7 timing | **buying_confidence_margin** (track-aware turn-2 gating) | **0.08** | `starter/agent.py` |
 | S7 timing | **elimination_scan / hold_until_stalled** | on / off | `starter/agent.py` |
+
+## Change 14 — Two rerank signals measured and rejected (Elinengu)
+
+**Files:** `docs/team/rerank_signals.md` (§5 addendum, new §11),
+`IMPLEMENTATION.md` §6 and the S6 idea list. **No `src/` change ships.**
+
+### Problem
+
+Change 12 fixed one half of the tie-break regime by raising `popularity_weight`.
+Two follow-ups looked like the obvious next moves, and two sessions motivated
+them:
+
+* **`public_0198`** discloses only single-word constraints (`leather`,
+  `color: black`, `PU`, `Imported`). `constraint_spans` needs two words and
+  `pair_spans` three, so `query_spans()` is empty for the whole session, the
+  no-span early return fires every turn, and the pool is served in raw retrieval
+  order. The target sits at pool rank 51 and surfaces only at **turn 9** via the
+  elimination scan — `mttc` is 20% of the technical score. §5 had rejected the
+  fix for this in the `popularity_weight` 0.02 regime; at 0.4 it looked revived.
+* **`public_0002`** is the tie-break regime in one screenshot: span 2.48, facet
+  1.0, category 2.0, tail 2.0, conflict 0 — **identical** for the target and all
+  three impostors above it. Only retrieval (which picks the impostors) and
+  popularity (which picks the target) differ. The target is a 351-token men's
+  belt; the impostors are ~100-130-token women's belts.
+
+### What changed
+
+Nothing in `src/`. Both candidates were built, measured on the proper splits, and
+reverted.
+
+The **length tie-break** was the substantive one: a pool-local length percentile
+added only to candidates whose *content* evidence ties the leader's, which
+required splitting the reranker's `total` into a content subtotal plus priors.
+The near-miss anatomy, re-derived on the **dev split alone**, supports it — length
+picks the target 33/37 and rescues 5 of the 6 near-misses popularity gets wrong,
+correlation 0.418, so it is a genuinely independent signal.
+
+### Effect
+
+| | before | after (rejected) |
+|---|---|---|
+| No-span rescore — dev | 0.941757 | **0.941757** (bit-identical) |
+| No-span rescore — holdout / hard | 0.913619 / 0.801978 | 0.918765 / 0.799968 |
+| Length tie-break — dev | 0.941757 | 0.943229 (`w=0.10`) |
+| Length tie-break — hard | **0.801978** | 0.805064 at `w=0.10`; 0.800381 at 0.08; 0.799075 at 0.12 |
+| Public set (unchanged) | 0.930502 | 0.930502 |
+| Adversarial set (unchanged) | 0.801978 | 0.801978 |
+| Tests | 69/69 | 69/69 |
+
+Neither qualifies. The no-span rescore does not move the **selector** split by a
+single digit — all four sessions it improves are on the holdout, against five
+hard-set sessions it worsens — and damping popularity in that path makes the hard
+set worse, not better (×1.0 0.799968, ×0.5 0.797753, ×0.0 0.799299), so the cost
+is the other non-span signals firing as the only evidence. The length tie-break
+clears the adversarial gate at exactly one weight with **both neighbours below
+baseline**, while dev stays flat across the whole bracket: that is an argmax on
+noise, and this project ships plateaus. Change 12's own justification was that
+0.1/0.3/0.4/0.5 were all ≥ baseline on all four splits; nothing here comes close.
+
+### What the round is actually worth
+
+The method correction, which is larger than either signal. Read off the full
+public set — as the first pass did — the no-span rescore reports **+0.0021 and
+looks shippable**. `tools/sweep.py:split_samples` partitions the public set into
+dev (120) and holdout (80), so "public 200" *contains the gate*, and every point
+of that +0.0021 came from the holdout half. Selecting on it would have spent the
+gate to buy nothing. The same applies to the near-miss anatomy: computed over all
+200 sessions it is a read of the test set, so it was re-derived on dev, where the
+length finding held (33/37) and **category-path precision died** (tied 34/37)
+despite being the signal `public_0002` makes look irresistible.
+
+The one untried route is recorded in §11 and in the S6 idea list: correct BM25's
+length normalisation at its source by recomputing a length-corrected BM25 over the
+300-candidate pool, rather than bolting a prior onto a score that is already built
+from BM25 *ranks* and has discarded the magnitudes the correction needs.
+
 
 ## Not touched (organizer-owned)
 

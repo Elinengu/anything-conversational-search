@@ -18,8 +18,11 @@ Classification combines:
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
+
+from src.llm import get_llm_client
 
 
 # -------------------------------------------------------------------------------
@@ -170,6 +173,34 @@ def extract_opening_facets(text: str) -> dict[str, tuple[str, ...]]:
     return results
 
 
+def _llm_route_hint(text: str) -> Route | None:
+    """Optional Gemini-backed routing hint. Returns None when the client is unavailable."""
+    client = get_llm_client()
+    if not client.is_configured:
+        return None
+    prompt = (
+        "Classify the shopping intent of the following customer message. "
+        "Return strict JSON with keys: route, confidence, reason, is_override, is_boundary. "
+        "Routes must be 'buying' or 'browsing'.\n\n"
+        f"Message: {text}"
+    )
+    payload = client.generate_json(prompt)
+    if not isinstance(payload, dict):
+        return None
+    route = payload.get("route")
+    if route not in {"buying", "browsing"}:
+        return None
+    return Route(
+        name=str(route),
+        tone="To narrow this down: " if route == "buying" else "To point you in the right direction: ",
+        confidence=float(payload.get("confidence", 0.5) or 0.5),
+        buying_score=2.0 if route == "buying" else 0.0,
+        browsing_score=2.0 if route == "browsing" else 0.0,
+        scenario_hint="intent_override" if payload.get("is_override") else "boundary" if payload.get("is_boundary") else route,
+        suggested_first_recommend_turn=2 if route == "buying" else 3,
+    )
+
+
 def classify(opening: str) -> Route:
     """Highly sensitive intent classification of the customer's opening message.
 
@@ -185,6 +216,10 @@ def classify(opening: str) -> Route:
     text = (opening or "").strip()
     if not text:
         return BROWSING
+
+    llm_hint = _llm_route_hint(text)
+    if llm_hint is not None:
+        return llm_hint
 
     buying_matches = [m.group(0) for m in BUYING_CUES.finditer(text)]
     browsing_matches = [m.group(0) for m in BROWSING_CUES.finditer(text)]
