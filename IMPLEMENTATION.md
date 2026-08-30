@@ -1103,6 +1103,19 @@ Narrowing a *second* turn is not more of the same good thing. `(5, 5, 10)` score
 holds four constraints and the customer discloses at most two per turn, so by turn 4-5 no further
 evidence is coming and waiting longer spends turns without buying rank.
 
+**Track-aware margin.** `confidence_margin` is one number for every session, but the two tracks
+disclose at different rates: a buying session states one hard requirement on turn 1 and two more
+on turn 2, so by turn 2 its leader is usually already well separated from the runner-up, while a
+browsing session is still exploring. `buying_confidence_margin` (default `0.08`) is a second,
+lower margin used in `_confident()` only when the router classified the session as `buying`:
+
+```python
+margin = self.config.buying_confidence_margin if is_buying else self.config.confidence_margin
+```
+
+This lets buying sessions clear the confidence test a turn earlier without changing anything for
+browsing sessions, whose margin is untouched.
+
 #### Measured effect
 
 Confidence gating: `0.8543 → 0.8592`, with MTTC improving from 3.58 to 3.41.
@@ -1113,6 +1126,14 @@ public, MRR `0.8513 → 0.8690` (×0.30 = +0.0053) against MTTC `2.975 → 3.040
 ×0.20 = −0.0013), netting the +0.0040 observed. Hit@10 does not move on public (1.000) or hard
 (0.885): this buys rank, not coverage. One cost worth naming — on the 200-session generated set
 Hit@10 slips `0.995 → 0.990`, a single session that now runs out of turns.
+
+Track-aware margin (PR #7, `buying_confidence_margin = 0.08`): public `0.930502 → 0.931302`,
+adversarial `0.801978 → 0.802811`, dev `0.9418 → 0.9428`, holdout `0.9136 → 0.9141`. MRR does not
+move on any split — the gain is entirely MTTC, exactly the confidence-gating mechanism above,
+narrowed to buying-track sessions. Small relative to the first-slate change because it only moves
+the turn-2 gate, and only for buying sessions that were already going to clear the margin by
+turn 3 anyway; see `docs/team/agent_changes.md` change 14 for the ablation that isolates it from
+the `src/context_programming.py` module shipped alongside it.
 
 #### Ideas for this stage
 
@@ -1446,11 +1467,20 @@ break the current tie rather than to split the pool in general. This is the most
 unbuilt idea in the project, it needs no new data, and it connects S4, S6 and S7 into an actual
 feedback loop rather than a pipeline.
 
-**Adaptive orchestration by session state.** Every session runs the identical sequence of stages.
-A session where the customer is disclosing freely and a session where they keep saying "no
-preference" call for different behaviour — the first should keep asking, the second should stop
-asking and start showing lists. The signals to detect this already exist (`productive_turns`,
-`dead_attributes` in `src/state.py`); nothing consumes them for orchestration.
+**Adaptive orchestration by session state — scaffolded, not wired in (PR #7).** Every session
+still runs the identical sequence of stages. `src/context_programming.py` adds an
+`AdaptiveOrchestrator.align_strategy()` that reads exactly the signals this idea named
+(`productive_turns`, `dead_attributes`, plus candidate-pool entropy) and classifies the turn into
+a `DialogPhase` — `exploring`, `converging`, `override_reversal`, `stagnating`. `respond()` calls
+it every turn and keeps the result in a local named `plan`, but nothing downstream reads `plan`:
+`_shortlist()` and `_confident()` still only consume `is_buying` and the two confidence-margin
+config fields directly (see §S7, "Track-aware margin"). Confirmed by ablation in
+`docs/team/agent_changes.md` change 14 — collapsing the buying-track margin back to the default
+reproduces the pre-PR score bit-for-bit even though `align_strategy()` still runs every turn. So
+the diagnosis this idea called for now exists in code; the part still open is acting on it —
+routing `stagnating` sessions to a different strategy, or gating on `recommendation_cutoff`
+instead of the flat turn number, would be new score-moving territory this module already computes
+the inputs for.
 
 **A per-turn budget.** All stages run every turn regardless of whether they can contribute. The
 focused retrieval route only matters after an override; reranking only matters once spans exist.

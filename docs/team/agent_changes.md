@@ -25,9 +25,10 @@ public labels and API contract were **not** touched.
 | + semantic reranking (S6b) | Elinengu | 0.9199 | 0.7981 | change 11; built, measured, **removed** (code on branch `semantic-rerank`) — cross-encoder loses on every split; oracle reranking ceiling established at +0.043 / +0.084 |
 | + popularity weight 0.02 → 0.4 | Elinengu | **0.9305** | **0.8020** | change 12; the tie-break regime fix — every split up, a hard-set miss converted; coordinate-ascent argmax measured and *not* shipped |
 | + pool-aware clarification wording | KW | 0.9305 | 0.8020 | change 13; **score-neutral by construction** — `ask_attribute` unchanged, simulator never reads `message`. Realism for Pillar II / Presentation |
+| + track-aware turn-2 gating | xiaotong0329 | **0.9313** | **0.8028** | change 14; PR #7 — one config knob (`buying_confidence_margin`); the accompanying `src/context_programming.py` module is built but not wired into any decision — verified by ablation |
 
-Net: **public 0.859 -> 0.9305, adversarial 0.684 -> 0.8020.** 73/73 tests pass.
-The thirteen core-agent changes are detailed below; supporting tooling and docs follow.
+Net: **public 0.859 -> 0.9313, adversarial 0.684 -> 0.8028.** 77/77 tests pass.
+The fourteen core-agent changes are detailed below; supporting tooling and docs follow.
 Change 9 moved the score by exactly zero and is recorded in full anyway — a
 measured no-change is the evidence that keeps the shipped design chosen rather
 than assumed. Change 10 is the same lesson from the other side: the proposal that
@@ -877,8 +878,87 @@ public_0002 [intent_override at T3]
 Before change 13, every one of those turns was "To point you in the right
 direction: is there anything else that matters for this one?".
 
+---
 
-## Supporting work (Kwong Weng)
+## Change 14 — Track-aware turn-2 gating (xiaotong0329, PR #7)
+
+**Files:** `starter/agent.py`, `src/context_programming.py` (new),
+`tests/test_context_programming.py` (new), `tools/evaluate_context_programming.py` (new) —
+commits `899eeb6` (feature) and `b80dbae` (merge)
+
+### Problem
+
+`_confident()` (§S7) gates early recommendation behind one fixed margin,
+`confidence_margin = 0.20`, for every session regardless of track. Buying sessions
+open with more constraint density than browsing ones — one hard requirement on
+turn 1 plus two more on turn 2 — so a buying leader is typically already well
+separated from the runner-up by turn 2. The single shared margin makes those
+sessions wait until turn 3 for a list they were already confident about.
+
+### What changed
+
+A second, lower margin, `buying_confidence_margin = 0.08`, used only when the
+router classifies the session as `buying`:
+
+```python
+# starter/agent.py _confident()
+margin = self.config.buying_confidence_margin if is_buying else self.config.confidence_margin
+```
+
+`is_buying` comes from `route.name == "buying"` in `respond()`, computed once per
+turn and threaded into `_shortlist()` / `_confident()`. That is the entire
+behavioural change; it is a one-parameter, track-conditioned variant of the
+confidence gating already described in §S7 of `IMPLEMENTATION.md`.
+
+The commit also adds `src/context_programming.py` (249 lines): `UserProfile` /
+`LongTermProfileStore` accumulate per-user facet counters across sessions, and
+`ContextDistiller` / `AdaptiveOrchestrator` compute a per-turn `DistilledShortTermContext`
+and `OrchestrationPlan` (a `DialogPhase` — `exploring` / `converging` /
+`override_reversal` / `stagnating` — derived from pool entropy, confidence lead,
+`productive_turns` and `dead_attributes`). This is the "Adaptive orchestration by
+session state" idea listed in `IMPLEMENTATION.md` §10 — the same signals that
+section names as unused (`productive_turns`, `dead_attributes`) are the ones this
+module reads.
+
+**It is scaffolding, not a live path.** `respond()` calls
+`ContextDistiller.distill(...)` and `AdaptiveOrchestrator.align_strategy(...)` every
+turn, and the second call's return value is assigned to a local named `plan` — but
+`plan` is never read again, and neither is `distilled_ctx` beyond that one call.
+`_shortlist()` and `_confident()` still only consume `is_buying` and
+`self.config.buying_confidence_margin` / `confidence_margin` directly; the
+`OrchestrationPlan.recommendation_cutoff`, `.retrieval_route`,
+`.recommended_slate_size` and `.guidance_action` fields it computes are not
+threaded into retrieval, reranking, gating, or `clarify()`. Confirmed by ablation:
+pinning `buying_confidence_margin` to `0.20` (i.e. no different from
+`confidence_margin`) on the current code reproduces the pre-change public score
+bit-for-bit — `0.930502`, MRR `0.901339`, MTTC `2.995`, matching the `dd9ba8a`
+baseline run to six decimal places — while the module's `distill()` /
+`align_strategy()` calls still run every turn. So §10's orchestration idea is not
+yet "done"; the module computes the phase but nothing downstream acts on it. Left
+in place since `LongTermProfileStore` and `ContextDistiller.record_turn` are a
+reasonable foundation for wiring it in later — see the idea update in
+`IMPLEMENTATION.md` §10.
+
+### Effect
+
+Measured before (`dd9ba8a`, one commit prior) vs after (`899eeb6` /
+`b80dbae`, this commit) in one process, `Agent(catalog, AgentConfig(...))`:
+
+| | before | after |
+|---|---|---|
+| Public set (200) | 0.930502 | **0.931302** |
+| Adversarial set (96) | 0.801978 | **0.802811** |
+| dev / holdout | 0.9418 / 0.9136 | **0.9428** / **0.9141** |
+| Tests | 73/73 | 77/77 (+4, `test_context_programming.py`) |
+
+MRR does not move on any split (public `0.901339 -> 0.901339`, dev `0.9314`
+unchanged) — the whole gain is MTTC, exactly the confidence-gating mechanism in
+§S7: public MTTC `2.995 -> 2.955`, buying-track sessions reach a recommendation a
+fraction of a turn sooner without ranking worse. Hit@10 was already 1.000 on
+public before this change; the commit message's "100% Hit Rate@10" describes the
+post-change state, not something this change produced.
+
+
 
 | file | what |
 |---|---|
@@ -917,6 +997,7 @@ direction: is there anything else that matters for this one?".
 | S3 state | **declined utterances held out of every retrieval view** | — | `src/state.py` |
 | S4 policy | FixedPolicy: `other`, then feature-ladder | — | `src/policy.py` |
 | S7 timing | first_recommend_turn / confidence margin / earliest | 3 / 0.20 / 2 | `starter/agent.py` |
+| S7 timing | **buying_confidence_margin** (track-aware turn-2 gating) | **0.08** | `starter/agent.py` |
 | S7 timing | **elimination_scan / hold_until_stalled** | on / off | `starter/agent.py` |
 
 ## Not touched (organizer-owned)
