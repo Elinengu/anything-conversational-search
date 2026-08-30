@@ -569,9 +569,13 @@ def main() -> None:
                     help="force each track, tabulate true x routed (needs a browse-gated spec)")
     ap.add_argument("--verify", action="store_true",
                     help="assert the un-stressed path reproduces local_evaluator")
+    ap.add_argument("--limit", type=int, help="first N sessions after --targets filtering "
+                    "(bounds wall time / token spend on a real --configs llm_rerank run)")
     args = ap.parse_args()
 
     samples = load_jsonl(args.dataset)
+    if args.limit:
+        samples = samples[: args.limit]
     catalog_ids, categories, products = catalog_index(args.catalog)
     agent = Agent(args.catalog)
 

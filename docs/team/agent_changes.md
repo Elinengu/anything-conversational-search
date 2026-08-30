@@ -1022,6 +1022,180 @@ value is entirely on the harness, where a less cooperative browser makes routing
 load-bearing. It stays on the branch; `main` is unchanged. Full analysis and the
 "what is not claimed" list: `docs/team/dual_track_routing.md`.
 
+## Change 14 — Dynamic context programming + track-aware turn-2 gating (Xiaotong)
+
+**Files:** `src/context_programming.py` (new), `starter/agent.py`
+(`AgentConfig.buying_confidence_margin`, `_confident`, `_shortlist`, wiring in
+`respond`/`reset`), `tests/test_context_programming.py` (new),
+`tools/evaluate_context_programming.py` (new), `results.json` (regenerated —
+now a public-set run again)
+
+### What changed — two very different things in one commit
+
+**(a) The scored change: `buying_confidence_margin = 0.08`.** `_confident()`
+now uses a lower leader-margin threshold (0.08 vs 0.20) when the router
+classifies the opening as buying. Buying sessions carry a hard constraint from
+turn 1 plus two more on turn 2, so the leader's margin is meaningful earlier;
+the lower bar lets a confident list out on turn 2 instead of 3. With
+`first_recommend_turn=3` and `earliest_recommend_turn=2` this can only ever
+fire on turn 2 — it is a turn-2 fast gate, nothing more. This is also the
+first change that makes the router's classification affect *behavior* rather
+than just phrasing (cf. change 13 and `future_steps.md` §1).
+
+**(b) The unscored layer: `src/context_programming.py`.** `ContextDistiller`
+(typed short-term session context), `LongTermProfileStore`/`UserProfile`
+(cross-session preference counters), and `AdaptiveOrchestrator` (a four-phase
+`DialogPhase` classifier — EXPLORING / CONVERGING / OVERRIDE_REVERSAL /
+STAGNATING — emitting an `OrchestrationPlan`). All of it runs on every turn.
+
+### Honest status of layer (b): computed, not consumed
+
+- The `OrchestrationPlan` built at `starter/agent.py:208` is assigned to a
+  variable that nothing reads. Retrieval, rerank, policy, and timing are
+  decided exactly as before; the turn-2 gate in (a) is wired independently of
+  the orchestrator (which duplicates the same margin logic internally).
+- `UserProfile.top_affinities()` has no consumer.
+- Cross-session profiling keys on `user_profile["user_id"]`, which the
+  competition's aggregate profile does not contain, so the key falls back to
+  `session_id` — under the official evaluator every session is a fresh
+  profile and the "long-term" store never accumulates. It works only in
+  `tools/evaluate_context_programming.py`, which supplies a `user_id`.
+
+This is the same shape as the pre-change-14 router ("computed but only changes
+wording") — now one level up. The next step that would make it real is feeding
+`plan.gating_margin` / `recommendation_cutoff` / `recommended_slate_size` into
+`_shortlist` and A/B-ing it (pillar III-1 in `pillar_suggestions.md`), and it
+needs the stagnation datasets to show value (the public simulator never
+stagnates).
+
+### Effect (measured post-hoc, all four splits, LLM path off)
+
+| | before | after | Δ |
+|---|---|---|---|
+| Public set (official) | 0.930502 | **0.931302** | +0.0008 |
+| dev / holdout | 0.9418 / 0.9136 | 0.9428 / 0.9141 | +0.0010 / +0.0005 |
+| Adversarial set | 0.801978 | 0.802811 | +0.0008 |
+| Tests | 69/69 | 77/77 |
+
+Hit@10 and MRR are byte-identical on every split — the whole delta is MTTC
+(public buying 2.8 → 2.7). Under the house noise bar (< 0.02 on holdout) this
+does not *prove* itself, but the direction is consistent on all four splits,
+the mechanism is understood, and nothing regresses; kept. The "old" rows above
+were reproduced exactly (0.930502 public) by setting
+`buying_confidence_margin=0.20`, which restores the previous behavior
+byte-for-byte.
+
+## Change 15 — Hybrid LLM layer: listwise rerank fusion + explanations (Xiaotong)
+
+**Files:** `src/llm.py` (new), `src/rerank.py` (`llm_weight`, `llm_scores`
+fusion term), `starter/agent.py` (LLM wiring, real token accounting in
+`usage`), `tests/test_llm.py` (new), `tools/demo_llm.py` (new),
+`.env.example` (new)
+
+### What changed
+
+`LLMClient`: a stdlib-only (urllib) multi-provider client — Gemini, OpenAI,
+any OpenAI-compatible endpoint (Ollama), and a `mock` provider for offline
+tests — with three capabilities:
+
+1. **Listwise semantic rerank** (`rerank_candidates`): top-15 candidates +
+   the conversation text → the model returns a JSON ranking; scores
+   `1/(rank+1)` fuse into the linear rerank as
+   `llm_weight × llm_map.get(asin, 0)` (`RerankConfig.llm_weight`).
+2. **Transparent explanations** (`explain_recommendations`): one-sentence
+   grounded justification; when the LLM answers, it *replaces* the clarify
+   `message`.
+3. **Grounded clarification generation** (`generate_clarification`) — built
+   but not yet called from the agent.
+
+Every path degrades to the deterministic behavior: `enabled=False` and
+`llm_weight=0.0` are the defaults, all network errors are swallowed into the
+fallback, and `usage` now reports real token counts (0 on the offline path),
+which the spec requires.
+
+### Off by default, and the default path is untouched
+
+With defaults, `is_available()` is False and `llm_scores={}`: the scored
+pipeline is bit-identical to change 14 (public 0.931302 reproduced). The two
+knobs are `AgentConfig(llm=LLMConfig(enabled=True, provider=...))` and
+`RerankConfig(llm_weight=...)`; keys come from `.env` (gitignored) via a
+no-dependency loader.
+
+### Effect of enabling the LLM rerank (measured, Gemini flash)
+
+**Wiring: verified end-to-end.** A live call (Gemini flash, key from `.env`)
+returns a JSON ranking whose IDs map back onto real `parent_asin` keys and
+fuse into the rerank totals; the trimmed index records carry `parent_asin`
+and `title`, so the score join works. Mock-provider tests cover the same
+path offline.
+
+**Benefit: not yet measurable on this key.** An A/B on the 32 span-saturated
+hard sessions (`homogeneous_cluster` + `generic_override`, the regimes where
+the removed cross-encoder's oracle showed +0.084 headroom) produced
+byte-identical scores (0.719126) with 4,475 tokens spent — because the
+Gemini **free tier quota (limit: 20 requests) exhausted mid-run** and every
+later call fell back silently to empty scores. The graceful-degradation
+design worked exactly as intended, which is also why the result is *not* a
+verdict on the LLM rerank: most turns simply ran without it. The `.env`
+OpenAI key is a placeholder (401). A real measurement needs a paid-tier key,
+a higher-quota key, or the Ollama path — until then `llm_weight` stays 0.0
+and the claim is "wired and safe", not "helps".
+
+### Fallback guarantee: verified and hardened (Elinengu)
+
+The requirement is that any LLM failure degrades to the *exact* baseline. Two
+gaps were found and fixed in `src/llm.py`:
+
+1. **A failed explanation call no longer replaces the message.** It returned
+   the canned fallback sentence, which overwrote change 13's pool-aware
+   clarify() question whenever the network died mid-session. It now returns
+   `""` and the agent keeps its original message. (The `enabled=False` direct
+   path still returns the grounded fallback for demo/test use.)
+2. **Circuit breaker.** After 3 consecutive failed calls the client marks
+   itself unavailable for its lifetime. Without it, a dead-but-slow network
+   costs (8s timeout × 4 model fallbacks) × 2 calls on *every* turn — up to
+   ~60s/turn — and evaluator timeouts count as misses. With it, worst case is
+   3 failed calls total, then pure baseline.
+
+Measured on the first 40 public sessions, per-session outcomes
+(`first_hit_turn`, `best_rank`) compared tuple-for-tuple against baseline:
+
+| config | score | identical to baseline | wall | breaker |
+|---|---|---|---|---|
+| A baseline (llm off) | 0.948833 | — | 7.1s | — |
+| B enabled, network dead (urlopen raises) | 0.948833 | **yes** | 7.1s | tripped at 3 |
+| C enabled, real quota-exhausted key (HTTP 429) | 0.948833 | **yes** | 9.3s | tripped at 3 |
+| D enabled, mock provider returning unparseable prose | 0.948833 | **yes** | 7.2s | not tripped |
+
+D confirms garbage output is also safe: the JSON parse fails, `llm_scores`
+stays empty, and the ordering is untouched (68k tokens honestly reported).
+Pinned by `tests/test_llm.py::TestFallbackGuarantee` (3 new tests: identical
+envelopes under a dead network, breaker trip, failed-explanation message
+preservation). 80/80 tests.
+
+### Environment caveat (cost of an hour of debugging)
+
+On this machine the stdlib `urllib` call failed with `SSL:
+CERTIFICATE_VERIFY_FAILED` — macOS framework Python without linked root
+certs — and the client's swallow-everything error handling turned that into a
+silent fallback (0 tokens, deterministic message) that *looked* like a working
+offline mode. Fix: `export SSL_CERT_FILE=$(python3 -c "import certifi;
+print(certifi.where())")` before any LLM-enabled run. Consider logging one
+warning on the first failed call; silent degradation is the right *scoring*
+behavior but it hides misconfiguration during development.
+
+### Repairs made while landing these two changes (Elinengu)
+
+- `tools/observe.py`: the probe wrapper for `rerank` didn't accept the new
+  `llm_scores` kwarg, so **every traced session scored 0.000** (the TypeError
+  was swallowed by the evaluator's miss-on-exception rule). One-line fix
+  (`**kwargs` passthrough); verified 4/4 hits and `tests/test_observe.py`
+  green.
+- `src/rerank.py`: restored the 20-line measured-rationale comment above
+  `authoritative_facets` (the four-variant conflict-scoring evidence) that the
+  commit deleted; the numbers it records live nowhere else in the tree except
+  `rerank_signals.md`.
+
 ## Supporting work (Kwong Weng)
 
 | file | what |
@@ -1053,7 +1227,8 @@ load-bearing. It stays on the branch; `main` is unchanged. Full analysis and the
 |---|---|---|---|
 | S1 index | FTS5 field weights (title, cat, features, details, store, desc) | 8, 5, 6, 6, 0.5, 0.25 | `src/index.py` |
 | S5 retrieval | pool size / RRF k / focused-route weight | 300 / 60 / 0.8 | `src/retrieval.py` |
-| S6 rerank | span / retrieval / popularity / **facet** weight | 1.0 / 1.0 / 0.02 / **0.3** | `src/rerank.py` |
+| S6 rerank | span / retrieval / **popularity** (change 12) / facet weight | 1.0 / 1.0 / **0.4** / 0.3 | `src/rerank.py` |
+| S6 rerank | **llm_weight** (LLM listwise fusion, change 15) | 0.0 (off) | `src/rerank.py` |
 | S6 rerank | category (ancestor) / **tail** weight | 0.4 / **0.8** | `src/rerank.py` |
 | S6 rerank | **facet-conflict penalty** (vs post-override facets) | **0.4** | `src/rerank.py` |
 | S6 rerank | **pair-span weight** (key:value associations, word-bounded) | **0.8** | `src/rerank.py` |
@@ -1062,7 +1237,8 @@ load-bearing. It stays on the branch; `main` is unchanged. Full analysis and the
 | S3 state | **declined utterances held out of every retrieval view** | — | `src/state.py` |
 | S4 policy | FixedPolicy: `other`, then feature-ladder | — | `src/policy.py` |
 | S7 timing | first_recommend_turn / confidence margin / earliest | 3 / 0.20 / 2 | `starter/agent.py` |
-| S7 timing | **buying_confidence_margin** (track-aware turn-2 gating) | **0.08** | `starter/agent.py` |
+| S7 timing | **buying_confidence_margin** (track-aware turn-2 gating, change 14) | **0.08** | `starter/agent.py` |
+| LLM layer | enabled / provider (change 15) | off / deepseek | `src/llm.py` |
 | S7 timing | **elimination_scan / hold_until_stalled** | on / off | `starter/agent.py` |
 
 ## Change 14 — Two rerank signals measured and rejected (Elinengu)

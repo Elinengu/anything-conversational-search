@@ -102,9 +102,9 @@ def install_probes():
         _PROBE["pool"] = pool
         return pool
 
-    def rerank_probe(index, state, candidates, config=None):
+    def rerank_probe(index, state, candidates, config=None, **kwargs):
         started = time.perf_counter()
-        ranked = original["rerank"](index, state, candidates, config)
+        ranked = original["rerank"](index, state, candidates, config, **kwargs)
         _PROBE["rerank_ms"] = (time.perf_counter() - started) * 1000.0
         _PROBE["ranked"] = ranked
         return ranked
@@ -765,6 +765,12 @@ def main() -> None:
     parser.add_argument("--top", type=int, default=10, help="candidates recorded per turn")
     parser.add_argument("--no-markdown", action="store_true", help="skip the per-session .md files")
     parser.add_argument(
+        "--config",
+        default="",
+        help="tools/sweep.py config name to run instead of the default AgentConfig "
+        "(e.g. 'llm_rerank' to observe the DeepSeek listwise-rerank path)",
+    )
+    parser.add_argument(
         "--verify",
         action="store_true",
         help="re-run the official evaluator untraced and assert the score is identical",
@@ -785,7 +791,16 @@ def main() -> None:
     print(f"loading catalog {args.catalog} ...", flush=True)
     catalog_ids, categories, products = catalog_index(args.catalog)
 
-    agent = Agent(args.catalog)
+    agent_config = None
+    if args.config:
+        from tools.sweep import build_configs
+
+        configs = build_configs(args.catalog)
+        if args.config not in configs:
+            raise SystemExit(f"unknown --config {args.config!r}; choices: {', '.join(sorted(configs))}")
+        agent_config = configs[args.config]
+
+    agent = Agent(args.catalog, agent_config)
     tracer = TracingAgent(agent, samples, products, top_n=args.top)
 
     print(f"tracing {len(samples)} sessions ...", flush=True)

@@ -32,6 +32,7 @@ from src.index import load_index  # noqa: E402
 from src.policy import FixedPolicy, InfoGainPolicy  # noqa: E402
 from src.rerank import RerankConfig  # noqa: E402
 from src.retrieval import RetrievalConfig  # noqa: E402
+from src.llm import LLMConfig  # noqa: E402
 from starter.agent import Agent, AgentConfig  # noqa: E402
 
 
@@ -160,6 +161,17 @@ def build_configs(catalog: str) -> dict[str, AgentConfig]:
         "router_on_hardfilter": AgentConfig(
             use_router=True,
             buying_rerank=RerankConfig(hard_filter=True),
+        ),
+        # LLM listwise rerank fusion (change 15, src/llm.py, DeepSeek). llm_off is
+        # the shipped default (llm disabled, llm_weight=0.0) restated as its own
+        # row so it lines up next to llm_rerank in one sweep. llm_rerank turns the
+        # DeepSeek call on and blends its per-candidate rank score into S6 at
+        # llm_weight=0.3 - real network calls, so this row is slow and costs
+        # tokens; run it deliberately, not as part of every sweep.
+        "llm_off": AgentConfig(llm=LLMConfig(enabled=False)),
+        "llm_rerank": AgentConfig(
+            rerank=RerankConfig(llm_weight=0.3),
+            llm=LLMConfig(enabled=True, provider="deepseek"),
         ),
     }
 

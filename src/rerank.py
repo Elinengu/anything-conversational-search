@@ -112,6 +112,8 @@ class RerankConfig:
     # concentrated in the homogeneous-cluster bucket (MRR 0.431->0.478) where
     # fragments saturate. 0.4-1.5 score identically; mid-plateau. 0.0 disables.
     pair_weight: float = 0.8
+    #: Optional LLM semantic reranking weight (Pillar I: Multi-Route -> LLM Semantic Ranking)
+    llm_weight: float = 0.0
 
     # Dual-track routing (opt-in, off unless AgentConfig.use_router routes a
     # "buying" track and hands rerank() a track-specific config with this set).
@@ -282,6 +284,7 @@ def rerank(
     candidates: list[tuple[str, float]],
     config: RerankConfig | None = None,
     track: str | None = None,
+    llm_scores: dict[str, float] | None = None,
 ) -> list[tuple[str, float]]:
     config = config or RerankConfig()
     if not config.enabled or not candidates:
@@ -347,6 +350,8 @@ def rerank(
             # wrong. Rank them all normally rather than banish the whole pool.
             banished = []
 
+    llm_map = llm_scores or {}
+
     scored: list[tuple[str, float]] = []
     for parent_asin, retrieval_score in head:
         product = index.products.get(parent_asin)
@@ -392,6 +397,7 @@ def rerank(
             + config.facet_weight * facet_score
             + config.category_weight * category_score
             + config.tail_weight * tail_score
+            + config.llm_weight * llm_map.get(parent_asin, 0.0)
             - config.facet_conflict_weight * conflict_score
         )
         scored.append((parent_asin, total))

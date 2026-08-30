@@ -330,6 +330,28 @@ class RerankTests(unittest.TestCase):
 
 
 class RouterTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # On an ambiguous opening, src/router.py's classify() can break the tie
+        # with a real DeepSeek call (_llm_route_hint) whenever DEEPSEEK_API_KEY
+        # is set in the environment - independent of any AgentConfig. Force it
+        # offline so these deterministic-classifier assertions don't depend on
+        # a developer's .env or a live model's answer.
+        import src.router as router
+
+        class _UnconfiguredClient:
+            is_configured = False
+
+            def generate_json(self, *args, **kwargs):
+                return None
+
+        self._real_get_llm_client = router.get_llm_client
+        router.get_llm_client = lambda: _UnconfiguredClient()
+
+    def tearDown(self) -> None:
+        import src.router as router
+
+        router.get_llm_client = self._real_get_llm_client
+
     def test_cue_based_classification(self) -> None:
         self.assertEqual(classify("I'm looking for boots. A key requirement is: leather.").name, "buying")
         self.assertEqual(classify("I'm looking for boots, but I'm still exploring.").name, "browsing")
@@ -533,6 +555,29 @@ class _SplitFacets:
 
 class PhrasingTests(unittest.TestCase):
     """src/phrasing.py - the English is realism only; ask_attribute is untouched."""
+
+    def setUp(self) -> None:
+        # These tests assert exact, deterministic wording. src/phrasing.py's
+        # optional DeepSeek polish pass (_llm_polish) fires whenever
+        # DEEPSEEK_API_KEY is set in the environment - independent of any
+        # AgentConfig - so a real key in a developer's .env would otherwise
+        # make these assertions flaky. Force the polish client offline for the
+        # duration of this test class regardless of ambient environment.
+        import src.phrasing as phrasing
+
+        class _UnconfiguredClient:
+            is_configured = False
+
+            def generate(self, *args, **kwargs):
+                return None
+
+        self._real_get_llm_client = phrasing.get_llm_client
+        phrasing.get_llm_client = lambda: _UnconfiguredClient()
+
+    def tearDown(self) -> None:
+        import src.phrasing as phrasing
+
+        phrasing.get_llm_client = self._real_get_llm_client
 
     def _state(self, turn: int, productive: int = 2) -> DialogState:
         state = DialogState("s")
