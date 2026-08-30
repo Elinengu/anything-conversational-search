@@ -143,6 +143,16 @@ def build_configs(catalog: str) -> dict[str, AgentConfig]:
             semantic=SemanticConfig(enabled=True, tied_leaders=25, facet_cluster=16)
         ),
         "semantic_d20": AgentConfig(semantic=SemanticConfig(enabled=True, depth=20)),
+        # Rerank weight mixture: the near-miss anatomy (rerank_signals.md) shows
+        # every remaining public rank loss sits in a tie-break regime where the
+        # retrieval score picks the impostor 33/33 (BM25 length normalization
+        # favours thin listings) while popularity picks the target 31/33 yet is
+        # weighted 0.02 against 1.0. These rows bracket the popularity weight;
+        # tools/fit_weights.py searches the full mixture.
+        "pop002": AgentConfig(rerank=RerankConfig(popularity_weight=0.02)),
+        "pop010": AgentConfig(rerank=RerankConfig(popularity_weight=0.10)),
+        "pop030": AgentConfig(rerank=RerankConfig(popularity_weight=0.30)),
+        "pop050": AgentConfig(rerank=RerankConfig(popularity_weight=0.50)),
     }
 
 

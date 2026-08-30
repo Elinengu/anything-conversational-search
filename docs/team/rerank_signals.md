@@ -23,7 +23,10 @@ the `focused_text()` guard is right, but not for the reason first recorded.
 §9 is the one signal that was fully built and still not switched on: a neural
 cross-encoder, which loses on every split and every setting, and whose optimum
 weight is zero. It also establishes the oracle ceiling — +0.043 public, +0.084
-hard — that bounds every future reranking idea in this document.
+hard — that bounds every future reranking idea in this document. §10 dissects
+where that ceiling actually lives (a pure tie-break regime in which the
+retrieval score picks the impostor 33/33 and popularity picks the target
+31/33) and carries the weight re-fit that follows from it.
 The negative results are documented with the same care as the positive ones —
 knowing *why* a plausible signal does not work is what stops it being rebuilt
 later.
@@ -617,7 +620,91 @@ spans no span is unique. Removed rather than kept as an inert flag.
 
 ---
 
-## 10. Housekeeping shipped alongside
+---
+
+## 10. The tie-break regime: near-miss anatomy and the weight re-fit
+
+### The measurement that frames everything else
+
+After change 11 fixed the ceiling (+0.043 public / +0.084 hard, §9), the next
+question was *where the remaining headroom lives*. Answer: dissect every
+near-miss session — target at rank 2-10 at a slate turn — comparing the target
+against the impostor holding rank 1, feature by feature.
+
+Public set, 33 near-miss sessions (hard set, 15, directionally similar):
+
+| feature | target mean | impostor mean | tgt>imp | tgt<imp |
+|---|---|---|---|---|
+| span coverage | 3.027 | 3.027 | 0 | 0 |
+| pair coverage | 0.424 | 0.424 | 0 | 0 |
+| category / tail / conflict | tied | tied | 0 | 0-1 |
+| **retrieval score (norm.)** | 0.759 | **0.922** | **0** | **33** |
+| **popularity** | **0.752** | 0.363 | **31** | 2 |
+| text length (tokens) | 195 | 126 | 25 | 8 |
+| match density | 0.050 | 0.088 | 6 | 27 |
+
+Three facts:
+
+1. **Every lexical signal is exactly tied, 33/33.** The regime holding all
+   remaining public headroom is a pure tie-break regime; no new lexical
+   evidence separates these candidates.
+2. **The tie is broken by the retrieval score, and it points at the impostor
+   33/33.** Mechanism: BM25 length normalization. The impostor is a thin
+   listing (126 vs 195 tokens) where the same matched words are a larger
+   share of the document (density 0.088 vs 0.050), so BM25 rates identical
+   evidence higher.
+3. **Popularity points at the target 31/33** — the target is a real purchase,
+   so it tends to be a reviewed, documented product — but at weight 0.02
+   against retrieval's 1.0 it is drowned 50:1. A signal right 94% of the time
+   in this regime loses to one wrong 100% of the time.
+
+The same table kills three plausible new signals *before implementation*:
+title boost (`title_hits` favours the impostor 11:6 — thin listings are mostly
+title), match density (impostor 27:33), and span contiguity (exactly tied).
+Recorded here so nobody builds them.
+
+### Step 1 — bracketing the two implicated weights (read-only, shipped as sweep rows)
+
+| variant | dev (120) | holdout (80) | public (200) | hard (96) / hit |
+|---|---|---|---|---|
+| base r1.0 p0.02 | 0.9268 | 0.9096 | 0.9199 | 0.7981 / .885 |
+| p0.10 | 0.9331 | 0.9122 | 0.9248 | 0.7985 / .885 |
+| p0.30 | 0.9422 | 0.9095 | 0.9291 | **0.8047 / .896** |
+| p0.50 | **0.9441** | 0.9131 | **0.9317** | 0.8016 / .896 |
+| r0.50 p0.02 | 0.9282 | 0.9072 | 0.9198 | 0.7987 / .885 |
+| r0.70 p0.30 | 0.9430 | **0.9147** | 0.9317 | 0.7990 / .896 |
+
+Raising `popularity_weight` alone is a plateau from 0.30 to 0.50: public
++0.012, holdout never regresses beyond noise, hard up, and **hard hit
+0.885 → 0.896 — a converted miss**, not a reshuffle. Public hit stays 200/200
+throughout. One weight captures ~27% of the oracle ceiling. Muting
+`retrieval_weight` alone does little: the fix is amplifying the signal that is
+right in this regime, not merely quieting the wrong one.
+
+`tools/sweep.py` rows: `pop002 / pop010 / pop030 / pop050`.
+
+### Step 2 — direct-metric fit of the whole mixture (`tools/fit_weights.py`)
+
+The reranker is a linear feature-based model in the Metzler & Croft sense
+(Information Retrieval 10:257-274, 2007), and their estimator — coordinate
+ascent directly on the IR metric — fits it without gradients, which matters
+because the technical score is non-smooth. The repo proposed learned weights
+in four places (IMPLEMENTATION.md §S6 ideas, ideas.md idea 4, hard_cases.md
+item 6); this is that idea, now with a mechanism-level reason the hand weights
+are wrong.
+
+Protocol, per the house rules above: fit on **dev only**; `span_weight` stays
+1.0 as the definitional unit; holdout is run once, on the final vector, as a
+gate; what ships is a rounded, plateau-checked point, never the dev argmax.
+Each candidate vector costs a full dev evaluation (~11-26 s) because the
+session transcript is weight-dependent — the session ends at the first hit and
+the confidence gate reads scores — so cached feature vectors cannot shortcut
+the objective.
+
+**Fit outcome and gate results: pending — the fit is running; this section is
+completed by the change that ships (or rejects) the new defaults.**
+
+## 11. Housekeeping shipped alongside
 
 * Deleted the dead commented-out block in `_facet_agreement` (the pre-lowercase
   `extract()` call kept as a `'''…'''` string).
@@ -629,7 +716,7 @@ spans no span is unique. Removed rather than kept as an inert flag.
   (still showed span + bm25 + popularity over depth 200); now matches
   `RerankConfig`.
 
-## 11. Reproduction
+## 12. Reproduction
 
 ```bash
 python3 -m unittest discover -s tests            # 57 tests
@@ -641,6 +728,9 @@ python3 tools/sweep.py --split dev \
 pip install -r requirements.txt && python3 tools/fetch_model.py
 python3 tools/sweep.py --split dev \
     --configs semantic_off,semantic_on              # §9, needs the model
+python3 tools/sweep.py --split dev \
+    --configs pop002,pop010,pop030,pop050           # §10 step-1 bracket
+python3 tools/fit_weights.py                        # §10 step-2 fit (dev only)
 python3 tools/observe.py --only public_0020      # the motivating session, now rank 1
 ```
 
