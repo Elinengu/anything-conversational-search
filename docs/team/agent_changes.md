@@ -24,9 +24,10 @@ public labels and API contract were **not** touched.
 | + narrow first slate `(4,10)` | Elinengu | **0.9199** | **0.7981** | change 10; one config default. Started as a conditional-MMR assessment — MMR measured and rejected, the deferral it stumbled on kept |
 | + semantic reranking (S6b) | Elinengu | 0.9199 | 0.7981 | change 11; built, measured, **removed** (code on branch `semantic-rerank`) — cross-encoder loses on every split; oracle reranking ceiling established at +0.043 / +0.084 |
 | + popularity weight 0.02 → 0.4 | Elinengu | **0.9305** | **0.8020** | change 12; the tie-break regime fix — every split up, a hard-set miss converted; coordinate-ascent argmax measured and *not* shipped |
+| + pool-aware clarification wording | KW | 0.9305 | 0.8020 | change 13; **score-neutral by construction** — `ask_attribute` unchanged, simulator never reads `message`. Realism for Pillar II / Presentation |
 
-Net: **public 0.859 -> 0.9305, adversarial 0.684 -> 0.8020.** 70/70 tests pass.
-The twelve core-agent changes are detailed below; supporting tooling and docs follow.
+Net: **public 0.859 -> 0.9305, adversarial 0.684 -> 0.8020.** 69/69 tests pass.
+The thirteen core-agent changes are detailed below; supporting tooling and docs follow.
 Change 9 moved the score by exactly zero and is recorded in full anyway — a
 measured no-change is the evidence that keeps the shipped design chosen rather
 than assumed. Change 10 is the same lesson from the other side: the proposal that
@@ -757,6 +758,78 @@ measured. New tests pin all eight shipped weights and demonstrate the
 tie-break flip. This implements the "learn the rerank weights" idea the repo
 carried in four places, with the twist that the honest deliverable was
 knowing *when not to trust the fit*.
+
+
+## Change 13 — Pool-aware clarification wording (Kwong Weng)
+
+**Files:** `src/phrasing.py` (new), `src/facets.py` (shared helper),
+`src/policy.py` (call the helper), `starter/agent.py` (`AgentConfig` +
+`_respond`), `tools/sweep.py`, `tests/test_components.py`
+
+### Problem
+
+`FixedPolicy` sets `ask_attribute="other"` every turn — the score-optimal choice
+(`other` returns two constraints of any type and never whiffs; a specific
+attribute can return zero and then retires itself). But `policy.question()` is a
+fixed table, so the customer hears "Is there anything else that matters for this
+one?" on turns 1, 2, 3, 4 … Pillar II asks for "structured, proactive
+clarification prompts that guide user convergence"; a demo of the same sentence
+five times is the opposite.
+
+Two subagents (`explore_profile_policy`, `explore_profile_prefilter`) confirmed
+`ask_attribute` cannot productively change on this evaluator — so the fix is the
+English only.
+
+### What changed
+
+`src/phrasing.py:clarify()` builds the `message`. `ask_attribute` is untouched.
+Once the customer has disclosed something and recommendations have started, it
+takes the live reranked pool and picks the facet among
+`material / colour / style / size / use_case` (not asked, not declined) that the
+pool is most evenly split on — the same `gain_ratio` `InfoGainPolicy` uses — and
+names its top 2-3 values in one of three rotated templates:
+
+```
+"For the material, I'm seeing leather and canvas - do you have a preference?"
+"For how you'll use it, the pool is split across work, everyday and party. Does one matter more to you?"
+```
+
+No facet qualifies, or no evidence yet → a four-way rotation of the broad
+question so no sentence repeats. The whole body is wrapped so a phrasing bug
+degrades to the broad question, never an empty turn. `InfoGainPolicy._distributions`
+and the phrasing layer now share one helper, `facets.weighted_value_counts`.
+
+### Effect
+
+| | before | after |
+|---|---|---|
+| Public set | 0.930502 | 0.930502 |
+| Adversarial set | 0.801978 | 0.801978 |
+| dev / holdout | 0.9418 / 0.9136 | 0.9418 / 0.9136 |
+| Tests | 64/64 | 69/69 |
+
+**Exactly zero, by construction** — measured in one process (`tools/sweep.py`
+rows `natural_off` / `natural_on`), per-scenario components identical. The
+simulator never reads `message`. The change buys demo / Presentation / Innovation
+realism, and the shared helper removes a duplicated loop. Default on;
+`AgentConfig(natural_questions=False)` restores the fixed strings byte-for-byte.
+Implements the "Question phrasing from the candidates" idea listed under S4.
+
+### Example (real runs, `natural_questions` on)
+
+```
+public_0007 [browsing]
+  T1 "...still exploring."            -> "To point you in the right direction: anything else you'd want me to factor in?"
+  T2 "...polyester; 75% Polyester..." -> "...what else is important for this?"
+  T3 "...Imported; Pull On closure."  -> "...on colour, I'm seeing white, green and black - do you have a preference?"  -> HIT
+
+public_0169 [boundary]
+  T3 "...Imported; Pull On closure."  -> "...for how you'll use it, I'm seeing work, party and everyday - do you have a preference?"
+  T4 "...no additional preference..." -> "...for sizing, the pool is split across small, wide and plus size. Does one matter more to you?"  -> HIT
+```
+
+Before, every one of those turns was "Is there anything else that matters for
+this one?".
 
 
 ## Supporting work (Kwong Weng)

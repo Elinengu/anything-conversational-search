@@ -146,6 +146,11 @@ def build_configs(catalog: str) -> dict[str, AgentConfig]:
         "weights_argmax": AgentConfig(rerank=RerankConfig(
             popularity_weight=0.8, retrieval_weight=0.1, facet_weight=0.5,
             tail_weight=1.2, facet_conflict_weight=0.0)),
+        # Pool-aware clarification wording (src/phrasing.py). ask_attribute is
+        # unchanged and the simulator never reads `message`, so these two must
+        # score bit-for-bit identically - the row exists to prove that.
+        "natural_off": AgentConfig(natural_questions=False),
+        "natural_on": AgentConfig(natural_questions=True),
     }
 
 

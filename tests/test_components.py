@@ -409,5 +409,85 @@ class _StubIndex:
         self.products = products
 
 
+class _SplitFacets:
+    """Half the pool leather, half canvas - a clean material split, nothing else."""
+
+    def get(self, parent_asin: str) -> dict[str, str]:
+        return {"material": "leather" if int(parent_asin) % 2 else "canvas"}
+
+
+class PhrasingTests(unittest.TestCase):
+    """src/phrasing.py - the English is realism only; ask_attribute is untouched."""
+
+    def _state(self, turn: int, productive: int = 2) -> DialogState:
+        state = DialogState("s")
+        state.observe(1, "I'm looking for a belt")
+        for t in range(2, turn + 1):
+            state.observe(t, "For that, what matters is: full grain leather; buckle closure.")
+        state.productive_turns = productive
+        return state
+
+    def test_off_reproduces_the_fixed_question_byte_for_byte(self) -> None:
+        from src.phrasing import clarify
+        from src.policy import QUESTION_TEXT
+        from src.router import BUYING
+
+        cfg = AgentConfig(natural_questions=False)
+        state = self._state(3)
+        got = clarify("other", state, [], _SplitFacets(), BUYING, cfg)
+        expect = BUYING.tone + QUESTION_TEXT["other"][0].lower() + QUESTION_TEXT["other"][1:]
+        self.assertEqual(got, expect)
+        # route None -> no tone prefix, exactly the old behaviour
+        self.assertEqual(
+            clarify("size", state, [], _SplitFacets(), None, cfg), QUESTION_TEXT["size"]
+        )
+
+    def test_grounded_question_names_the_pool_split(self) -> None:
+        from src.phrasing import clarify
+
+        cfg = AgentConfig(natural_questions=True)
+        state = self._state(3)
+        pool = [(str(i), 1.0) for i in range(40)]
+        msg = clarify("other", state, pool, _SplitFacets(), None, cfg)
+        self.assertIsInstance(msg, str)
+        self.assertIn("leather", msg)
+        self.assertIn("canvas", msg)
+
+    def test_never_raises_on_degenerate_input(self) -> None:
+        from src.phrasing import clarify
+
+        cfg = AgentConfig(natural_questions=True)
+        cases = [
+            (DialogState("s"), []),
+            (self._state(3), []),
+            (self._state(1, productive=0), [("0", 1.0)]),
+        ]
+        for state, pool in cases:
+            msg = clarify("other", state, pool, _SplitFacets(), None, cfg)
+            self.assertIsInstance(msg, str)
+            self.assertTrue(msg)
+
+    def test_broad_before_any_evidence(self) -> None:
+        from src.phrasing import BROAD_BANK, clarify
+
+        cfg = AgentConfig(natural_questions=True)
+        state = DialogState("s")
+        state.observe(1, "I'm looking for a belt")  # productive_turns stays 0
+        pool = [(str(i), 1.0) for i in range(40)]
+        self.assertIn(clarify("other", state, pool, _SplitFacets(), None, cfg), BROAD_BANK)
+
+    def test_broad_fallback_varies_across_turns(self) -> None:
+        from src.phrasing import clarify
+
+        cfg = AgentConfig(natural_questions=True)
+        seen = set()
+        for turn in range(1, 5):
+            state = DialogState("s")
+            for t in range(1, turn + 1):
+                state.observe(t, "hi")  # never productive -> always the broad path
+            seen.add(clarify("other", state, [], _SplitFacets(), None, cfg))
+        self.assertGreaterEqual(len(seen), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

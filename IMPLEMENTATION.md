@@ -712,6 +712,57 @@ selectable:
 Agent(catalog, AgentConfig(policy=InfoGainPolicy(agent.facets)))
 ```
 
+#### Phrasing — pool-aware clarification wording (`src/phrasing.py`)
+
+Separate from *what to ask* is *how to say it*. `FixedPolicy` keeps
+`ask_attribute="other"` because that is the score-optimal extraction (§3
+consequence: the simulator returns two constraints of any type for `other` and
+can return zero for a specific attribute, which also retires that attribute), and
+the simulator never reads the English `message` field at all. So the sentence is
+free to be a real, guiding question while the machine-readable field stays put.
+
+`clarify()` (`src/phrasing.py`) builds the message. Once the customer has
+disclosed something and recommendations have started, it looks at the live
+reranked pool and, for each of `material / colour / style / size / use_case` that
+has not been asked or declined, measures how evenly the pool is split on it —
+the same `gain_ratio` (entropy ÷ maximum entropy) the `InfoGainPolicy` uses. If
+one facet is genuinely split (at least 35% of the pool resolves it, the top
+value holds no more than 85% of the mass, two or more values are present), it
+names the top two or three values in a rotated template:
+
+> "For the material, I'm seeing leather and canvas — do you have a preference?"
+
+Otherwise, and before any evidence, it falls back to a four-way rotation of the
+broad question so a session never repeats a sentence verbatim. The whole path is
+wrapped so a phrasing bug degrades to the broad question, never to an empty
+turn. `brand` and `budget` and `category` are excluded from the voiced facets —
+brand has thousands of values, budget is null for 79% of the catalog, and the
+`category` facet's values are path fragments ("women", "novelty").
+
+This lives in S4 rather than S9 because it is the customer-facing half of the
+clarification decision, and it belongs *beside* `InfoGainPolicy` — it reuses the
+same pool-split measure, just to choose what to voice rather than what to ask.
+
+It is deterministic and template-based on purpose: the facet vocabularies are
+small (§S1) so the space is enumerable, exactly like the rest of the pipeline.
+An LLM could later replace the grounded-question builder for fluency with this as
+its fallback; `ask_attribute` and the score do not move either way.
+
+##### Measured effect
+
+**Exactly zero, by construction** — the simulator ignores `message`. Verified in
+one process (`tools/sweep.py` rows `natural_off` / `natural_on`):
+
+| | dev | holdout |
+|---|---|---|
+| `natural_questions=False` | 0.9418 | 0.9136 |
+| `natural_questions=True` | 0.9418 | 0.9136 |
+
+Per-scenario components are identical too. The change buys demo / Presentation /
+Innovation realism (Pillar II's "structured, proactive clarification prompts"),
+not score. Default on; `AgentConfig(natural_questions=False)` restores the fixed
+strings byte-for-byte.
+
 #### Ideas for this stage
 
 - **Model expected *yield*, not just split quality.** This is the identified fix for
@@ -726,9 +777,11 @@ Agent(catalog, AgentConfig(policy=InfoGainPolicy(agent.facets)))
   questions that separate the leaders rather than the field.
 - **Two-step lookahead.** The policy is greedy, picking the best single question. Some pairs of
   questions are worth more together than either is alone.
-- **Question phrasing from the candidates.** `QUESTION_TEXT` is a fixed table. Generating "are you
-  after leather or canvas?" from the actual values present in the shortlist would be more natural
-  and more informative — and needs no model, just the facet distribution already computed.
+- **Question phrasing from the candidates.** *Done — `src/phrasing.py`, see "Phrasing" above.*
+  The `message` now names the facet the live pool is most split on and its top values
+  ("For the material, I'm seeing leather and canvas — do you have a preference?"), rotated so
+  it does not repeat, while `ask_attribute` stays `other`. Deterministic, no model, score
+  unchanged by construction. An LLM polish layer would slot in as `_grounded`'s replacement.
 
 ---
 

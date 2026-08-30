@@ -32,6 +32,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from src.index import load_index  # noqa: E402
 from src.facets import FacetStore  # noqa: E402
+from src.phrasing import clarify  # noqa: E402
 from src.policy import ALLOWED_ATTRIBUTES, FixedPolicy  # noqa: E402
 from src.rerank import RerankConfig, rerank  # noqa: E402
 from src.retrieval import RetrievalConfig, retrieve  # noqa: E402
@@ -92,6 +93,21 @@ class AgentConfig:
     # new real constraint). Off by default; the scan already tolerates early,
     # under-informed lists because a wrong list only costs a turn.
     hold_until_stalled: bool = False
+    # Pool-aware clarification wording (src/phrasing.py). ``ask_attribute`` is
+    # unchanged and the simulator never reads ``message``, so the score is
+    # identical on vs off - measured, one process:
+    #   natural_off  dev 0.9418  holdout 0.9136   (per-scenario identical)
+    #   natural_on   dev 0.9418  holdout 0.9136
+    # (tools/sweep.py rows ``natural_off`` / ``natural_on``). The value is
+    # product realism for the demo / Innovation / Presentation criteria: instead
+    # of repeating "Is there anything else that matters for this one?", the agent
+    # names a facet the live pool is split on ("For the material, I'm seeing
+    # leather and canvas - do you have a preference?"), while still asking
+    # ``other`` so the extraction stays score-optimal. ``False`` restores the
+    # fixed question strings exactly.
+    natural_questions: bool = True
+    #: Candidates inspected when choosing which facet to voice (see phrasing).
+    phrasing_depth: int = 40
 
 
 class Agent:
@@ -157,10 +173,10 @@ class Agent:
         state.record_ask(attribute)
 
         recommendations = self._shortlist(state, candidates, turn, top_k)
-        question = self.config.policy.question(attribute)
-        if route is not None:
-            question = route.tone + question[0].lower() + question[1:]
-        return self._envelope(question, attribute, recommendations)
+        # ``ask_attribute`` (above) is what the simulator reads and is unchanged;
+        # ``clarify`` only builds the English ``message`` - see src/phrasing.py.
+        message = clarify(attribute, state, candidates, self.facets, route, self.config)
+        return self._envelope(message, attribute, recommendations)
 
     def _shortlist(
         self,

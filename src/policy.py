@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import math
 
-from src.facets import TAG_HINTS
+from src.facets import TAG_HINTS, weighted_value_counts
 from src.state import DialogState
 
 
@@ -159,18 +159,7 @@ class InfoGainPolicy:
 
     def _distributions(self, candidates: list[tuple[str, float]]) -> tuple[dict[str, dict[str, float]], float]:
         """Score-weighted value counts per attribute over the candidate pool."""
-        counts: dict[str, dict[str, float]] = {name: {} for name in self.PARTITIONABLE}
-        total = 0.0
-        for parent_asin, score in candidates[: self.depth]:
-            weight = max(score, 0.0) or 1e-6
-            total += weight
-            values = self.facets.get(parent_asin)
-            for attribute in self.PARTITIONABLE:
-                value = values.get(attribute)
-                if value is not None:
-                    bucket = counts[attribute]
-                    bucket[value] = bucket.get(value, 0.0) + weight
-        return counts, total
+        return weighted_value_counts(candidates, self.facets, self.depth, self.PARTITIONABLE)
 
     @staticmethod
     def _gain_ratio(distribution: dict[str, float]) -> float:

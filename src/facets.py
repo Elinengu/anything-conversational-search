@@ -162,3 +162,39 @@ class FacetStore:
             values = extract(product) if product else {}
             self._cache[parent_asin] = values
         return values
+
+
+#: Attributes with a bounded value vocabulary the candidate pool can be
+#: partitioned along - mirrors ``InfoGainPolicy.PARTITIONABLE``.
+PARTITIONABLE_ATTRIBUTES = (
+    "category", "material", "color", "style", "size", "brand", "budget", "use_case",
+)
+
+
+def weighted_value_counts(
+    pairs: list[tuple[str, float]],
+    store: FacetStore,
+    depth: int,
+    attributes: tuple[str, ...] = PARTITIONABLE_ATTRIBUTES,
+) -> tuple[dict[str, dict[str, float]], float]:
+    """Score-weighted value mass per attribute over the top ``depth`` candidates.
+
+    ``pairs`` is ``[(parent_asin, score), ...]`` best first. Returns
+    ``(counts, total)``: ``counts[attr][value]`` is the summed positive score of
+    pool members carrying that value, ``total`` the summed positive score of
+    every counted candidate - so ``sum(counts[attr].values()) / total`` is the
+    share of the pool for which ``attr`` resolves. Shared by
+    ``InfoGainPolicy._distributions`` (S4) and the clarification phrasing (S4b).
+    """
+    counts: dict[str, dict[str, float]] = {name: {} for name in attributes}
+    total = 0.0
+    for parent_asin, score in pairs[:depth]:
+        weight = max(score, 0.0) or 1e-6
+        total += weight
+        values = store.get(parent_asin)
+        for attribute in attributes:
+            value = values.get(attribute)
+            if value is not None:
+                bucket = counts[attribute]
+                bucket[value] = bucket.get(value, 0.0) + weight
+    return counts, total
