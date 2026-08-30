@@ -114,6 +114,18 @@ class RerankConfig:
     pair_weight: float = 0.8
     #: Optional LLM semantic reranking weight (Pillar I: Multi-Route -> LLM Semantic Ranking)
     llm_weight: float = 0.0
+    # Trigger-gate: starter/agent.py only spends the real LLM call when the
+    # *deterministic* rerank hasn't already separated #1 from #2 by at least
+    # this margin. Diagnosed in docs/team/agent_changes.md change 18: calling
+    # the LLM on every turn regardless of confidence nudges an already-correct
+    # #1 down more often than it rescues a genuine miss (5 regressions vs 2
+    # improvements on the same 15-session sample) - the value is concentrated
+    # in exactly the cases the deterministic signal is weak on, matching
+    # future_steps.md's own prediction ("the one regime where it measurably
+    # helps"). 0.20 mirrors AgentConfig.confidence_margin, the same "is the
+    # leader clear enough to trust" test already used for recommendation
+    # timing. 1.0 (or higher) reproduces the old always-call behaviour.
+    llm_trigger_margin: float = 0.20
 
     # Dual-track routing (opt-in, off unless AgentConfig.use_router routes a
     # "buying" track and hands rerank() a track-specific config with this set).

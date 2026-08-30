@@ -256,8 +256,15 @@ class Agent:
         llm_scores = {}
         llm_rerank_usage = {"prompt_tokens": 0, "completion_tokens": 0}
         if rerank_config.llm_weight > 0.0 and self.llm.is_available() and candidates:
-            cand_objs = [self.index.products.get(asin, {}) for asin, _ in candidates[:15]]
-            llm_scores, llm_rerank_usage = self.llm.rerank_candidates(state.full_text(), cand_objs)
+            # Trigger-gated (change 18): a real DeepSeek call is only worth its
+            # latency/cost/regression-risk when the deterministic signals
+            # haven't already separated #1 confidently - see
+            # RerankConfig.llm_trigger_margin. Rerank is pure Python, so this
+            # deterministic-only pass is cheap; only the network call is gated.
+            deterministic = rerank(self.index, state, candidates, rerank_config, track=track)
+            if self._rerank_uncertain(deterministic, rerank_config):
+                cand_objs = [self.index.products.get(asin, {}) for asin, _ in candidates[:15]]
+                llm_scores, llm_rerank_usage = self.llm.rerank_candidates(state.full_text(), cand_objs)
 
         candidates = rerank(
             self.index, state, candidates, rerank_config, track=track, llm_scores=llm_scores
@@ -416,6 +423,23 @@ class Agent:
         if best <= 0.0:
             return False
         return (best - runner_up) / best >= margin
+
+    @staticmethod
+    def _rerank_uncertain(ranked: list[tuple[str, float]], config: RerankConfig) -> bool:
+        """True when the deterministic rerank hasn't separated #1 confidently.
+
+        Gates the LLM listwise-rerank call (change 18): consulting DeepSeek
+        when the deterministic signals already agree on the leader only risks
+        perturbing a correct answer, and the diagnosed win is concentrated in
+        exactly the opposite case - a close or tied top of the pool. Same
+        margin test as ``_confident``, inverted.
+        """
+        if len(ranked) < 2:
+            return True
+        best, runner_up = ranked[0][1], ranked[1][1]
+        if best <= 0.0:
+            return True
+        return (best - runner_up) / best < config.llm_trigger_margin
 
     @staticmethod
     def _real_disclosure_count(state: DialogState) -> int:
