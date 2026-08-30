@@ -115,6 +115,15 @@ class TestContextProgramming(unittest.TestCase):
         self.assertEqual(plan_override.retrieval_route, "focused")
         self.assertEqual(plan_override.guidance_action, "override_reversal_recovery")
 
+        # Recovery lasts for the reversal turn only. New evidence after the
+        # rewrite returns the session to an ordinary narrowing/converging phase.
+        state_buy.observe(4, "black waterproof upper")
+        ctx_after = ContextDistiller.distill(state_buy, user, intent_track="buying")
+        plan_after = AdaptiveOrchestrator.align_strategy(
+            ctx_after, user, [("asin_1", 10.0), ("asin_2", 9.8)], config
+        )
+        self.assertEqual(plan_after.phase, DialogPhase.NARROWING)
+
     def test_agent_integration_e2e(self):
         agent = Agent("data/catalog.jsonl")
         user_meta = {"user_id": "cust_999", "preference_tags": ["leather"]}

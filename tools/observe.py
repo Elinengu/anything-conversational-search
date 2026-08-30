@@ -87,7 +87,11 @@ def install_probes():
     import starter.agent as agent_module
 
     original = {
-        name: getattr(agent_module, name) for name in ("classify", "retrieve", "rerank")
+        name: getattr(agent_module, name)
+        for name in (
+            "classify", "detect_turn_intent", "retrieve", "rerank",
+            "AdaptiveOrchestrator",
+        )
     }
 
     def classify_probe(opening):
@@ -95,11 +99,17 @@ def install_probes():
         _PROBE["route"] = route
         return route
 
-    def retrieve_probe(index, state, config=None):
+    def detect_probe(*args, **kwargs):
+        route = original["detect_turn_intent"](*args, **kwargs)
+        _PROBE["route"] = route
+        return route
+
+    def retrieve_probe(index, state, config=None, route_hint=None):
         started = time.perf_counter()
-        pool = original["retrieve"](index, state, config)
+        pool = original["retrieve"](index, state, config, route_hint=route_hint)
         _PROBE["retrieve_ms"] = (time.perf_counter() - started) * 1000.0
         _PROBE["pool"] = pool
+        _PROBE["retrieval_route"] = route_hint or "terms"
         return pool
 
     def rerank_probe(index, state, candidates, config=None):
@@ -109,9 +119,22 @@ def install_probes():
         _PROBE["ranked"] = ranked
         return ranked
 
+    class OrchestratorProbe:
+        @staticmethod
+        def align_strategy(*args, **kwargs):
+            plan = original["AdaptiveOrchestrator"].align_strategy(*args, **kwargs)
+            _PROBE["plan"] = plan
+            return plan
+
+        @staticmethod
+        def compute_pool_entropy(*args, **kwargs):
+            return original["AdaptiveOrchestrator"].compute_pool_entropy(*args, **kwargs)
+
     agent_module.classify = classify_probe
+    agent_module.detect_turn_intent = detect_probe
     agent_module.retrieve = retrieve_probe
     agent_module.rerank = rerank_probe
+    agent_module.AdaptiveOrchestrator = OrchestratorProbe
 
     def undo() -> None:
         for name, function in original.items():
@@ -228,6 +251,7 @@ class TracingAgent:
         pool = _PROBE.get("pool") or []
         ranked = _PROBE.get("ranked") or []
         route = _PROBE.get("route")
+        plan = _PROBE.get("plan")
 
         shown = [
             str(item.get("parent_asin"))
@@ -238,16 +262,7 @@ class TracingAgent:
         state = getattr(self.inner, "_states", {}).get(session_id)
         state_view = None
         if state is not None:
-            state_view = {
-                "turn_count": state.turn_count,
-                "override_turn": state.override_turn,
-                "asked": list(state.asked),
-                "dead_attributes": sorted(state.dead_attributes),
-                "productive_turns": state.productive_turns,
-                "last_turn_productive": state.last_turn_productive,
-                "spans": state.query_spans()[:12],
-                "focused_text": state.focused_text()[:400],
-            }
+            state_view = state.snapshot()
 
         record = {
             "turn": turn,
@@ -264,10 +279,18 @@ class TracingAgent:
                 "facets": {k: list(v) for k, v in (route.detected_facets or {}).items()},
             },
             "state": state_view,
+            "plan": None if plan is None else {
+                "phase": plan.phase.value,
+                "retrieval_route": plan.retrieval_route,
+                "recommendation_cutoff": plan.recommendation_cutoff,
+                "recommended_slate_size": plan.recommended_slate_size,
+                "guidance_action": plan.guidance_action,
+            },
             "retrieval": {
                 "pool_size": len(pool),
                 "target_pool_rank": _rank_of(target, pool),
                 "ms": round(_PROBE.get("retrieve_ms", 0.0), 2),
+                "route": _PROBE.get("retrieval_route", "terms"),
             },
             "rerank": {
                 "target_rank": _rank_of(target, ranked),
@@ -474,9 +497,31 @@ def render_session_markdown(record: dict) -> str:
         state = turn["state"]
         if state:
             lines.append(
-                f"**State** asked so far: {state['asked'] or '-'} | dead: {state['dead_attributes'] or '-'} | "
-                f"override turn: {state['override_turn']} | productive turns: {state['productive_turns']}"
+                f"**State** phase: `{state['phase']}` ({state['phase_reason']}) | "
+                f"intent: `{state['intent']['track']}` | asked: {state['asked'] or '-'} | "
+                f"dead: {state['dead_attributes'] or '-'}"
             )
+            lines.append("")
+            lines.append(
+                f"**Progress** productive turns: {state['productive_turns']} | "
+                f"unproductive streak: {state['unproductive_streak']} | "
+                f"pool entropy: {state['pool']['entropy']} | "
+                f"stable pool turns: {state['pool']['stable_turns']}"
+            )
+            if state["active_slots"]:
+                lines.append("")
+                lines.append(
+                    "**Active slots** `"
+                    + json.dumps(state["active_slots"], ensure_ascii=False)
+                    + "`"
+                )
+            if state["superseded_slots"]:
+                lines.append("")
+                lines.append(
+                    "**Superseded slots** `"
+                    + json.dumps(state["superseded_slots"], ensure_ascii=False)
+                    + "`"
+                )
             if state["spans"]:
                 lines.append("")
                 lines.append(
@@ -710,11 +755,19 @@ function renderDetail(id) {
       ${(t.in.revealed || []).map(v => `<div class="mono">+ revealed: ${esc(v)}</div>`).join("")}
       ${t.route ? `<p><span class="tag">route ${esc(t.route.name)} @ ${t.route.confidence}</span>
         <span class="tag">cues: ${esc((t.route.cues || []).join(", ") || "none")}</span></p>` : ""}
-      <p><span class="tag">asked ${esc((st.asked || []).join(", ") || "-")}</span>
+      <p><span class="tag">phase ${esc(st.phase || "-")}</span>
+         <span class="tag">intent ${esc((st.intent || {}).track || "-")}</span>
+         <span class="tag">streak ${st.unproductive_streak ?? 0}</span>
+         <span class="tag">asked ${esc((st.asked || []).join(", ") || "-")}</span>
          <span class="tag">dead ${esc((st.dead_attributes || []).join(", ") || "-")}</span>
          <span class="tag">override turn ${st.override_turn ?? "-"}</span></p>
+      <p>${esc(st.phase_reason || "")}</p>
+      ${st.active_slots && Object.keys(st.active_slots).length
+        ? `<p class="mono">active slots: ${esc(JSON.stringify(st.active_slots))}</p>` : ""}
+      ${(st.superseded_slots || []).length
+        ? `<p class="mono">superseded: ${esc(JSON.stringify(st.superseded_slots))}</p>` : ""}
       ${(st.spans || []).length ? `<p class="mono">spans: ${esc(st.spans.join(" | "))}</p>` : ""}
-      <p>pool ${t.retrieval.pool_size} &middot; target at pool rank
+      <p>pool ${t.retrieval.pool_size} via ${esc(t.retrieval.route || "terms")} &middot; target at pool rank
          <b>${t.retrieval.target_pool_rank ?? "not in pool"}</b> &rarr; after rerank
          <b>${rr.target_rank ?? "not in pool"}</b></p>
       <table><tr><th>#</th><th>asin</th><th>score</th><th>product</th></tr>

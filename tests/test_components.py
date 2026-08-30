@@ -417,7 +417,7 @@ class _SplitFacets:
 
 
 class PhrasingTests(unittest.TestCase):
-    """src/phrasing.py - the English is realism only; ask_attribute is untouched."""
+    """src/phrasing.py - natural text must agree with ``ask_attribute``."""
 
     def _state(self, turn: int, productive: int = 2) -> DialogState:
         state = DialogState("s")
@@ -452,6 +452,46 @@ class PhrasingTests(unittest.TestCase):
         self.assertIsInstance(msg, str)
         self.assertIn("leather", msg)
         self.assertIn("canvas", msg)
+        self.assertIn("another detail", msg.lower())
+
+    def test_specific_grounded_question_only_voices_that_attribute(self) -> None:
+        from src.phrasing import clarify
+
+        cfg = AgentConfig(natural_questions=True)
+        state = self._state(3)
+        state.record_ask("material")  # mirrors Agent._respond ordering
+        pool = [(str(i), 1.0) for i in range(40)]
+        msg = clarify("material", state, pool, _SplitFacets(), None, cfg)
+        self.assertIn("leather", msg)
+        self.assertIn("canvas", msg)
+        self.assertIn("material", msg)
+        self.assertNotIn("another detail", msg.lower())
+
+    def test_specific_attribute_does_not_voice_an_unrelated_pool_split(self) -> None:
+        from src.phrasing import SPECIFIC_BANK, clarify
+
+        cfg = AgentConfig(natural_questions=True)
+        state = self._state(3)
+        state.record_ask("size")
+        pool = [(str(i), 1.0) for i in range(40)]
+        msg = clarify("size", state, pool, _SplitFacets(), None, cfg)
+        self.assertIn(msg, SPECIFIC_BANK["size"])
+        self.assertNotIn("leather", msg)
+        self.assertNotIn("canvas", msg)
+
+    def test_phrasing_failure_preserves_the_requested_attribute(self) -> None:
+        from src.phrasing import SPECIFIC_BANK, clarify
+
+        class BrokenFacets:
+            def get(self, _parent_asin):
+                raise RuntimeError("broken facet store")
+
+        cfg = AgentConfig(natural_questions=True)
+        state = self._state(3)
+        state.record_ask("size")
+        pool = [(str(i), 1.0) for i in range(40)]
+        msg = clarify("size", state, pool, BrokenFacets(), None, cfg)
+        self.assertIn(msg, SPECIFIC_BANK["size"])
 
     def test_never_raises_on_degenerate_input(self) -> None:
         from src.phrasing import clarify
@@ -476,17 +516,16 @@ class PhrasingTests(unittest.TestCase):
         pool = [(str(i), 1.0) for i in range(40)]
         self.assertIn(clarify("other", state, pool, _SplitFacets(), None, cfg), BROAD_BANK)
 
-    def test_grounded_fires_without_a_productive_turn(self) -> None:
-        # Single-word disclosures ("leather") never form a multi-word constraint
-        # span, so productive_turns can sit at 0 for a session that is in fact
-        # narrowing. From turn 2 the grounded path should still voice the split.
+    def test_single_word_facet_is_now_a_productive_turn(self) -> None:
+        # The structured slot ledger recognizes useful single-word facets even
+        # when the legacy multi-word span extractor yields nothing.
         from src.phrasing import clarify
 
         cfg = AgentConfig(natural_questions=True)
         state = DialogState("s")
         state.observe(1, "I'm looking for a belt")
         state.observe(2, "leather")
-        self.assertEqual(state.productive_turns, 0)
+        self.assertEqual(state.productive_turns, 1)
         pool = [(str(i), 1.0) for i in range(40)]
         msg = clarify("other", state, pool, _SplitFacets(), None, cfg)
         self.assertIn("leather", msg)
