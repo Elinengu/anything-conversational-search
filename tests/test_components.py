@@ -467,14 +467,30 @@ class PhrasingTests(unittest.TestCase):
             self.assertIsInstance(msg, str)
             self.assertTrue(msg)
 
-    def test_broad_before_any_evidence(self) -> None:
+    def test_broad_on_the_opening_turn(self) -> None:
         from src.phrasing import BROAD_BANK, clarify
 
         cfg = AgentConfig(natural_questions=True)
         state = DialogState("s")
-        state.observe(1, "I'm looking for a belt")  # productive_turns stays 0
+        state.observe(1, "I'm looking for a belt")  # turn 1 -> pool is the catalog prior
         pool = [(str(i), 1.0) for i in range(40)]
         self.assertIn(clarify("other", state, pool, _SplitFacets(), None, cfg), BROAD_BANK)
+
+    def test_grounded_fires_without_a_productive_turn(self) -> None:
+        # Single-word disclosures ("leather") never form a multi-word constraint
+        # span, so productive_turns can sit at 0 for a session that is in fact
+        # narrowing. From turn 2 the grounded path should still voice the split.
+        from src.phrasing import clarify
+
+        cfg = AgentConfig(natural_questions=True)
+        state = DialogState("s")
+        state.observe(1, "I'm looking for a belt")
+        state.observe(2, "leather")
+        self.assertEqual(state.productive_turns, 0)
+        pool = [(str(i), 1.0) for i in range(40)]
+        msg = clarify("other", state, pool, _SplitFacets(), None, cfg)
+        self.assertIn("leather", msg)
+        self.assertIn("canvas", msg)
 
     def test_broad_fallback_varies_across_turns(self) -> None:
         from src.phrasing import clarify

@@ -26,7 +26,7 @@ public labels and API contract were **not** touched.
 | + popularity weight 0.02 → 0.4 | Elinengu | **0.9305** | **0.8020** | change 12; the tie-break regime fix — every split up, a hard-set miss converted; coordinate-ascent argmax measured and *not* shipped |
 | + pool-aware clarification wording | KW | 0.9305 | 0.8020 | change 13; **score-neutral by construction** — `ask_attribute` unchanged, simulator never reads `message`. Realism for Pillar II / Presentation |
 
-Net: **public 0.859 -> 0.9305, adversarial 0.684 -> 0.8020.** 69/69 tests pass.
+Net: **public 0.859 -> 0.9305, adversarial 0.684 -> 0.8020.** 70/70 tests pass.
 The thirteen core-agent changes are detailed below; supporting tooling and docs follow.
 Change 9 moved the score by exactly zero and is recorded in full anyway — a
 measured no-change is the evidence that keeps the shipped design chosen rather
@@ -794,10 +794,28 @@ names its top 2-3 values in one of three rotated templates:
 "For how you'll use it, the pool is split across work, everyday and party. Does one matter more to you?"
 ```
 
-No facet qualifies, or no evidence yet → a four-way rotation of the broad
+No facet qualifies, or turn 1 → a four-way rotation of the broad
 question so no sentence repeats. The whole body is wrapped so a phrasing bug
 degrades to the broad question, never an empty turn. `InfoGainPolicy._distributions`
 and the phrasing layer now share one helper, `facets.weighted_value_counts`.
+
+### Follow-up — relaxed gating (same commit series)
+
+The first cut gated the grounded path on `state.productive_turns >= 1 and
+state.turn_count >= first_recommend_turn`. Inspecting `public_0198` (the
+latest-hitting public session, turn 9) showed all nine of its clarifications were
+the broad fallback: its disclosures are single words ("leather", "black", "PU")
+that never form a multi-word constraint span, so `productive_turns` stayed 0 the
+whole session and the turn gate never opened until turn 3 anyway.
+
+Relaxed to: grounded from `turn_count >= 2` (after the opening line the retrieval
+pool reflects something the shopper said), no `productive_turns` requirement, and
+the per-facet split thresholds loosened (`_MIN_COVERAGE` 0.35→0.25, `_MAX_TOP_SHARE`
+0.85→0.90). Among qualifying facets the voiced one now rotates by `turn_count %
+count` instead of always the single most-split, so a session on the grounded path
+varies the facet each turn. Result on the public set: the grounded path fires on
+98% of turn-≥2 clarifications and in 199 of 200 sessions (was ~0). Score
+unchanged — still zero by construction.
 
 ### Effect
 
@@ -806,7 +824,7 @@ and the phrasing layer now share one helper, `facets.weighted_value_counts`.
 | Public set | 0.930502 | 0.930502 |
 | Adversarial set | 0.801978 | 0.801978 |
 | dev / holdout | 0.9418 / 0.9136 | 0.9418 / 0.9136 |
-| Tests | 64/64 | 69/69 |
+| Tests | 64/64 | 70/70 |
 
 **Exactly zero, by construction** — measured in one process (`tools/sweep.py`
 rows `natural_off` / `natural_on`), per-scenario components identical. The
@@ -818,14 +836,18 @@ Implements the "Question phrasing from the candidates" idea listed under S4.
 ### Example (real runs, `natural_questions` on)
 
 ```
-public_0007 [browsing]
-  T1 "...still exploring."            -> "To point you in the right direction: anything else you'd want me to factor in?"
-  T2 "...polyester; 75% Polyester..." -> "...what else is important for this?"
-  T3 "...Imported; Pull On closure."  -> "...on colour, I'm seeing white, green and black - do you have a preference?"  -> HIT
+public_0198 [the latest-hitting public session - all broad before the follow-up]
+  T1 -> "To point you in the right direction: anything else you'd want me to factor in?"
+  T2 -> "...there's a mix of leather and canvas here - for the material, does one stand out?"
+  T3 -> "...for sizing, I'm seeing small, adjustable and large - do you have a preference?"
+  T4 -> "...style-wise, the pool is split across classic, casual and elegant. Does one matter more to you?"
+  T5 -> "...there's a mix of work, outdoor and travel here - for how you'll use it, does one stand out?"
+  ...                                                                                       -> HIT T9
 
-public_0169 [boundary]
-  T3 "...Imported; Pull On closure."  -> "...for how you'll use it, I'm seeing work, party and everyday - do you have a preference?"
-  T4 "...no additional preference..." -> "...for sizing, the pool is split across small, wide and plus size. Does one matter more to you?"  -> HIT
+public_0002 [browsing]
+  T2 -> "To narrow this down: there's a mix of casual, classic and elegant here - style-wise, does one stand out?"
+  T3 -> "...on colour, I'm seeing black, brown and gold - do you have a preference?"
+  T4 -> "...for how you'll use it, the pool is split across work, everyday and party. Does one matter more to you?"
 ```
 
 Before, every one of those turns was "Is there anything else that matters for

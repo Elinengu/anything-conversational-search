@@ -64,8 +64,14 @@ BROAD_BANK = (
 )
 
 # --- selection thresholds for _grounded ---
-_MIN_COVERAGE = 0.35      # this share of the pool must resolve the facet
-_MAX_TOP_SHARE = 0.85     # the top value must hold <= this of the resolved mass
+# These only gate *which facet gets voiced*, never what is asked or retrieved, so
+# the evaluator score is invariant to them (the simulator never reads `message`).
+# They are set to fire whenever the pool is genuinely split on a facet the
+# shopper has not pinned down - loose enough that most mid-session turns get a
+# grounded question instead of the broad fallback, strict enough that a facet
+# the pool basically agrees on (or barely resolves) is left alone.
+_MIN_COVERAGE = 0.25      # this share of the pool must resolve the facet
+_MAX_TOP_SHARE = 0.90     # the top value must hold <= this of the resolved mass
 _MIN_VALUE_SHARE = 0.05   # a value needs >= this of resolved mass to count as present
 
 
@@ -113,16 +119,18 @@ def _grounded(
     store: FacetStore,
     depth: int,
 ) -> str | None:
-    """A question about the facet the live pool is most split on, or None."""
+    """A question about a facet the live pool is genuinely split on, or None.
+
+    Qualifying facets are ranked by split quality and rotated by turn, so a
+    session that stays on this path varies the facet rather than repeating one.
+    """
     if not candidates:
         return None
     counts, total = weighted_value_counts(candidates, store, depth, VOICEABLE)
     if total <= 0.0:
         return None
 
-    best_attr: str | None = None
-    best_ratio = 0.0
-    best_values: list[str] = []
+    qualifying: list[tuple[float, str, list[str]]] = []
     for attribute in VOICEABLE:
         if attribute in state.dead_attributes or attribute in state.asked:
             continue
@@ -136,12 +144,14 @@ def _grounded(
         present = [value for value, mass in ordered if mass / resolved >= _MIN_VALUE_SHARE]
         if len(present) < 2:
             continue
-        ratio = _gain_ratio(distribution)
-        if ratio > best_ratio:
-            best_attr, best_ratio, best_values = attribute, ratio, present[:3]
+        qualifying.append((_gain_ratio(distribution), attribute, present[:3]))
 
-    if best_attr is None:
+    if not qualifying:
         return None
+    # Most-split facet first, then rotate by turn so a session that stays on the
+    # grounded path does not ask about the same facet every turn.
+    qualifying.sort(key=lambda item: -item[0])
+    _, best_attr, best_values = qualifying[state.turn_count % len(qualifying)]
     lead = LEAD[best_attr]
     template = GROUNDED_TEMPLATES[state.turn_count % len(GROUNDED_TEMPLATES)]
     return template.format(
@@ -169,8 +179,15 @@ def clarify(
         return _tone(route, QUESTION_TEXT.get(attribute, QUESTION_TEXT["other"]))
 
     try:
-        first = max(1, int(getattr(config, "first_recommend_turn", 3)))
-        if state.productive_turns >= 1 and state.turn_count >= first:
+        # Grounded from turn 2 on: after the opening line the retrieval pool is
+        # shaped by something the shopper actually said, so a "the pool is split
+        # on X" question is about their results, not the catalog prior. We do not
+        # require a *productive* turn - single-word disclosures ("leather",
+        # "black") never form a multi-word constraint span, so productive_turns
+        # can sit at 0 for a whole session that is in fact narrowing well. The
+        # per-facet gates in `_grounded` are the real guard against voicing a
+        # facet the pool has not split on.
+        if state.turn_count >= 2:
             grounded = _grounded(
                 state, candidates, store, int(getattr(config, "phrasing_depth", 40))
             )

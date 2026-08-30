@@ -721,23 +721,35 @@ can return zero for a specific attribute, which also retires that attribute), an
 the simulator never reads the English `message` field at all. So the sentence is
 free to be a real, guiding question while the machine-readable field stays put.
 
-`clarify()` (`src/phrasing.py`) builds the message. Once the customer has
-disclosed something and recommendations have started, it looks at the live
-reranked pool and, for each of `material / colour / style / size / use_case` that
-has not been asked or declined, measures how evenly the pool is split on it —
-the same `gain_ratio` (entropy ÷ maximum entropy) the `InfoGainPolicy` uses. If
-one facet is genuinely split (at least 35% of the pool resolves it, the top
-value holds no more than 85% of the mass, two or more values are present), it
-names the top two or three values in a rotated template:
+`clarify()` (`src/phrasing.py`) builds the message. From turn 2 onward — once
+the retrieval pool has been shaped by something the shopper actually said — it
+looks at the live reranked pool and, for each of
+`material / colour / style / size / use_case` that has not been asked or
+declined, measures how evenly the pool is split on it — the same `gain_ratio`
+(entropy ÷ maximum entropy) the `InfoGainPolicy` uses. Facets that are genuinely
+split (at least 25% of the pool resolves it, the top value holds no more than
+90% of the mass, two or more values present) are collected, ordered by split
+quality, and the one at `turn_count % count` is voiced — so a session that stays
+on this path asks about a different facet each turn rather than repeating one.
+It names the top two or three values in a rotated template:
 
 > "For the material, I'm seeing leather and canvas — do you have a preference?"
 
-Otherwise, and before any evidence, it falls back to a four-way rotation of the
-broad question so a session never repeats a sentence verbatim. The whole path is
-wrapped so a phrasing bug degrades to the broad question, never to an empty
-turn. `brand` and `budget` and `category` are excluded from the voiced facets —
-brand has thousands of values, budget is null for 79% of the catalog, and the
-`category` facet's values are path fragments ("women", "novelty").
+The turn-2 gate does **not** require a *productive* turn. Single-word
+disclosures ("leather", "black") never form a multi-word constraint span, so
+`productive_turns` can sit at 0 for a whole session that is in fact narrowing
+well — an earlier stricter gate left those sessions (e.g. `public_0198`) on the
+broad fallback for all ten turns. The per-facet split tests are the real guard
+against voicing a facet the pool has not split on. On the public set the
+grounded path now fires on 98% of turn-≥2 clarifications and in 199 of 200
+sessions.
+
+On turn 1, and whenever no facet qualifies, it falls back to a four-way rotation
+of the broad question so a session never repeats a sentence verbatim. The whole
+path is wrapped so a phrasing bug degrades to the broad question, never to an
+empty turn. `brand` and `budget` and `category` are excluded from the voiced
+facets — brand has thousands of values, budget is null for 79% of the catalog,
+and the `category` facet's values are path fragments ("women", "novelty").
 
 This lives in S4 rather than S9 because it is the customer-facing half of the
 clarification decision, and it belongs *beside* `InfoGainPolicy` — it reuses the
@@ -753,15 +765,15 @@ its fallback; `ask_attribute` and the score do not move either way.
 **Exactly zero, by construction** — the simulator ignores `message`. Verified in
 one process (`tools/sweep.py` rows `natural_off` / `natural_on`):
 
-| | dev | holdout |
-|---|---|---|
-| `natural_questions=False` | 0.9418 | 0.9136 |
-| `natural_questions=True` | 0.9418 | 0.9136 |
+| | dev | holdout | public (200) | adversarial (96) |
+|---|---|---|---|---|
+| `natural_questions=False` | 0.9418 | 0.9136 | 0.9305 | 0.8020 |
+| `natural_questions=True` | 0.9418 | 0.9136 | 0.9305 | 0.8020 |
 
-Per-scenario components are identical too. The change buys demo / Presentation /
-Innovation realism (Pillar II's "structured, proactive clarification prompts"),
-not score. Default on; `AgentConfig(natural_questions=False)` restores the fixed
-strings byte-for-byte.
+Per-scenario components are identical on every split. The change buys demo /
+Presentation / Innovation realism (Pillar II's "structured, proactive
+clarification prompts"), not score. Default on;
+`AgentConfig(natural_questions=False)` restores the fixed strings byte-for-byte.
 
 #### Ideas for this stage
 
