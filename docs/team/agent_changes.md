@@ -28,6 +28,7 @@ public labels and API contract were **not** touched.
 | + track-aware turn-2 gating | xiaotong0329 | **0.9313** | **0.8028** | change 14; PR #7 — one config knob (`buying_confidence_margin`); the accompanying `src/context_programming.py` module is built but not wired into any decision — verified by ablation |
 | + track-aware routing layer | KW | _0.9177_ | _0.7994_ | change 15; **branch `dual_tracking` only, not merged to `main`.** `use_router` widened from phrasing to behaviour (policy / rerank / timing). Costs ~0.013 on the cooperative public sim, gains nothing there; +0.147 overall / +0.43 browsing MRR on `tools/stress_harness.py --customer browse-gated`. `use_router=False` is bit-identical to the pre-branch agent. |
 | + length tie-break / no-span rescore | Elinengu | 0.9305 | 0.8020 | change 16; **both measured and rejected — no `src/` change.** Dev moves 0.000000 for one and clears the adversarial gate at a single isolated weight for the other. Recorded in `rerank_signals.md` §5 and §11 |
+| + merged `feat/dynamic-context-programming`; DeepSeek listwise rerank measured | Elinengu | 0.921016 | — | change 17; **not on the change-16 lineage** — this branch (`integration/gemini-stress-harness`) carries dual-track routing on by default, which the doc above (change 15) already prices at "costs ~0.013 on the cooperative public sim, gains nothing there" in exchange for the stress-harness robustness gain, so 0.921016 is not comparable to 0.9305 above. Within *this* branch the merge itself moved public 0.91868 → 0.921016 with the LLM off (default). `llm_weight` **stays 0.0 (off) by default** — measured with a real DeepSeek key for the first time: byte-identical on dev at `llm_weight=0.3`, **−0.0074 score / −0.026 MRR** under `paraphrase:heavy+browse-gated` (the practical/realistic stressor), −0.016 score on a public-set slice. Also fixed two tests that assumed no real API key would ever be present |
 
 Net: **public 0.859 -> 0.9313, adversarial 0.684 -> 0.8028.** 77/77 tests pass.
 Change 15 is branch `dual_tracking` work (89/89 tests) and does not move the `main` number.
@@ -1316,6 +1317,110 @@ length normalisation at its source by recomputing a length-corrected BM25 over t
 300-candidate pool, rather than bolting a prior onto a score that is already built
 from BM25 *ranks* and has discarded the magnitudes the correction needs.
 
+## Change 17 — Merged `feat/dynamic-context-programming`; measured the DeepSeek listwise rerank for real (Elinengu)
+
+**Files:** `src/llm.py`, `src/rerank.py`, `starter/agent.py`, `.env.example`,
+`tools/demo_llm.py` (merge conflict resolution) — `tests/__init__.py`,
+`tests/test_components.py`, `tests/test_llm.py` (determinism fixes) —
+`tools/sweep.py`, `tools/observe.py`, `tools/stress_harness.py` (`llm_off` /
+`llm_rerank` config rows, `--config`, `--limit`) — commit `8150e19`.
+
+### Problem
+
+`feat/dynamic-context-programming` added change 15's hybrid LLM layer
+(`src/llm.py`'s `LLMClient`: listwise rerank fusion, transparent
+explanations) against Gemini/OpenAI/Ollama, in parallel with this branch's
+own change 15 (dual-track hard filter) and a separate commit switching the
+*low-level* adapter from Gemini to DeepSeek. Change 15's own write-up
+recorded the rerank benefit as **"not yet measurable"** — the Gemini free
+tier (20 requests) exhausted mid-run and every later call fell back silently
+to empty scores, so `llm_weight` shipped at 0.0 with the honest label
+"wired and safe, not helps."
+
+This session's `.env` carries a real, working `DEEPSEEK_API_KEY` for the
+first time, which made two things possible: merging the two parallel
+change-15s correctly (`src/rerank.py`'s `track` param and `llm_scores` param
+are independent, additive rerank inputs — both kept, not one picked over the
+other), and finally running the "not yet measurable" experiment for real.
+
+### What changed
+
+The merge itself: `src/llm.py` now has two layers — `DeepSeekClient` (low
+level, `generate`/`generate_json`, used by `src/router.py` and
+`src/phrasing.py`) and `LLMClient` (high level, `explain_recommendations` /
+`rerank_candidates` / `generate_clarification`, circuit breaker), with
+`LLMClient` rebuilt on top of `DeepSeekClient` instead of the three-provider
+urllib client. No score-relevant logic changed in the merge — see "Off by
+default" below.
+
+Two pre-existing bugs surfaced by having a *real* key for the first time,
+both fixed:
+
+1. **Tests were not actually offline.** `src/phrasing.py`'s clarify-wording
+   polish and `src/router.py`'s ambiguous-opening route hint both call
+   `get_llm_client()` (the `DeepSeekClient`) directly whenever
+   `DEEPSEEK_API_KEY` is set — independent of `AgentConfig.llm.enabled`. With
+   a real key, two tests broke on non-deterministic wording
+   (`test_broad_on_the_opening_turn`, `TestFallbackGuarantee`) and a third on
+   a **real routing change** (`test_scenario_hints` — the router hint chose a
+   different `scenario_hint` than the deterministic classifier on an
+   ambiguous opening). The router one matters beyond tests: it means a real
+   key makes `classify()` non-deterministic in production too, on the small
+   slice of openings the cue-based classifier can't call confidently — that
+   contradicts `IMPLEMENTATION.md`'s claim that the DeepSeek layer "never
+   touches ... routing decisions." Fixed by neutralising `get_llm_client()`
+   per test class (`setUp`/`tearDown`), not by disabling the feature.
+2. **`tools/observe.py` and `tools/stress_harness.py` had no way to run an
+   LLM-enabled config** — `Agent(args.catalog)` was hardcoded with no config
+   argument, so change 15's rerank fusion could never actually be traced or
+   stress-tested. Added `--config <tools/sweep.py name>` to both, and
+   `--limit` to `stress_harness.py` (already present on `observe.py`) to
+   bound wall time / token spend on a real-network run.
+
+### Effect — does the DeepSeek rerank help?
+
+`tools/sweep.py` gained `llm_off` (baseline, restated) and `llm_rerank`
+(`RerankConfig(llm_weight=0.3)`, real DeepSeek calls) so they line up in one
+sweep.
+
+| | dev (120, cooperative sim) | `paraphrase:heavy+browse-gated` (60 sessions, the realistic/practical stressor) | public set, first 40 (`tools/observe.py`) |
+|---|---|---|---|
+| baseline (`router_on` / no LLM) | 0.9293 | score 0.80010, mrr 0.6426 | score 0.943083, mrr 0.9403 |
+| `llm_off` (restated baseline) | 0.9279 | score 0.80010, mrr 0.6426 (identical) | — |
+| `llm_rerank` (DeepSeek, `llm_weight=0.3`) | **0.9279 — byte-identical to `llm_off`** | **score 0.79269, mrr 0.6168 (−0.0074 / −0.026 MRR)** | **score 0.926946, mrr 0.8848 (−0.016 / −0.056 MRR)** |
+
+Wiring is confirmed live and correct — `rerank_candidates()` returns real
+per-`parent_asin` scores from real DeepSeek calls (verified directly: real
+completion tokens reported, `llm_scores` keyed on genuine `parent_asin`
+values, fused into `rerank()`'s `total` exactly as change 15 designed).
+
+**The answer is no, not at `llm_weight=0.3`.** On the cooperative dev split
+the fused score never moves the ranking at all (deterministic signals
+already separate the target cleanly, so a 0.3-weighted semantic re-score
+never flips top-1); on the two harder measurements — the realistic
+paraphrase+browse-gated stressor this session was asked to check, and a
+plain public-set slice — it **costs** score rather than buying any. Nothing
+in this run supports shipping `llm_weight > 0.0` by default; the shipped
+default (`0.0`, off) is confirmed correct, and `llm_weight` stays an opt-in
+knob for the Innovation/Presentation story, not a technical-score lever.
+
+`docs/agent_api_contract.json`'s "recommended_technical_score" is unaffected
+either way since the shipped default keeps `llm_weight=0.0`; the numbers
+above are what *enabling* it would cost.
+
+### Viewer artifacts
+
+`tools/observe.py --config llm_rerank --tag llm_rerank_public --limit 40` and
+`tools/observe.py --tag baseline_public --limit 40` (same 40 sessions,
+directly comparable) produced `runs/llm_rerank_public-20260831-005720/viewer.html`
+and `runs/baseline_public-20260831-005934/viewer.html` for turn-by-turn
+inspection of what the DeepSeek rerank actually changes per session.
+
+### What did not move
+
+`ask_attribute`, `recommendations` ordering on the *dev* split, and every
+offline (no-key) code path — all bit-identical to pre-merge. 111/111 tests
+pass (`python3 -m unittest discover -s tests`).
 
 ## Not touched (organizer-owned)
 

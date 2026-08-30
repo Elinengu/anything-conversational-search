@@ -1054,6 +1054,17 @@ recorded per change in `agent_changes.md`.
   words has little rarity spread left to exploit. The code was deleted rather than kept as a
   dead option; see §6. Also rejected: the document-length tie-break in three forms, and
   category-path precision, which one session made irresistible and 37 killed (§6).
+- ~~**LLM listwise semantic rerank.**~~ **Built, wired, measured for real — not shipped
+  enabled.** `src/llm.py`'s `LLMClient.rerank_candidates` sends the top-15 candidates and the
+  conversation text to DeepSeek and fuses the returned ranking into `total` at
+  `RerankConfig.llm_weight`. Real DeepSeek calls, real `parent_asin`-keyed scores confirmed
+  end-to-end (`docs/team/agent_changes.md` change 17) — but at `llm_weight=0.3` it is
+  byte-identical to the deterministic baseline on the cooperative dev split (the signals
+  already separate the target cleanly, so a 0.3-weighted re-score never flips top-1) and
+  **costs** score on the two harder measurements: −0.0074 / −0.026 MRR under
+  `tools/stress_harness.py --customer paraphrase:heavy+browse-gated`, −0.016 on a public-set
+  slice. `llm_weight` stays `0.0` (off) by default; it is available as an opt-in
+  Innovation/Presentation knob, not a technical-score lever.
 
 ---
 
@@ -1462,7 +1473,7 @@ aimed at it.
 
 | | |
 |---|---|
-| Model / API | **None by default.** No LLM, no network, no credentials required. An optional DeepSeek polish layer (`src/llm.py`, `DEEPSEEK_API_KEY`) restyles clarification wording only (`src/phrasing.py`) and never touches `ask_attribute` or retrieval/rerank/routing decisions; unset or unreachable, the agent is bit-identical to the offline path below. |
+| Model / API | **None by default.** No LLM, no network, no credentials required. `unset or unreachable DEEPSEEK_API_KEY` → the agent is bit-identical to the offline path below, in every path. **With a real key present**, three optional DeepSeek touchpoints activate independently of any `AgentConfig` flag: `src/phrasing.py` restyles clarification wording (never touches `ask_attribute`); `src/router.py`'s `_llm_route_hint` can break the tie on an *ambiguous* opening the deterministic classifier can't call confidently — this one **does** change routing (`ask_attribute` timing, rerank config), corrected here after `docs/team/agent_changes.md` change 17 found it during a real-key run; and `starter/agent.py`'s listwise rerank fusion (`RerankConfig.llm_weight`, default `0.0`) is opt-in only, measured in change 17 to cost score rather than buy it at `llm_weight=0.3` and left off. |
 | Dependencies | Python standard library only |
 | Cost | $0.00 |
 | Tokens | 0 prompt, 0 completion |
