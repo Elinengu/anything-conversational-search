@@ -161,6 +161,27 @@ def build_configs(catalog: str) -> dict[str, AgentConfig]:
         # than kept unwired.
         "router_off": AgentConfig(use_router=False),
         "router_on": AgentConfig(use_router=True),
+        # Dense sentence-embedding cosine as an S6 rerank signal (branch
+        # dense_rerank). The only S6 term that scores meaning rather than exact
+        # tokens - the paraphrase hypothesis. 0.0 is router_on; these bracket the
+        # weight. `_spans` encodes the disclosed spans instead of full_text.
+        "dense_rr_02": AgentConfig(use_router=True, rerank=RerankConfig(dense_weight=0.2)),
+        "dense_rr_05": AgentConfig(use_router=True, rerank=RerankConfig(dense_weight=0.5)),
+        "dense_rr_10": AgentConfig(use_router=True, rerank=RerankConfig(dense_weight=1.0)),
+        "dense_rr_15": AgentConfig(use_router=True, rerank=RerankConfig(dense_weight=1.5)),
+        "dense_rr_05_spans": AgentConfig(
+            use_router=True, rerank=RerankConfig(dense_weight=0.5, dense_query="spans")),
+        "dense_rr_05_rns": AgentConfig(   # also rescore when no verbatim span exists
+            use_router=True,
+            rerank=RerankConfig(dense_weight=0.5, rescore_without_spans=True)),
+        # Dense sentence-embedding cosine as an S5 retrieval route (branch
+        # dense_rerank). Originally trialled per-track (browsing only, since the
+        # paraphrase recall tail concentrates there - docs/team/dense_route.md);
+        # that per-track config surface (buying_retrieval/browsing_retrieval) is
+        # dropped on this branch in favour of the state machine's own routing
+        # (see router_on's comment above), so this row is the both-tracks form.
+        "dense_route_all": AgentConfig(
+            use_router=True, retrieval=RetrievalConfig(use_dense=True)),
     }
 
 

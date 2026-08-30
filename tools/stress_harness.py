@@ -620,14 +620,17 @@ def main() -> None:
         print(f"dataset={args.dataset}  spec={spec}\n{hdr}\n" + "-" * len(hdr))
         base = None
         last: list[dict] = []
+        per_config: list[tuple[str, list[dict]]] = []
         for name in [c.strip() for c in args.configs.split(",") if c.strip()]:
             a = Agent(args.catalog, configs[name])
             last = run_all(a, samples, catalog_ids, categories, products, spec)
             sc = _print_run(name, last, base)
+            per_config.append((name, last))
             if base is None:
                 base = sc
-        print()
-        _print_scenarios(last)
+        for name, sessions in per_config:
+            print(f"\n{name} per scenario:")
+            _print_scenarios(sessions)
         return
 
     _MATRIX = ["official", "paraphrase:light", "paraphrase:medium", "paraphrase:heavy",

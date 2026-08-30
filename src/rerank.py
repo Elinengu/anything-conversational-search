@@ -55,6 +55,7 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 from src.index import CatalogIndex
 from src.state import DialogState
@@ -63,6 +64,9 @@ from src.facets import (
     extract_query_facets,
 )
 from src.text import terms
+
+if TYPE_CHECKING:  # avoid a hard numpy dependency on the BM25-only path
+    from src.embed import EmbeddingIndex
 
 
 @dataclass
@@ -130,6 +134,55 @@ class RerankConfig:
     # ~12% of cluster-target sessions had the target in the pool but past rank 200,
     # where it was left in bm25 order and the span signal never applied.
     depth: int = 300
+
+    # Dense sentence-embedding cosine term (bge-small, src/embed.py). Every other
+    # S6 signal is exact-token: span coverage, facet agreement, category overlap
+    # all go to zero the moment the customer says "cowhide" instead of "leather".
+    # This term is the only one that scores meaning. 0.0 -> off, and every
+    # existing config/test keeps the exact behaviour. Needs `embed` + `qvec`
+    # passed to rerank() (AgentConfig loads the index when this is > 0); missing
+    # artifact / deps -> silently 0.
+    dense_weight: float = 0.0
+    #: Which text is encoded as the query vector: "full" reuses the agent's
+    #: full_text() vector (free - encoded once per turn), "spans" encodes the
+    #: disclosed constraint spans only, "blend" averages the two.
+    dense_query: str = "full"
+    #: Rescore the head even when no verbatim span was disclosed. Only meaningful
+    #: with dense_weight > 0 - the degenerate-card / paraphrased-opening lever
+    #: where span coverage is a frozen no-op.
+    rescore_without_spans: bool = False
+
+
+def _dense_similarities(
+    embed: "EmbeddingIndex",
+    state: DialogState,
+    spans: list[str],
+    qvec: Any,
+    mode: str,
+    asins: list[str],
+) -> dict[str, float]:
+    """Cosine of every head candidate against the chosen query vector."""
+    if mode == "full" and qvec is not None:
+        query_vec = qvec
+    elif mode == "spans":
+        query_vec = embed.encode_query(" ".join(spans)) if spans else qvec
+    elif mode == "blend":
+        import numpy as np
+
+        parts = [
+            v for v in (qvec, embed.encode_query(" ".join(spans)) if spans else None)
+            if v is not None
+        ]
+        if not parts:
+            return {}
+        stacked = np.mean(np.stack(parts), axis=0)
+        norm = float(np.linalg.norm(stacked))
+        query_vec = stacked / norm if norm > 0.0 else stacked
+    else:
+        query_vec = qvec
+    if query_vec is None:
+        return {}
+    return embed.similarities(query_vec, asins)
 
 
 def _popularity(product: dict) -> float:
@@ -282,6 +335,8 @@ def rerank(
     candidates: list[tuple[str, float]],
     config: RerankConfig | None = None,
     track: str | None = None,
+    embed: "EmbeddingIndex | None" = None,
+    qvec: Any = None,
 ) -> list[tuple[str, float]]:
     config = config or RerankConfig()
     if not config.enabled or not candidates:
@@ -290,8 +345,34 @@ def rerank(
     spans = state.query_spans()
     head = candidates[: config.depth]
     tail = candidates[config.depth :]
-    if not spans:
+
+    dense_active = (
+        config.dense_weight > 0.0
+        and embed is not None
+        and getattr(embed, "available", False)
+    )
+    if not spans and not (dense_active and config.rescore_without_spans):
         return candidates
+
+    sims: dict[str, float] = {}
+    dense_lo, dense_span = 0.0, 1.0
+    if dense_active:
+        try:
+            sims = _dense_similarities(
+                embed, state, spans, qvec, config.dense_query,
+                [asin for asin, _ in head],
+            )
+        except Exception:
+            sims = {}
+        if sims:
+            # Min-max over the head so the term spans [0, 1] like span coverage -
+            # raw catalog cosines sit in a narrow ~[0.55, 0.8] band (every pool
+            # member is already the right category), so dividing by the max would
+            # leave almost no spread for dense_weight to act on.
+            values = sims.values()
+            dense_lo = min(values)
+            dense_span = (max(values) - dense_lo) or 1.0
+
     pairs = state.query_pair_spans() if config.pair_weight else []
 
     # Normalise retrieval scores so the two signals combine on one scale.
@@ -393,6 +474,7 @@ def rerank(
             + config.category_weight * category_score
             + config.tail_weight * tail_score
             - config.facet_conflict_weight * conflict_score
+            + config.dense_weight * ((sims.get(parent_asin, dense_lo) - dense_lo) / dense_span)
         )
         scored.append((parent_asin, total))
 
