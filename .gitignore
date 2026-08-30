@@ -219,3 +219,7 @@ __marimo__/
 
 # Session observation runs (regenerate with: python3 tools/observe.py)
 runs/
+
+# OS cruft
+.DS_Store
+**/.DS_Store

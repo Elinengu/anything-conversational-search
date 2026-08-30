@@ -151,6 +151,16 @@ def build_configs(catalog: str) -> dict[str, AgentConfig]:
         # score bit-for-bit identically - the row exists to prove that.
         "natural_off": AgentConfig(natural_questions=False),
         "natural_on": AgentConfig(natural_questions=True),
+        # router_off is the flat single-track pipeline - it must score
+        # bit-for-bit like the pre-routing agent. router_on is the shipped
+        # default: the state-machine's _route_for drives policy, rerank and
+        # timing per intent_track (see src/state.py, src/context_programming.py).
+        # The dual_tracking branch's per-track config knobs (buying_rerank,
+        # route_policies, ...) and its own router_on_hardfilter row are
+        # superseded by that state-tracked routing and were dropped here rather
+        # than kept unwired.
+        "router_off": AgentConfig(use_router=False),
+        "router_on": AgentConfig(use_router=True),
     }
 
 

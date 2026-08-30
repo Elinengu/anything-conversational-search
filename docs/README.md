@@ -38,8 +38,13 @@ Everything under [`team/`](team/) is ours to edit freely.
 | [`team/category_tail_match.md`](team/category_tail_match.md) | The last public-set miss, and the evidence that the fix does not overfit |
 | [`team/reranking_explained.md`](team/reranking_explained.md) | How the reranking stage works, from first principles |
 | [`team/intent_override_retrieval.md`](team/intent_override_retrieval.md) | Handling the intent-override scenario in retrieval |
+| [`team/bm25.md`](team/bm25.md) | How BM25 / BM25F lexical scoring works, grounded in `src/index.py`, and why recall is ~100% on the public set but brittle to paraphrase |
+| [`team/stress_harness.md`](team/stress_harness.md) | (branch `stress_harness`) `tools/stress_harness.py` — paraphrase / browsing-gated / decoy customer stressors and the retrieval-vs-ranking diagnostic |
+| [`team/dual_track_routing.md`](team/dual_track_routing.md) | (branch `dual_tracking`) making Buying/Browsing routing drive behaviour, and why it stayed on a branch |
 
-Each `.md` has a `.pdf` rendering beside it.
+Each `.md` has a `.pdf` rendering beside it; regenerate with
+`python3 tools/md_to_pdf.py <file>.md <file>.pdf` (a lightweight reportlab
+renderer — headings, tables, code, lists).
 
 Three documents live at the repository root rather than here, because they are the
 first things a reader opens: [`../README.md`](../README.md),
