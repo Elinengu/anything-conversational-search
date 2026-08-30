@@ -28,6 +28,7 @@ public labels and API contract were **not** touched.
 | + track-aware turn-2 gating | xiaotong0329 | **0.9313** | **0.8028** | change 14; PR #7 — one config knob (`buying_confidence_margin`); the accompanying `src/context_programming.py` module is built but not wired into any decision — verified by ablation |
 | + track-aware routing layer | KW | _0.9177_ | _0.7994_ | change 15; **branch `dual_tracking` only, not merged to `main`.** `use_router` widened from phrasing to behaviour (policy / rerank / timing). Costs ~0.013 on the cooperative public sim, gains nothing there; +0.147 overall / +0.43 browsing MRR on `tools/stress_harness.py --customer browse-gated`. `use_router=False` is bit-identical to the pre-branch agent. |
 | + length tie-break / no-span rescore | Elinengu | 0.9305 | 0.8020 | change 16; **both measured and rejected — no `src/` change.** Dev moves 0.000000 for one and clears the adversarial gate at a single isolated weight for the other. Recorded in `rerank_signals.md` §5 and §11 |
+| + DeepSeek listwise rerank fusion | Elinengu | 0.9305 | 0.8020 | change 17; **measured live and rejected — no `src/` change.** `llm_weight` stays `0.0`. Dev −0.0084, holdout −0.0043, `paraphrase:heavy+browse-gated` stress −0.0067; regresses every split/scenario tried. Closes change 15's "not yet measurable on this key" with a real answer. |
 
 Net: **public 0.859 -> 0.9313, adversarial 0.684 -> 0.8028.** 77/77 tests pass.
 Change 15 is branch `dual_tracking` work (89/89 tests) and does not move the `main` number.
@@ -1585,6 +1586,96 @@ PR0-4 stack is feature-complete, tested, and ready for merge to `main` once:
 
 All PRs are independent and can be cherry-picked if needed, but deploy as a stack for
 consistency.
+
+---
+
+## Change 17 — LLM listwise rerank: measured live with DeepSeek, rejected (Elinengu)
+
+**Files:** none (`RerankConfig.llm_weight` stays `0.0`, the change 15 default) — commit
+`81b5389` merges `feature/gemini-infrastructure`'s two follow-up commits (hybrid router
+tie-break, override state rewrite) into this branch; measurement only, no `src/` change.
+
+### Problem
+
+Change 15 built the DeepSeek/Gemini listwise-rerank fusion (`src/llm.py`,
+`rerank_candidates`, `RerankConfig.llm_weight`) but could never measure its effect: the
+Gemini key hit its free-tier quota (20 requests) mid-run and every later call fell back
+silently, so the reported delta was "0.719126 vs 0.719126, byte-identical" for the wrong
+reason — most turns simply never reached the LLM. With a working `DEEPSEEK_API_KEY` and
+real network access, that measurement is finally possible.
+
+### What was measured
+
+`tools/sweep.py --split dev --configs llm_off,llm_rerank` and the same on `--split
+holdout`, plus `tools/stress_harness.py --customer paraphrase:heavy+browse-gated
+--configs llm_off,llm_rerank --limit 60` — `llm_off` is `AgentConfig(llm=LLMConfig
+(enabled=False))` (the shipped default, `llm_weight=0.0`), `llm_rerank` is
+`RerankConfig(llm_weight=0.3)` + `LLMConfig(enabled=True, provider="deepseek")`, both
+built by `tools/sweep.py::build_configs` (unchanged). Both configs hold the router's
+ambiguous-case tie-break and the phrasing wording-polish constant (those are gated on
+`DEEPSEEK_API_KEY` presence alone, independent of `AgentConfig.llm.enabled` — see
+`src/router.py::_llm_route_hint`, `src/phrasing.py::_llm_polish` — so the *same* key was
+present for both rows and the delta below isolates the rerank-fusion term specifically).
+
+### Effect
+
+| | llm_off | llm_rerank | Δ |
+|---|---|---|---|
+| dev (120) hit@10 / MRR / score | 1.000 / 0.896 / **0.9292** | 1.000 / 0.869 / **0.9208** | −0.0084 |
+| holdout (80) hit@10 / MRR / score | 1.000 / 0.848 / **0.9083** | 1.000 / 0.833 / **0.9040** | −0.0043 |
+| stress `paraphrase:heavy+browse-gated` (60) hit@10 / MRR / score | 0.933 / 0.6426 / **0.80010** | 0.933 / 0.6204 / **0.79344** | −0.0067 |
+| wall time (dev) | 629s | 1554s | 2.5x |
+| tokens (dev + holdout) | 0 | 233,538 + 177,824 = 411,362 | — |
+
+Regresses on **every split and every stress scenario measured**, worst on the dev
+split's `boundary` scenario (MRR 0.76 → 0.68). Not noise: the direction is identical on
+three independent measurements (two different session sets plus a differently-stressed
+customer), each costing real wall time and tokens for a worse rank. `llm_weight` stays
+`0.0` — this closes change 15's "not yet measurable" with a real, negative answer rather
+than leaving it open.
+
+**Why, probably:** the listwise-rerank prompt (`LLMClient.rerank_candidates`) sends only
+truncated product titles and the raw conversation text — no facet extraction, no span
+matching, none of the pipeline's own signal engineering — and asks a general-purpose
+chat model to out-rank a reranker already tuned (changes 5–12) on this exact catalog and
+this exact scoring function. It has no access to the query-span / facet-conflict /
+popularity signals the shipped reranker uses, so `llm_weight=0.3` is diluting a tuned
+ranking with an untuned one.
+
+### The clarification-wording polish and router tie-break, measured separately: keep
+
+The other two DeepSeek features exercised by this merge are **not** implicated in the
+regression above — they are advisory-only, fire on a small residue of genuinely
+ambiguous turns, and (for wording) provably cannot move the score at all:
+
+- **`_llm_route_hint`** (`src/router.py`) only fires when `|buying_score - browsing_score|
+  <= 0.75`; on the four hand-picked openings tried live, the deterministic classifier
+  was already confident enough that the tie-break never fired.
+- **`_llm_polish`** (`src/phrasing.py`) rewrites the clarify `message` field, which the
+  evaluator's simulator never reads (`ask_attribute` is what scores) — verified both by
+  design and by the passing `PhrasingTests.test_off_reproduces_the_fixed_question_byte_for_byte`
+  test. Rewording is real and reads more naturally, e.g.:
+
+  | turn | template | DeepSeek-polished |
+  |---|---|---|
+  | opening, `ask=feature` | "Which features matter most to you?" | "What features are most important to you?" |
+  | pool-split, `ask=other` | "To narrow this down, a few directions on how you'll use it: swimming, work and everyday. Anything jump out?" | "To narrow this down, how do you plan to use it—swimming, work, or everyday?" |
+  | vague browsing, `ask=feature` | "Just so I show you the right things, any must-have features?" | "Just so I show you the right things, are there any features you can't do without?" |
+
+  `ask_attribute` was identical across both passes for all four sessions tried.
+
+### A design fact worth flagging (not a bug)
+
+`_llm_route_hint`, `_llm_polish`, and `src/context_llm.py::rewrite_state_for_override`
+all gate on `DEEPSEEK_API_KEY` being present in the environment, **independent of**
+`AgentConfig.llm.enabled`. `llm_off` above (`LLMConfig(enabled=False)`) therefore still
+exercises routing tie-break, wording polish, and override rewriting when a real key is
+in `.env` — it only disables the rerank-fusion and recommendation-explanation paths
+(gated through the higher-level `LLMClient.is_available()`, which does respect
+`enabled`). This is documented behaviour (`src/phrasing.py`'s module docstring,
+`tests/__init__.py`) and is why the test suite strips the key before import — but it is
+worth stating plainly here: a production `.env` with a real key changes agent behaviour
+even with `llm.enabled=False`.
 
 ---
 

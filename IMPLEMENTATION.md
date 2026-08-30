@@ -1284,6 +1284,7 @@ not repeat the experiment.
 | **Neural cross-encoder reranking (S6b)** | dev 0.9268 → 0.9211, hard 0.7981 → 0.7944 | Built, measured, removed. Loses on every split and every setting; the optimum semantic weight is zero. Code preserved on branch `semantic-rerank`. |
 | **No-span rescore, re-opened after change 12** | dev 0.941757 → 0.941757 (bit-identical), holdout 0.9136 → 0.9188, hard 0.8020 → 0.8000 | Rejected a second time. Change 12 looked like it should revive it; dev did not move by a single digit, and everything that gained was on the gate split. See below. |
 | **Document-length tie-break** | dev 0.941757 → 0.943229, hard 0.801978 → 0.805064 at `w=0.10` only | Built in three forms, rejected. The hard-set gate is cleared at one weight with both neighbours failing — an argmax on noise, not a plateau. See below. |
+| **DeepSeek listwise rerank fusion (`llm_weight=0.3`)** | dev 0.9292 → 0.9208, holdout 0.9083 → 0.9040, stress `paraphrase:heavy+browse-gated` 0.80010 → 0.79344 | Measured live (real DeepSeek key, real network — resolves change 15's "not yet measurable on this key"). Regresses every split and every stress scenario it was tried on, at 2.5x the wall time and ~400K real tokens across dev+holdout. `llm_weight` stays `0.0`. `docs/team/agent_changes.md` § Change 17. |
 
 **Document length, and the difference between a signal and a shippable signal.** The
 near-miss anatomy asks a narrow question: when the target sits at rank 2-10 behind an
@@ -1629,7 +1630,24 @@ high-leverage LLM integrations:
 **Score impact (measured deterministic vs. feature branch):**
 - Public: 0.9305 → 0.9305 (±0.000000) — by design, score-neutral when LLM unavailable
 - Tests: 47 → 49 (+2 PR4 regression tests)
-- Expected impact on held-out eval: TBD (tuning thresholds required for score move)
+- Expected impact on held-out eval: now measured, live, with a real key — see below.
+
+**Update — the provider is DeepSeek, and the listwise-rerank piece (PR-adjacent, not
+this stack's own PR0-4) is measured and rejected.** The project standardised on
+DeepSeek (`DEEPSEEK_API_KEY`, `src/llm.py`); every "Gemini" name above is historical.
+Change 15's separate hybrid-LLM-layer work (listwise rerank fusion, `llm_weight`) could
+not be measured on its Gemini key (free-tier quota exhausted mid-run). With a working
+DeepSeek key and real network access, that measurement is now done: `llm_weight=0.3`
+**regresses** score on dev (0.9292 → 0.9208), holdout (0.9083 → 0.9040), and the
+`paraphrase:heavy+browse-gated` stress harness (0.80010 → 0.79344) — every split, every
+scenario, at 2.5x the wall time. `llm_weight` stays `0.0`. Full numbers: §6 above and
+`docs/team/agent_changes.md` § Change 17.
+This stack's own three ambiguous-case features (hybrid router tie-break, clarification
+wording polish, override state rewrite) are a different, cheaper use of the same
+adapter — advisory-only, gated to the small residue of genuinely ambiguous turns — and
+were not part of this regression; the clarification-wording polish in particular
+measurably improves question naturalness with zero score effect (the simulator never
+reads `message`), per `docs/team/agent_changes.md` § Change 17.
 
 **Lessons learned:**
 1. Fallback-first design makes quota exhaustion non-catastrophic
