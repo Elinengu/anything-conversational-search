@@ -173,6 +173,46 @@ def extract_opening_facets(text: str) -> dict[str, tuple[str, ...]]:
     return results
 
 
+def detect_intent_override(text: str) -> bool:
+    """True when the customer explicitly reverses or revises a prior preference."""
+    return bool((text or "") and OVERRIDE_CUES.search(text))
+
+
+def route_with_tie_breaker(
+    buying_score: float,
+    browsing_score: float,
+    *,
+    tie_breaker: callable | None = None,
+    high_confidence_margin: float = 0.6,
+    strong_signal_threshold: float = 1.5,
+    override_detected: bool = False,
+) -> str:
+    """Choose a route with a confidence gate and explicit tie-breaker fallback.
+
+    When the customer explicitly reverses their prior intent, the new intent
+    should dominate the route decision rather than being buried under stale cues.
+    """
+    if override_detected:
+        if buying_score > browsing_score:
+            return "buying"
+        if browsing_score > buying_score:
+            return "browsing"
+
+    if buying_score >= strong_signal_threshold and buying_score >= browsing_score + high_confidence_margin:
+        return "buying"
+    if browsing_score >= strong_signal_threshold and browsing_score >= buying_score + high_confidence_margin:
+        return "browsing"
+
+    if buying_score > browsing_score:
+        return "buying"
+    if browsing_score > buying_score:
+        return "browsing"
+
+    if tie_breaker is not None:
+        return tie_breaker(buying_score, browsing_score)
+    return "browsing"
+
+
 def _llm_route_hint(text: str) -> Route | None:
     """Optional DeepSeek-backed routing hint. Returns None when the client is
     unavailable, unreachable, or returns anything that doesn't parse cleanly.
@@ -272,32 +312,35 @@ def classify(opening: str) -> Route:
     browsing_conf = br_score / total
 
     # Decision rule:
-    # Explicit browsing cues are strong negative indicators of immediate buying.
-    ambiguous = False
-    if br_score > 0.0 and browsing_matches:
-        name = "browsing"
-        tone = "To point you in the right direction: "
-        confidence = browsing_conf
-        rec_turn = 3
-    elif b_score > 0.5:
-        name = "buying"
-        tone = "To narrow this down: "
-        confidence = buying_conf
-        rec_turn = 2 if buying_conf >= 0.75 else 3
-    else:
-        # Neither cue list matched with any real signal - the deterministic
-        # classifier is guessing (browsing, as the safe default). This is the
-        # one case the optional DeepSeek hint is allowed to break the tie for.
-        name = "browsing"
-        tone = "To point you in the right direction: "
-        confidence = 0.5
-        rec_turn = 3
-        ambiguous = True
+    # Strong evidence returns immediately; ambiguous scores intentionally defer to
+    # the tie-breaker so that near-equal signals do not trigger a brittle route.
+    # An explicit override dominates stale cues from earlier in the same message.
+    tie_breaker = lambda b_score, br_score: "browsing" if br_score >= b_score else "buying"
+    name = route_with_tie_breaker(
+        b_score,
+        br_score,
+        tie_breaker=tie_breaker,
+        override_detected=bool(override_matches),
+    )
 
-    if ambiguous:
+    # The optional DeepSeek hint is consulted only for genuinely ambiguous
+    # openings (scores within 0.75 of each other), not for every message in
+    # the evaluator - this avoids burning quota on routine traffic while still
+    # allowing a single LLM tie-break on the residue the deterministic
+    # classifier itself is unsure about. It never overrules a confident call.
+    if abs(b_score - br_score) <= 0.75:
         llm_hint = _llm_route_hint(text)
         if llm_hint is not None:
             return llm_hint
+
+    if name == "browsing":
+        tone = "To point you in the right direction: "
+        confidence = browsing_conf if br_score > 0.0 and browsing_matches else 0.5
+        rec_turn = 3
+    else:
+        tone = "To narrow this down: "
+        confidence = buying_conf
+        rec_turn = 2 if buying_conf >= 0.75 else 3
 
     detected_cues = tuple(buying_matches + browsing_matches + override_matches + boundary_matches)
     return Route(

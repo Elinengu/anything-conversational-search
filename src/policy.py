@@ -231,6 +231,14 @@ class InfoGainPolicy:
     # happens downstream in ``src/phrasing.py::clarify``, never here - that keeps
     # this policy deterministic and keeps a flaky LLM call from ever being able
     # to turn a valid attribute into an invalid one.
+    #
+    # ``feature/gemini-infrastructure`` proposed a second, LLM-backed wording
+    # layer inside this class (``_llm_question_hint`` / an LLM-aware
+    # ``question()``). It duplicates the polish layer that already lives in
+    # ``src/phrasing.py::clarify`` (grounded clarification generation, one of
+    # ``LLMClient``'s three purpose-built features) and nothing in the live
+    # code path ever calls ``InfoGainPolicy.question()`` - so it was dropped
+    # here rather than merged, to keep one polish layer instead of two.
 
     def select(self, state: DialogState, candidates: list[tuple[str, float]]) -> str:
         # Two reasons to ask broadly, both evidence-driven rather than prior-driven:

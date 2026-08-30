@@ -127,6 +127,7 @@ class DeepSeekClient:
             "stream": False,
         }
 
+        response = None
         try:
             response = requests.post(
                 self._url(),
@@ -142,7 +143,11 @@ class DeepSeekClient:
             message = choices[0].get("message") or {}
             text = message.get("content")
             return text if isinstance(text, str) else None
-        except Exception:
+        except Exception as exc:  # pragma: no cover - debug aid for runtime configuration issues.
+            print(f"DeepSeek request failed for model {self.model}: {type(exc).__name__}: {exc}")
+            if response is not None:
+                print(f"DeepSeek status: {response.status_code}")
+                print(response.text[:500])
             return None
 
     def generate_json(self, prompt: str, *, system_prompt: str | None = None) -> dict[str, Any] | None:

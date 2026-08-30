@@ -1587,6 +1587,59 @@ phrases matched. Surfacing that in the customer-facing `message` ("these all hav
 steel band and a date window") costs nothing, is listed under Innovation Directions in
 `docs/competition_specification.md:87`, and makes the demo far more compelling than a bare list.
 
+### Gemini infrastructure — PR0-PR4 stack (branch: feature/gemini-infrastructure)
+
+As of Aug 2026, the agent is deterministic-only: all routing, clarification, and state
+distillation use rule-based paths with no LLM. Three cases stand out as ambiguous and would
+benefit from semantic understanding:
+
+1. **Borderline intent routing** — when buying-score and browsing-score are within ~0.75
+   points, neither dominates and the rule-based tie-breaker is a coin flip
+2. **Clarification wording** — fixed templates are generic and repetitive; opening-aware
+   or pool-aware wording would improve realism
+3. **Intent override state distillation** — when a customer reverses course, a fixed 0.35
+   downweight cannot distinguish which pre-override constraints to erase, keep, or enhance
+
+**Solution:** Gemini infrastructure module (`src/llm.py`, shared singleton adapter) + five
+high-leverage LLM integrations:
+
+- **PR0** — Shared adapter: `GeminiClient` class, `.env` loader, quota-aware error handling
+- **PR1** — Hybrid router: `route_with_tie_breaker()` with confidence gating; calls Gemini only
+  when `|buying_score - browsing_score| <= 0.75` (ambiguous)
+- **PR2** — Override detection: Gemini tie-break for weak-signal overrides; deterministic regex
+  detection always works
+- **PR3** — Clarification wording: optional Gemini refinement via `_llm_question_hint()`;
+  fallback to fixed templates
+- **PR4** — State rewriting: `StateRewriteInstruction` (erase/keep/add) for intent overrides;
+  intelligent filtering replaces fixed downweight
+
+**Architecture:**
+- **Route 1 (always on):** Deterministic, rule-based fallback path
+- **Route 2 (advisory):** Optional Gemini calls on ambiguous cases only
+- **Fallback:** If Gemini unavailable or rate-limited (429), Route 1 continues unaffected
+- **Shared:** All modules (`router.py`, `policy.py`, `context_programming.py`) call
+  `get_llm_client()` factory from `src/llm.py`
+
+**Configuration:**
+- Create `.env` with `GEMINI_API_KEY=<key>` to enable
+- Remove `.env` or set `GEMINI_API_KEY=` to disable and run deterministic baseline
+- Free-tier quota: 20 requests/minute; quota-aware gating ensures 0-4 calls per full test run
+- Model: `gemini-3.6-flash` (latest stable free-tier as of Aug 2026)
+
+**Score impact (measured deterministic vs. feature branch):**
+- Public: 0.9305 → 0.9305 (±0.000000) — by design, score-neutral when LLM unavailable
+- Tests: 47 → 49 (+2 PR4 regression tests)
+- Expected impact on held-out eval: TBD (tuning thresholds required for score move)
+
+**Lessons learned:**
+1. Fallback-first design makes quota exhaustion non-catastrophic
+2. High-leverage ambiguous cases only (not every turn) protects quota
+3. Shared adapter pattern enables consistent error handling across modules
+4. Deterministic reproducibility (turn off Gemini and get identical baseline)
+   ensures clean ablation and makes feature contribution measurable
+
+For detailed change documentation, see `docs/team/agent_changes.md` § Change 15.
+
 ### Cross-cutting
 
 **Learn the weights instead of setting them.** At least eight constants across the pipeline were

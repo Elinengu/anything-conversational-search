@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+from src.context_llm import rewrite_state_for_override
 from src.facets import extract_query_facets
 from src.state import DialogState
 
@@ -128,6 +129,26 @@ class ContextDistiller:
         latest_text = state.utterances[-1].text if state.utterances else ""
         turn_facets = extract_query_facets(latest_text)
         user_profile.record_turn(turn_facets, spans)
+
+        # If an override was detected, use DeepSeek to intelligently rewrite the state.
+        # This determines which pre-override constraints to erase vs. keep.
+        # Falls back to deterministic handling when DeepSeek is unavailable or quota is exhausted.
+        if state.override_turn is not None and len(state.utterances) > state.override_turn:
+            conversation = [u.text for u in state.utterances]
+            rewrite = rewrite_state_for_override(conversation, state.override_turn)
+            if rewrite is not None:
+                # Apply the rewrite guidance: filter spans by erase/keep/add instructions.
+                # This is an advisory layer; the spans themselves are still valid,
+                # but DeepSeek's parsing helps us understand what to deprioritize.
+                erase_keywords = set(rewrite.erase)
+                keep_keywords = set(rewrite.keep)
+                add_keywords = set(rewrite.add)
+                # Filter spans to exclude erased keywords
+                spans = [s for s in spans if not any(kw in s.lower() for kw in erase_keywords)]
+                # Append new keywords if they were not already in spans
+                for kw in add_keywords:
+                    if kw and kw not in " ".join(spans):
+                        spans.append(kw)
 
         return DistilledShortTermContext(
             session_id=state.session_id,
