@@ -24,8 +24,14 @@ sessions do not read the same way, and the wording is reproducible across
 evaluator runs (the random session id is not used as the key). The facet
 vocabularies (``src/facets.py`` VOCABULARIES) are small enough that "which
 facet, top few values, which template" is enumerable, exactly like the rest of
-the pipeline. An LLM could later replace ``_grounded`` for fluency with this as
-its fallback; ``ask_attribute`` and the evaluator score stay put either way.
+the pipeline.
+
+An optional Gemini polish pass (``_llm_polish``, ``src/llm.py``) restyles the
+already-computed template sentence for fluency when ``GEMINI_API_KEY`` is
+configured. It never chooses the facet, the values, or ``ask_attribute`` -
+only wording - and on any missing key, network failure, or malformed reply it
+falls straight back to the deterministic template text. ``ask_attribute`` and
+the evaluator score are therefore invariant to it either way.
 """
 
 from __future__ import annotations
@@ -34,6 +40,7 @@ import math
 import zlib
 
 from src.facets import FacetStore, weighted_value_counts
+from src.llm import get_llm_client
 from src.policy import QUESTION_TEXT
 from src.state import DialogState
 
@@ -315,6 +322,42 @@ def _grounded(
     )
 
 
+def _llm_polish(text: str) -> str:
+    """Optional Gemini restyling of an already-computed, pool-grounded question.
+
+    ``text`` is the deterministic question - the source of truth and the return
+    value whenever no ``GEMINI_API_KEY`` is configured, the request fails for any
+    reason (network down, timeout, bad response), or the reply does not look
+    like a single clean sentence. Gemini only restyles wording here; it is never
+    asked to choose a fact, a facet, or a value, so a bad response can only ever
+    degrade back to the original template text, never invent a claim.
+    """
+    client = get_llm_client()
+    if not client.is_configured:
+        return text
+    prompt = (
+        "Rephrase the following clarifying question from a shopping assistant so "
+        "it reads naturally and conversationally, in a single short sentence. "
+        "Keep the exact same meaning and facts - do not add, remove, or invent "
+        "any preference, brand, value, or claim. Return only the rephrased "
+        "question, nothing else.\n\n"
+        f"Question: {text}"
+    )
+    try:
+        polished = client.generate(prompt)
+    except Exception:
+        return text
+    if not isinstance(polished, str):
+        return text
+    polished = polished.strip().strip('"').strip()
+    # Reject anything that does not look like a plausible single-sentence
+    # question - too short, implausibly long, or missing punctuation the
+    # template guarantees - and fall back to the deterministic text instead.
+    if not polished or len(polished) > 240 or "\n" in polished:
+        return text
+    return polished
+
+
 def clarify(
     attribute: str,
     state: DialogState,
@@ -346,8 +389,8 @@ def clarify(
                 state, candidates, store, int(getattr(config, "phrasing_depth", 40))
             )
             if grounded:
-                return _tone(route, grounded, state)
-        return _tone(route, _broad(state, attribute), state)
+                return _tone(route, _llm_polish(grounded), state)
+        return _tone(route, _llm_polish(_broad(state, attribute)), state)
     except Exception:
         # A phrasing bug must never cost a session - degrade to a good question,
         # not to the empty response the outer handler would produce.

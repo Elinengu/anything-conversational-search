@@ -174,7 +174,15 @@ def extract_opening_facets(text: str) -> dict[str, tuple[str, ...]]:
 
 
 def _llm_route_hint(text: str) -> Route | None:
-    """Optional Gemini-backed routing hint. Returns None when the client is unavailable."""
+    """Optional Gemini-backed routing hint. Returns None when the client is
+    unavailable, unreachable, or returns anything that doesn't parse cleanly.
+
+    ``GeminiClient.generate``/``generate_json`` already catch network and
+    parsing errors internally, but this call site guards independently too -
+    a caller here must never propagate an exception into ``classify()``, which
+    has no caller of its own that treats a raised exception as anything softer
+    than a lost session (see ``Agent.respond``'s outer handler).
+    """
     client = get_llm_client()
     if not client.is_configured:
         return None
@@ -184,21 +192,24 @@ def _llm_route_hint(text: str) -> Route | None:
         "Routes must be 'buying' or 'browsing'.\n\n"
         f"Message: {text}"
     )
-    payload = client.generate_json(prompt)
-    if not isinstance(payload, dict):
+    try:
+        payload = client.generate_json(prompt)
+        if not isinstance(payload, dict):
+            return None
+        route = payload.get("route")
+        if route not in {"buying", "browsing"}:
+            return None
+        return Route(
+            name=str(route),
+            tone="To narrow this down: " if route == "buying" else "To point you in the right direction: ",
+            confidence=float(payload.get("confidence", 0.5) or 0.5),
+            buying_score=2.0 if route == "buying" else 0.0,
+            browsing_score=2.0 if route == "browsing" else 0.0,
+            scenario_hint="intent_override" if payload.get("is_override") else "boundary" if payload.get("is_boundary") else route,
+            suggested_first_recommend_turn=2 if route == "buying" else 3,
+        )
+    except Exception:
         return None
-    route = payload.get("route")
-    if route not in {"buying", "browsing"}:
-        return None
-    return Route(
-        name=str(route),
-        tone="To narrow this down: " if route == "buying" else "To point you in the right direction: ",
-        confidence=float(payload.get("confidence", 0.5) or 0.5),
-        buying_score=2.0 if route == "buying" else 0.0,
-        browsing_score=2.0 if route == "browsing" else 0.0,
-        scenario_hint="intent_override" if payload.get("is_override") else "boundary" if payload.get("is_boundary") else route,
-        suggested_first_recommend_turn=2 if route == "buying" else 3,
-    )
 
 
 def classify(opening: str) -> Route:
@@ -212,14 +223,21 @@ def classify(opening: str) -> Route:
     Browsing remains the safe fallback for ambiguous queries: mistaking a browser
     for a buyer commits to constraints they never stated, whereas treating a buyer
     as a browser costs at most one extra turn.
+
+    The deterministic classifier below is always computed and is always what
+    decides a confident call - buying-vs-browsing routing is trivial without an
+    LLM (docs/team/ideas_to_integrate_llm.md, Tier 3), and this classifier drives
+    real behaviour downstream (rerank weights, recommendation timing, the
+    clarification policy), so letting a network call override a confident,
+    tuned decision would trade a measured score floor for an unmeasured one. An
+    optional Gemini hint is consulted only to break a tie on the small residue
+    of openings this classifier itself is unsure about (see the ``ambiguous``
+    branch below) - never to overrule a confident deterministic call, and only
+    ever when configured, reachable, and returning a well-formed answer.
     """
     text = (opening or "").strip()
     if not text:
         return BROWSING
-
-    llm_hint = _llm_route_hint(text)
-    if llm_hint is not None:
-        return llm_hint
 
     buying_matches = [m.group(0) for m in BUYING_CUES.finditer(text)]
     browsing_matches = [m.group(0) for m in BROWSING_CUES.finditer(text)]
@@ -255,6 +273,7 @@ def classify(opening: str) -> Route:
 
     # Decision rule:
     # Explicit browsing cues are strong negative indicators of immediate buying.
+    ambiguous = False
     if br_score > 0.0 and browsing_matches:
         name = "browsing"
         tone = "To point you in the right direction: "
@@ -266,10 +285,19 @@ def classify(opening: str) -> Route:
         confidence = buying_conf
         rec_turn = 2 if buying_conf >= 0.75 else 3
     else:
+        # Neither cue list matched with any real signal - the deterministic
+        # classifier is guessing (browsing, as the safe default). This is the
+        # one case the optional Gemini hint is allowed to break the tie for.
         name = "browsing"
         tone = "To point you in the right direction: "
         confidence = 0.5
         rec_turn = 3
+        ambiguous = True
+
+    if ambiguous:
+        llm_hint = _llm_route_hint(text)
+        if llm_hint is not None:
+            return llm_hint
 
     detected_cues = tuple(buying_matches + browsing_matches + override_matches + boundary_matches)
     return Route(

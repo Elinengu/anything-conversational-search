@@ -16,7 +16,6 @@ from __future__ import annotations
 import math
 
 from src.facets import TAG_HINTS, weighted_value_counts
-from src.llm import get_llm_client
 from src.state import DialogState
 
 
@@ -225,27 +224,13 @@ class InfoGainPolicy:
         return bool(state.asked) and state.asked[-1] in self.BROAD
 
     # ---- interface ------------------------------------------------------------
-
-    def _llm_question_hint(self, state: DialogState, candidates: list[tuple[str, float]], selected_attribute: str) -> str:
-        """Optional Gemini hint for better rewording of the next question.
-
-        This keeps the deterministic policy in charge of choosing *what* to ask;
-        Gemini only helps with *how* to ask it when a key is configured.
-        """
-        client = get_llm_client()
-        if not client.is_configured:
-            return selected_attribute
-
-        prompt = (
-            "You are helping a shopping assistant choose the next clarifying question. "
-            "The attribute selected by the policy is: "
-            f"{selected_attribute}. Keep the question short and natural, and do not ask for anything "
-            "outside this intent. Return only a single question sentence."
-        )
-        question = client.generate(prompt)
-        if not question:
-            return selected_attribute
-        return selected_attribute
+    #
+    # ``select`` only ever returns an ``ALLOWED_ATTRIBUTES`` value - it is what
+    # the simulator reads as ``ask_attribute`` and the response contract requires
+    # it. Rewording *how* the question is asked (an optional Gemini polish layer)
+    # happens downstream in ``src/phrasing.py::clarify``, never here - that keeps
+    # this policy deterministic and keeps a flaky LLM call from ever being able
+    # to turn a valid attribute into an invalid one.
 
     def select(self, state: DialogState, candidates: list[tuple[str, float]]) -> str:
         # Two reasons to ask broadly, both evidence-driven rather than prior-driven:
@@ -267,7 +252,7 @@ class InfoGainPolicy:
         ):
             for attribute in self.BROAD:
                 if attribute not in state.dead_attributes:
-                    return self._llm_question_hint(state, candidates, attribute)
+                    return attribute
 
         gains = self.scores(state, candidates)
         attribute, best = max(gains.items(), key=lambda item: (item[1], item[0]))
@@ -276,9 +261,9 @@ class InfoGainPolicy:
             # most open-ended question rather than repeating a dead one.
             for candidate in ("feature", "other", "style"):
                 if candidate not in state.dead_attributes:
-                    return self._llm_question_hint(state, candidates, candidate)
-            return self._llm_question_hint(state, candidates, "other")
-        return self._llm_question_hint(state, candidates, attribute)
+                    return candidate
+            return "other"
+        return attribute
 
     def question(self, attribute: str) -> str:
         return QUESTION_TEXT.get(attribute, QUESTION_TEXT["other"])
