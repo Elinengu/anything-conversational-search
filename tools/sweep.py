@@ -149,10 +149,19 @@ def build_configs(catalog: str) -> dict[str, AgentConfig]:
         # favours thin listings) while popularity picks the target 31/33 yet is
         # weighted 0.02 against 1.0. These rows bracket the popularity weight;
         # tools/fit_weights.py searches the full mixture.
+        # pop002 is the pre-change shipped value; 0.4 is the new default, with
+        # 0.3/0.5 as its measured plateau neighbours.
         "pop002": AgentConfig(rerank=RerankConfig(popularity_weight=0.02)),
         "pop010": AgentConfig(rerank=RerankConfig(popularity_weight=0.10)),
         "pop030": AgentConfig(rerank=RerankConfig(popularity_weight=0.30)),
+        "pop040": AgentConfig(rerank=RerankConfig(popularity_weight=0.40)),
         "pop050": AgentConfig(rerank=RerankConfig(popularity_weight=0.50)),
+        # The coordinate-ascent dev argmax (tools/fit_weights.py): higher on
+        # dev/holdout/public, regresses the hard set - kept as a row so the
+        # trade-off stays reproducible, not as a default.
+        "weights_argmax": AgentConfig(rerank=RerankConfig(
+            popularity_weight=0.8, retrieval_weight=0.1, facet_weight=0.5,
+            tail_weight=1.2, facet_conflict_weight=0.0)),
     }
 
 

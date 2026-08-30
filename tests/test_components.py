@@ -260,6 +260,35 @@ class RerankTests(unittest.TestCase):
         ranked = rerank(index, state, pool, zeroed)
         self.assertEqual([asin for asin, _ in ranked], ["a", "b"])
 
+    def test_shipped_weights_are_pinned(self) -> None:
+        """The defaults are measured quantities (rerank_signals.md §10); a
+        silent change to any of them is a scoring change and must fail here."""
+        config = RerankConfig()
+        self.assertEqual(
+            (config.span_weight, config.pair_weight, config.retrieval_weight,
+             config.popularity_weight, config.facet_weight, config.category_weight,
+             config.tail_weight, config.facet_conflict_weight),
+            (1.0, 0.8, 1.0, 0.4, 0.3, 0.4, 0.8, 0.4),
+        )
+
+    def test_popularity_breaks_lexical_ties_toward_reviewed_products(self) -> None:
+        """The tie-break regime: identical span evidence, the reviewed product
+        wins under the shipped weight and cannot win at the old 0.02 against a
+        retrieval-score lead."""
+        popular = {"text": "cotton shirt grey crew neck",
+                   "average_rating": 4.6, "rating_number": 900}
+        thin = {"text": "cotton shirt grey crew neck",
+                "average_rating": 0.0, "rating_number": 0}
+        index = _StubIndex({"pop": popular, "thin": thin})
+        state = DialogState("s")
+        state.observe(1, "I'm looking for shirts")
+        state.observe(2, "For that, what matters is: cotton shirt grey.")
+        pool = [("thin", 1.0), ("pop", 0.9)]  # retrieval prefers the thin listing
+        ranked = rerank(index, state, pool, RerankConfig())
+        self.assertEqual(ranked[0][0], "pop")
+        old = rerank(index, state, pool, RerankConfig(popularity_weight=0.02))
+        self.assertEqual(old[0][0], "thin")
+
 
 class RouterTests(unittest.TestCase):
     def test_cue_based_classification(self) -> None:

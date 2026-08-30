@@ -7,8 +7,13 @@ ends at the first hit, freezing whatever rank was achieved.
 The dominant signal is verbatim span coverage. Constraints the customer discloses
 are copied from the target product's own metadata, so a candidate whose text
 literally contains "stainless steel band" is far more likely to be the target than
-one that merely shares those tokens. Popularity is a tie-break only: the target is
-one specific purchase, not a bestseller.
+one that merely shares those tokens. Popularity is a tie-break - but the tie-break
+is where the remaining headroom lives, so it is no longer a token weight: dissecting
+every near-miss session showed all lexical signals exactly tied 33/33 between the
+target and the impostor above it, with the tie broken by the retrieval score
+(wrong 33/33 - BM25 length normalization favours thin listings) while popularity
+pointed at the target 31/33 (the target is a real purchase, hence a reviewed,
+documented product). See docs/team/rerank_signals.md §10.
 
 Weighting spans by pool-local rarity was implemented and measured on the theory
 that "buckle closure" should count for less than "two row stitch" among belts. It
@@ -67,7 +72,19 @@ class RerankConfig:
     # Longer spans are rarer and therefore stronger evidence.
     length_bonus: float = 0.12
     retrieval_weight: float = 1.0
-    popularity_weight: float = 0.02
+    # Raised 0.02 -> 0.4 after the near-miss anatomy (rerank_signals.md §10): in
+    # the tie-break regime that holds all remaining public headroom, popularity
+    # picks the target 31/33 but at 0.02 was drowned 50:1 by the retrieval
+    # score, which picks the impostor 33/33. Measured at 0.4: dev 0.9268 ->
+    # 0.9418, holdout 0.9096 -> 0.9136, public 0.9199 -> 0.9305, hard 0.7981 ->
+    # 0.8020 with a converted miss (hit 0.885 -> 0.896) - every split up, public
+    # 200/200 kept. 0.1 / 0.3 / 0.5 are all >= baseline on all four splits, so
+    # 0.4 sits mid-plateau with both neighbours measured. The coordinate-ascent
+    # dev argmax (tools/fit_weights.py) wanted 0.8 with retrieval at 0.1 - that
+    # scores higher on dev/holdout/public but regresses the adversarial set
+    # 0.7981 -> 0.7824, whose targets are deliberately thin and unreviewed; the
+    # one-weight change is the qualifier under the no-bucket-regresses rule.
+    popularity_weight: float = 0.4
     # Candidate facets matching the customer's stated facets (material, colour, ...).
     facet_weight: float = 0.3
     category_weight: float = 0.4

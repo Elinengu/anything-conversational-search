@@ -837,17 +837,25 @@ The final score for each candidate combines three signals:
 ```
 score = span_coverage                    (dominant - verbatim phrase matches)
       + normalised_retrieval_score       (BM25's opinion, scaled to 0..1)
-      + 0.02 x popularity                (tie-break only)
+      + 0.4 x popularity                 (the tie-break - raised from 0.02, see below)
 ```
 
 Longer phrases count slightly more (`length_bonus`), because a five-word match is rarer than a
 two-word one.
 
-**Popularity is deliberately near-zero.** `average_rating` and `rating_number` are held at weight
-`0.02` — a tie-break, nothing more. The target is *one specific person's purchase*, not a
-bestseller, so a strong popularity prior would systematically drag the ranking toward famous
-products and away from the answer. This is a general lesson: popularity is a good prior for "what
-will most people like" and a bad one for "which item did this person buy".
+**Popularity was deliberately near-zero — and then measurement moved it.** For most of this
+project `average_rating` and `rating_number` were held at weight `0.02`: the target is *one
+specific person's purchase*, not a bestseller, so a strong popularity prior would drag the ranking
+toward famous products. That reasoning is right in general and was wrong about the margin: change
+12 dissected every session where the target sat at rank 2-10 behind an impostor and found all
+lexical signals *exactly tied*, the retrieval score picking the impostor 33/33 (BM25 rates the
+same matched words higher in a thinner listing), and popularity picking the target 31/33 — because
+a product someone really bought tends to be a reviewed, documented product. At 0.02 the signal
+that was right 94% of the time was drowned 50:1 by one that was wrong 100% of the time in exactly
+the regime that held all the remaining headroom. The weight is now `0.4` — mid-plateau, every
+split up, measured in `docs/team/rerank_signals.md` §10. The general lesson survives in refined
+form: popularity is a bad *primary* signal here (the coordinate-ascent argmax pushed it to 0.8 and
+regressed the adversarial set), but the *tie-break* is worth far more than a token weight.
 
 **Why this lives in ranking and not retrieval.** Verbatim matching was *first* built as a third
 retrieval route, using FTS5 phrase queries. It scored **0.6859 against the floor's 0.7799 — a
@@ -899,9 +907,13 @@ recorded per change in `agent_changes.md`.
   target at **rank 15** behind a dozen other leather belts. This is now covered by
   `category_weight` (PR #4) and, more sharply, by the category tail match described above.
   Together they closed the last public-set miss.
-- **Learn the signal weights.** `span_weight`, `retrieval_weight`, `popularity_weight` and
-  `length_bonus` were all set by hand. With ~176 known-correct sessions to learn from, even simple
-  logistic regression over these features would likely beat hand-tuning — and stays fully offline.
+- ~~**Learn the signal weights.**~~ **Done — with a twist** (change 12). `tools/fit_weights.py`
+  fits all seven non-definitional weights by coordinate ascent directly on the technical score
+  (Metzler & Croft 2007), dev split only, standard library, offline. The sealed holdout confirmed
+  the fit's direction (+0.019), but the dev argmax regressed the adversarial set, so what shipped
+  is the single change the fit and the near-miss anatomy both pointed at: `popularity_weight`
+  0.02 → 0.4. Public 0.9199 → 0.9305, every split up. The honest lesson: the fit finds the
+  direction; the gates decide the magnitude.
 - **A negative-evidence signal.** Nothing currently penalises a candidate that *contradicts* a
   stated constraint. A customer who said "leather" and a candidate whose material is explicitly
   canvas should be pushed down, not merely left unrewarded.

@@ -175,13 +175,14 @@ evaluator's override never retracts anything — see the resolution note under
 §6-§8 for the measurements. Four variants of the surrounding conflict-scoring
 logic were tried; all scored flat or worse than the shipped agent.
 
-### 6. Learn the rerank weights  — once 1–2 add new features
+### 6. Learn the rerank weights — DONE (change 12)
 
-After adding category + facet signals, `rerank()` has ~5 weights set by hand. One
-offline logistic-regression pass over the ~176 known-correct public sessions
-(standard library, no network) fits them jointly. IMPLEMENTATION.pdf §10 already
-flags this as the highest-EV cross-cutting change; it should come *after* the new
-features exist, not before.
+Implemented as `tools/fit_weights.py` (coordinate ascent on the technical score,
+dev only, stdlib). Outcome: holdout confirmed the fitted direction, the dev
+argmax regressed *this* stress set (its targets are deliberately thin and
+unreviewed, so `popularity 0.8 / retrieval 0.1` overshoots), and the shipped
+change is `popularity_weight` 0.02 → 0.4 — hard set 0.7981 → 0.8020 with a
+converted miss. Details: `rerank_signals.md` §10.
 
 ## Regenerating / tuning the set
 

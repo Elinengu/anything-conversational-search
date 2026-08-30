@@ -701,8 +701,45 @@ session transcript is weight-dependent — the session ends at the first hit and
 the confidence gate reads scores — so cached feature vectors cannot shortcut
 the objective.
 
-**Fit outcome and gate results: pending — the fit is running; this section is
-completed by the change that ships (or rejects) the new defaults.**
+### Step 2 outcome — the fit, the gates, and what actually shipped
+
+The fit converged in 168 evaluations (29 min): dev 0.9268 → 0.9520, moving
+`popularity 0.02→0.8`, `retrieval 1.0→0.1`, `facet 0.3→0.5`, `tail 0.8→1.2`,
+`conflict 0.4→0` (category and pair never moved — the hand values were already
+on their plateaus). The one-shot gates on the argmax:
+
+| vector | dev | holdout (sealed until now) | public | hard / hit |
+|---|---|---|---|---|
+| baseline | 0.9268 | 0.9096 | 0.9199 | 0.7981 / .885 |
+| raw argmax | 0.9520 | **0.9290** | **0.9428** | **0.7824** / .885 |
+| argmax, conflict kept 0.4 | 0.9500 | 0.9276 | 0.9410 | 0.7825 / .885 |
+
+Holdout **confirmed the direction** (+0.019 on data the fit never saw) — this
+was not dev overfit. But the argmax **regresses the adversarial set by 0.016**
+(MRR 0.725 → 0.675): `hard_cases.py` deliberately draws targets from thin,
+unreviewed catalog regions where popularity is neutral (the anatomy's hard
+column: 6:9), so `popularity 0.8 / retrieval 0.1` overshoots for that
+distribution. Two side findings: holdout is indifferent to zeroing the conflict
+penalty (Δ0.0014), so by the smaller-change rule the measured signal stays at
+0.4; and tempered vectors (`pop .5-.8` with `retrieval .5-.7`) all still left
+hard below baseline.
+
+**Shipped: the one-weight change, `popularity_weight 0.02 → 0.4`** — the only
+vector under the pre-declared rule (holdout keeps gains, hard ≥ baseline,
+smallest departure wins):
+
+| | dev | holdout | public | hard / hit |
+|---|---|---|---|---|
+| before | 0.9268 | 0.9096 | 0.9199 | 0.7981 / .885 |
+| **pop 0.4** | **0.9418** | **0.9136** | **0.9305** | **0.8020 / .896** |
+
+Every split up, a hard-set miss converted, public hit 200/200 kept, and no
+public scenario regresses (boundary MRR 0.704 → 0.86). Official evaluator:
+public **0.930502**, hard **0.801978**. Plateau: 0.1 / 0.3 / 0.4 / 0.5 are all
+≥ baseline on all four splits, so 0.4 sits mid-plateau with both neighbours
+measured. The argmax is kept reproducible as the `weights_argmax` sweep row —
+a documented trade (public +0.012 more, hard −0.020) that the private set's
+uniform sampling might justify, but the no-bucket-regresses rule does not.
 
 ## 11. Housekeeping shipped alongside
 

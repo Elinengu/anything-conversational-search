@@ -23,9 +23,10 @@ public labels and API contract were **not** touched.
 | + constraint-ledger investigation | Elinengu | 0.9159 | 0.7944 | change 9; **no code shipped** — six ledger operations measured, all flat or worse; corrected a wrong diagnosis in `src/rerank.py`; two dead functions deleted |
 | + narrow first slate `(4,10)` | Elinengu | **0.9199** | **0.7981** | change 10; one config default. Started as a conditional-MMR assessment — MMR measured and rejected, the deferral it stumbled on kept |
 | + semantic reranking (S6b) | Elinengu | 0.9199 | 0.7981 | change 11; built, measured, **kept off** — cross-encoder loses on every split; oracle reranking ceiling established at +0.043 / +0.084 |
+| + popularity weight 0.02 → 0.4 | Elinengu | **0.9305** | **0.8020** | change 12; the tie-break regime fix — every split up, a hard-set miss converted; coordinate-ascent argmax measured and *not* shipped |
 
-Net: **public 0.859 -> 0.9199, adversarial 0.684 -> 0.7981.** 68/68 tests pass.
-The eleven core-agent changes are detailed below; supporting tooling and docs follow.
+Net: **public 0.859 -> 0.9305, adversarial 0.684 -> 0.8020.** 70/70 tests pass.
+The twelve core-agent changes are detailed below; supporting tooling and docs follow.
 Change 9 moved the score by exactly zero and is recorded in full anyway — a
 measured no-change is the evidence that keeps the shipped design chosen rather
 than assumed. Change 10 is the same lesson from the other side: the proposal that
@@ -697,6 +698,58 @@ uninstalled, results are identical at no latency cost.
   imported the runtime before checking for weights. Reordered so the weights are
   checked first, which means the no-weights path — the scored agent and the whole
   test suite — never imports onnxruntime at all. Six consecutive clean runs after.
+
+
+## Change 12 — Popularity weight 0.02 → 0.4: the tie-break regime fix (Elinengu)
+
+**Files:** `src/rerank.py` (one default + comments), `tools/fit_weights.py` (new),
+`tools/sweep.py`, `tests/test_components.py`, `docs/team/rerank_signals.md` §10
+
+### Problem
+
+Dissecting every near-miss session (target rank 2-10 behind a rank-1 impostor;
+33 public, 15 hard) showed that **every lexical signal is exactly tied 33/33**
+— the remaining headroom is a pure tie-break regime. The tie was broken by the
+retrieval score, which picks the impostor **33/33** (BM25 length normalization
+favours thin listings: 126 vs 195 tokens on identical matched evidence), while
+popularity picks the target **31/33** (the target is a real purchase, hence a
+reviewed product) but was weighted 0.02 against retrieval's 1.0 — right 94% of
+the time, drowned 50:1. The same table killed three candidate signals before
+implementation: title boost (impostor 11:6), match density (impostor 27:33),
+span contiguity (tied).
+
+### What changed
+
+One default: `RerankConfig.popularity_weight` 0.02 → 0.4.
+
+The route there matters as much as the destination. `tools/fit_weights.py`
+(new, stdlib coordinate ascent per Metzler & Croft 2007, fitting the seven
+non-definitional weights directly on the technical score, **dev split only**)
+found an argmax at `pop 0.8 / retrieval 0.1 / conflict 0`. The sealed holdout
+**confirmed the direction** (+0.019) — not dev overfit — but the argmax
+regresses the adversarial set 0.7981 → 0.7824, whose targets are deliberately
+thin and unreviewed. Under the pre-declared rule (holdout keeps gains, hard ≥
+baseline, smallest departure wins) the one-weight change is the only
+qualifier. The argmax stays reproducible as the `weights_argmax` sweep row.
+
+### Effect
+
+| | before | after |
+|---|---|---|
+| Public set (official) | 0.919892 | **0.930502** |
+| Public MRR | 0.869 | 0.901 |
+| Adversarial set (official) | 0.798056 | **0.801978** |
+| Adversarial hit | 0.885 | **0.896** (a converted miss) |
+| dev / holdout | 0.9268 / 0.9096 | 0.9418 / 0.9136 |
+| Tests | 68/68 | 70/70 |
+
+Every split up, public hit 200/200 kept, no public scenario regresses
+(boundary MRR 0.704 → 0.86). Plateau: popularity 0.1 / 0.3 / 0.4 / 0.5 are all
+≥ baseline on all four splits — 0.4 is mid-plateau with both neighbours
+measured. New tests pin all eight shipped weights and demonstrate the
+tie-break flip. This implements the "learn the rerank weights" idea the repo
+carried in four places, with the twist that the honest deliverable was
+knowing *when not to trust the fit*.
 
 
 ## Supporting work (Kwong Weng)

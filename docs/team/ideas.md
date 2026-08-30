@@ -313,14 +313,15 @@ no effect.
 near-identical" is not *spread the slate* but *show fewer of them and wait for
 another constraint* - which is Idea 1d below.
 
-## Idea 4 - learn the weights
+## Idea 4 - learn the weights — DONE (change 12), coordinate ascent not logistic regression
 
-After Ideas 2-3, `rerank()` has ~6 hand-set weights (`span_weight`,
-`retrieval_weight`, `popularity_weight`, `length_bonus`, plus the new
-`w_cat` / `w_facet`). One offline logistic-regression pass over the ~176
-known-correct public sessions fits them jointly - standard library, no network.
-`IMPLEMENTATION.pdf` S10 flags this as the highest-EV cross-cutting change; it
-should come *after* the new features exist.
+Implemented as `tools/fit_weights.py`: coordinate ascent directly on the
+technical score (better suited than logistic regression - the metric is
+non-smooth and the "known-correct" sessions give no per-candidate labels),
+dev split only, standard library, no network. Holdout confirmed the direction;
+the argmax regressed the hard set; the shipped result is `popularity_weight`
+0.02 → 0.4 (public 0.9199 → 0.9305, every split up). Full record:
+`docs/team/rerank_signals.md` §10, `agent_changes.md` change 12.
 
 ## Idea 5 - reach deeper than rank 80
 
