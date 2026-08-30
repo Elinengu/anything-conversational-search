@@ -174,6 +174,19 @@ def build_configs(catalog: str) -> dict[str, AgentConfig]:
         "dense_rr_05_rns": AgentConfig(   # also rescore when no verbatim span exists
             use_router=True,
             rerank=RerankConfig(dense_weight=0.5, rescore_without_spans=True)),
+        # Per-track dense *retrieval* route (S5, branch dense_rerank). The
+        # stress-harness diagnostic puts the paraphrase recall tail on the
+        # browsing track, so dense_route_browse fuses the dense route into
+        # browsing only and leaves buying BM25-only - THE hypothesis.
+        # dense_route_all is the both-tracks control; _w10 pushes the dense
+        # route weight to parity with the terms route. See docs/team/dense_route.md.
+        "dense_route_browse": AgentConfig(
+            use_router=True, browsing_retrieval=RetrievalConfig(use_dense=True)),
+        "dense_route_all": AgentConfig(
+            use_router=True, retrieval=RetrievalConfig(use_dense=True)),
+        "dense_route_browse_w10": AgentConfig(
+            use_router=True,
+            browsing_retrieval=RetrievalConfig(use_dense=True, weight_dense=1.0)),
     }
 
 

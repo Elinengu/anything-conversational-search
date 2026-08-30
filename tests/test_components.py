@@ -7,6 +7,7 @@ import unittest
 from src.facets import extract
 from src.policy import ALLOWED_ATTRIBUTES, FixedPolicy, InfoGainPolicy
 from src.rerank import RerankConfig, rerank
+from src.retrieval import RetrievalConfig, retrieve
 from src.router import classify, detect_turn_intent, extract_opening_facets
 from src.state import PRE_OVERRIDE_WEIGHT, DialogState
 from src.text import constraint_spans, pair_spans, terms
@@ -451,9 +452,23 @@ class DualTrackConfigTests(unittest.TestCase):
     def test_untracked_calls_use_the_shared_config(self) -> None:
         agent = self._agent(AgentConfig())
         self.assertIs(agent._rerank_config(None), agent.config.rerank)
+        self.assertIs(agent._retrieval_config(None), agent.config.retrieval)
         self.assertIs(agent._policy_for(None), agent.config.policy)
         self.assertEqual(agent._first_recommend_turn(None, None), agent.config.first_recommend_turn)
         self.assertEqual(agent._list_size_ramp(None), agent.config.list_size_ramp)
+
+    def test_retrieval_config_is_per_track_with_shared_fallback(self) -> None:
+        shared = AgentConfig()
+        agent = self._agent(shared)
+        # No per-track override -> both tracks reuse the shared retrieval config.
+        self.assertIs(agent._retrieval_config("buying"), shared.retrieval)
+        self.assertIs(agent._retrieval_config("browsing"), shared.retrieval)
+        # Browsing-only override -> buying still falls back to shared.
+        browse = RetrievalConfig(use_dense=True)
+        agent = self._agent(AgentConfig(browsing_retrieval=browse))
+        self.assertIs(agent._retrieval_config("browsing"), browse)
+        self.assertIs(agent._retrieval_config("buying"), agent.config.retrieval)
+        self.assertIs(agent._retrieval_config(None), agent.config.retrieval)
 
     def test_buying_timing_defaults_match_the_single_track(self) -> None:
         agent = self._agent(AgentConfig())
@@ -466,6 +481,63 @@ class DualTrackConfigTests(unittest.TestCase):
         agent = self._agent(AgentConfig(route_policies=False))
         self.assertIs(agent._policy_for("buying"), agent.config.policy)
         self.assertIs(agent._policy_for("browsing"), agent.config.policy)
+
+
+class _StubTermsIndex:
+    """Fixed FTS5 ranking, ignores the query - just enough for retrieve()."""
+
+    def __init__(self, ranked: list[tuple[str, float]]) -> None:
+        self._ranked = ranked
+        self.products = {asin: {} for asin, _ in ranked}
+
+    def search_terms(self, text: str, limit: int) -> list[tuple[str, float]]:
+        return self._ranked[:limit]
+
+
+class DenseRouteTests(unittest.TestCase):
+    """S5 dense retrieval route (RetrievalConfig.use_dense)."""
+
+    @staticmethod
+    def _state() -> DialogState:
+        state = DialogState("s")
+        state.observe(1, "a lightweight waterproof jacket")
+        return state
+
+    def test_use_dense_false_is_byte_identical_to_the_no_kwarg_call(self) -> None:
+        index = _StubTermsIndex([("a", 3.0), ("b", 2.0), ("c", 1.0)])
+        state = self._state()
+        base = retrieve(index, state, RetrievalConfig())
+        self.assertEqual(retrieve(index, state, RetrievalConfig(), embed=None, qvec=None), base)
+        # A usable embed present but use_dense off -> still the exact lexical pool.
+        embed = _StubEmbed({"z": 0.99, "a": 0.2})
+        self.assertEqual(
+            retrieve(index, state, RetrievalConfig(use_dense=False), embed=embed, qvec=[1.0]),
+            base,
+        )
+
+    def test_use_dense_changes_the_fused_pool(self) -> None:
+        index = _StubTermsIndex([("a", 3.0), ("b", 2.0), ("c", 1.0)])
+        state = self._state()
+        base = retrieve(index, state, RetrievalConfig())
+        embed = _StubEmbed({"z": 0.99, "a": 0.2})  # "z" is dense-only
+        fused = retrieve(index, state, RetrievalConfig(use_dense=True), embed=embed, qvec=[1.0])
+        self.assertNotEqual(fused, base)
+        self.assertIn("z", [asin for asin, _ in fused])
+
+    def test_dense_path_swallows_embed_failure(self) -> None:
+        class _Boom:
+            available = True
+
+            def search(self, qvec, limit):
+                raise RuntimeError("no onnx here")
+
+        index = _StubTermsIndex([("a", 3.0), ("b", 2.0)])
+        state = self._state()
+        base = retrieve(index, state, RetrievalConfig())
+        self.assertEqual(
+            retrieve(index, state, RetrievalConfig(use_dense=True), embed=_Boom(), qvec=[1.0]),
+            base,
+        )
 
 
 class _StubShortlistState:
@@ -558,6 +630,10 @@ class _StubEmbed:
 
     def similarities(self, qvec, asins):
         return {a: self._sims.get(a, 0.0) for a in asins}
+
+    def search(self, qvec, limit):
+        ranked = sorted(self._sims.items(), key=lambda kv: (-kv[1], kv[0]))
+        return ranked[:limit]
 
 
 class _SplitFacets:

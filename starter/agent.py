@@ -109,6 +109,13 @@ class AgentConfig:
     #: Per-track rerank weights (S6). None on a track -> reuse ``rerank``.
     buying_rerank: RerankConfig | None = None
     browsing_rerank: RerankConfig | None = None
+    #: Per-track retrieval routes (S5). None on a track -> reuse ``retrieval``.
+    #: This is the lever for routing the dense sentence-embedding route to one
+    #: track only - the paraphrase recall tail is on the browsing track, so
+    #: ``browsing_retrieval=RetrievalConfig(use_dense=True)`` pays the ONNX encode
+    #: cost only where it helps. See docs/team/dense_route.md.
+    buying_retrieval: RetrievalConfig | None = None
+    browsing_retrieval: RetrievalConfig | None = None
     #: Per-track recommendation timing (S7), used only when use_router. A buying
     #: turn of None falls back to the router's suggested_first_recommend_turn;
     #: default 3 == the single-track value (suggested=2 was measured -0.11 buying
@@ -173,11 +180,19 @@ class Agent:
         # disclosure.
         self._buying_policy = FixedPolicy()
         self._browsing_policy = InfoGainPolicy(self.facets, expected_broad_answers=4.0)
-        # Dense sentence-embedding index for the S6 dense_weight term. Loaded only
-        # when a RerankConfig asks for it; missing artifact / deps -> None and the
-        # reranker runs BM25-only exactly as before.
+        # Dense sentence-embedding index, shared by the S5 dense retrieval route
+        # and the S6 dense_weight term. Loaded only when some config asks for it
+        # (rerank.dense_weight > 0, or any of retrieval / buying_retrieval /
+        # browsing_retrieval has use_dense=True); missing artifact / deps -> None
+        # and both stages run BM25-only exactly as before.
         self.embed = None
-        if self.config.rerank.dense_weight > 0.0 and load_embedding_index is not None:
+        needs_embed = (
+            self.config.rerank.dense_weight > 0.0
+            or self.config.retrieval.use_dense
+            or (self.config.buying_retrieval is not None and self.config.buying_retrieval.use_dense)
+            or (self.config.browsing_retrieval is not None and self.config.browsing_retrieval.use_dense)
+        )
+        if needs_embed and load_embedding_index is not None:
             try:
                 candidate = load_embedding_index(catalog_path=catalog_path)
                 self.embed = candidate if candidate.available else None
@@ -233,15 +248,18 @@ class Agent:
         # that will still dig for the constraints they have left to give.
         track = self._track(state) if self.config.use_router else None
         opening_track = route.name if route is not None else None
-        # One query vector per turn, shared by every dense consumer (only the S6
-        # dense_weight term here). None unless a RerankConfig asked for it.
+        # One query vector per turn, shared by every dense consumer: the S5 dense
+        # retrieval route (per-track via _retrieval_config) and the S6
+        # dense_weight rerank term. None unless a config asked for embeddings.
         qvec = None
         if self.embed is not None:
             try:
                 qvec = self.embed.encode_query(state.full_text())
             except Exception:
                 qvec = None
-        candidates = retrieve(self.index, state, self.config.retrieval)
+        candidates = retrieve(
+            self.index, state, self._retrieval_config(track), embed=self.embed, qvec=qvec,
+        )
         candidates = rerank(
             self.index, state, candidates, self._rerank_config(track),
             track=track, embed=self.embed, qvec=qvec,
@@ -298,6 +316,13 @@ class Agent:
         if track == "browsing" and self.config.browsing_rerank is not None:
             return self.config.browsing_rerank
         return self.config.rerank
+
+    def _retrieval_config(self, track: str | None) -> RetrievalConfig:
+        if track == "buying" and self.config.buying_retrieval is not None:
+            return self.config.buying_retrieval
+        if track == "browsing" and self.config.browsing_retrieval is not None:
+            return self.config.browsing_retrieval
+        return self.config.retrieval
 
     def _first_recommend_turn(self, track: str | None, route: object) -> int:
         if track == "buying":
