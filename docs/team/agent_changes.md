@@ -25,9 +25,14 @@ public labels and API contract were **not** touched.
 | + semantic reranking (S6b) | Elinengu | 0.9199 | 0.7981 | change 11; built, measured, **removed** (code on branch `semantic-rerank`) — cross-encoder loses on every split; oracle reranking ceiling established at +0.043 / +0.084 |
 | + popularity weight 0.02 → 0.4 | Elinengu | **0.9305** | **0.8020** | change 12; the tie-break regime fix — every split up, a hard-set miss converted; coordinate-ascent argmax measured and *not* shipped |
 | + pool-aware clarification wording | KW | 0.9305 | 0.8020 | change 13; **score-neutral by construction** — `ask_attribute` unchanged, simulator never reads `message`. Realism for Pillar II / Presentation |
+| + length tie-break / no-span rescore | Elinengu | 0.9305 | 0.8020 | change 14; **both measured and rejected — no `src/` change.** Dev moves 0.000000 for one and clears the adversarial gate at a single isolated weight for the other. Recorded in `rerank_signals.md` §5 and §11 |
 
-Net: **public 0.859 -> 0.9305, adversarial 0.684 -> 0.8020.** 73/73 tests pass.
-The thirteen core-agent changes are detailed below; supporting tooling and docs follow.
+Net: **public 0.859 -> 0.9305, adversarial 0.684 -> 0.8020.** 77/77 tests pass.
+The fourteen core-agent changes are detailed below; supporting tooling and docs follow.
+Note: subsequent, unrelated work on this branch (dynamic context programming,
+clarification-wording naturalisation) has since moved the measured public score
+past 0.9305 — see those commits' own messages and `IMPLEMENTATION.md` for the
+current figure. The net above is the total through change 14 only.
 Change 9 moved the score by exactly zero and is recorded in full anyway — a
 measured no-change is the evidence that keeps the shipped design chosen rather
 than assumed. Change 10 is the same lesson from the other side: the proposal that
@@ -918,6 +923,82 @@ direction: is there anything else that matters for this one?".
 | S4 policy | FixedPolicy: `other`, then feature-ladder | — | `src/policy.py` |
 | S7 timing | first_recommend_turn / confidence margin / earliest | 3 / 0.20 / 2 | `starter/agent.py` |
 | S7 timing | **elimination_scan / hold_until_stalled** | on / off | `starter/agent.py` |
+
+## Change 14 — Two rerank signals measured and rejected (Elinengu)
+
+**Files:** `docs/team/rerank_signals.md` (§5 addendum, new §11),
+`IMPLEMENTATION.md` §6 and the S6 idea list. **No `src/` change ships.**
+
+### Problem
+
+Change 12 fixed one half of the tie-break regime by raising `popularity_weight`.
+Two follow-ups looked like the obvious next moves, and two sessions motivated
+them:
+
+* **`public_0198`** discloses only single-word constraints (`leather`,
+  `color: black`, `PU`, `Imported`). `constraint_spans` needs two words and
+  `pair_spans` three, so `query_spans()` is empty for the whole session, the
+  no-span early return fires every turn, and the pool is served in raw retrieval
+  order. The target sits at pool rank 51 and surfaces only at **turn 9** via the
+  elimination scan — `mttc` is 20% of the technical score. §5 had rejected the
+  fix for this in the `popularity_weight` 0.02 regime; at 0.4 it looked revived.
+* **`public_0002`** is the tie-break regime in one screenshot: span 2.48, facet
+  1.0, category 2.0, tail 2.0, conflict 0 — **identical** for the target and all
+  three impostors above it. Only retrieval (which picks the impostors) and
+  popularity (which picks the target) differ. The target is a 351-token men's
+  belt; the impostors are ~100-130-token women's belts.
+
+### What changed
+
+Nothing in `src/`. Both candidates were built, measured on the proper splits, and
+reverted.
+
+The **length tie-break** was the substantive one: a pool-local length percentile
+added only to candidates whose *content* evidence ties the leader's, which
+required splitting the reranker's `total` into a content subtotal plus priors.
+The near-miss anatomy, re-derived on the **dev split alone**, supports it — length
+picks the target 33/37 and rescues 5 of the 6 near-misses popularity gets wrong,
+correlation 0.418, so it is a genuinely independent signal.
+
+### Effect
+
+| | before | after (rejected) |
+|---|---|---|
+| No-span rescore — dev | 0.941757 | **0.941757** (bit-identical) |
+| No-span rescore — holdout / hard | 0.913619 / 0.801978 | 0.918765 / 0.799968 |
+| Length tie-break — dev | 0.941757 | 0.943229 (`w=0.10`) |
+| Length tie-break — hard | **0.801978** | 0.805064 at `w=0.10`; 0.800381 at 0.08; 0.799075 at 0.12 |
+| Public set (unchanged) | 0.930502 | 0.930502 |
+| Adversarial set (unchanged) | 0.801978 | 0.801978 |
+| Tests | 69/69 | 69/69 |
+
+Neither qualifies. The no-span rescore does not move the **selector** split by a
+single digit — all four sessions it improves are on the holdout, against five
+hard-set sessions it worsens — and damping popularity in that path makes the hard
+set worse, not better (×1.0 0.799968, ×0.5 0.797753, ×0.0 0.799299), so the cost
+is the other non-span signals firing as the only evidence. The length tie-break
+clears the adversarial gate at exactly one weight with **both neighbours below
+baseline**, while dev stays flat across the whole bracket: that is an argmax on
+noise, and this project ships plateaus. Change 12's own justification was that
+0.1/0.3/0.4/0.5 were all ≥ baseline on all four splits; nothing here comes close.
+
+### What the round is actually worth
+
+The method correction, which is larger than either signal. Read off the full
+public set — as the first pass did — the no-span rescore reports **+0.0021 and
+looks shippable**. `tools/sweep.py:split_samples` partitions the public set into
+dev (120) and holdout (80), so "public 200" *contains the gate*, and every point
+of that +0.0021 came from the holdout half. Selecting on it would have spent the
+gate to buy nothing. The same applies to the near-miss anatomy: computed over all
+200 sessions it is a read of the test set, so it was re-derived on dev, where the
+length finding held (33/37) and **category-path precision died** (tied 34/37)
+despite being the signal `public_0002` makes look irresistible.
+
+The one untried route is recorded in §11 and in the S6 idea list: correct BM25's
+length normalisation at its source by recomputing a length-corrected BM25 over the
+300-candidate pool, rather than bolting a prior onto a score that is already built
+from BM25 *ranks* and has discarded the magnitudes the correction needs.
+
 
 ## Not touched (organizer-owned)
 
