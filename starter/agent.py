@@ -57,6 +57,8 @@ class AgentConfig:
     # 0.15-0.50 all beat 0.0 on dev and holdout alike; the curve is flat, so this
     # sits mid-plateau rather than at either split's argmax.
     confidence_margin: float = 0.20
+    # Buying sessions start with higher constraint density; faster Turn 2 gating.
+    buying_confidence_margin: float = 0.08
     earliest_recommend_turn: int = 2
     #: Route the customer-facing phrasing by detected intent.
     use_router: bool = True
@@ -127,6 +129,7 @@ class Agent:
         state.observe(turn, user_message)
 
         route = classify(state.opening) if self.config.use_router else None
+        is_buying = (route.name == "buying") if route else False
         candidates = retrieve(self.index, state, self.config.retrieval)
         candidates = rerank(self.index, state, candidates, self.config.rerank)
 
@@ -135,7 +138,7 @@ class Agent:
             attribute = "other"
         state.record_ask(attribute)
 
-        recommendations = self._shortlist(state, candidates, turn, top_k)
+        recommendations = self._shortlist(state, candidates, turn, top_k, is_buying=is_buying)
         question = self.config.policy.question(attribute)
         if route is not None:
             question = route.tone + question[0].lower() + question[1:]
@@ -147,12 +150,13 @@ class Agent:
         candidates: list[tuple[str, float]],
         turn: int,
         top_k: int,
+        is_buying: bool = False,
     ) -> list[dict]:
         top_limit = top_k if isinstance(top_k, int) and top_k > 0 else 10
         first_turn = self.config.first_recommend_turn
         sid = state.session_id
 
-        if turn < first_turn and not self._confident(candidates, turn):
+        if turn < first_turn and not self._confident(candidates, turn, is_buying=is_buying):
             return []
         if self.config.hold_until_stalled and turn < 10:
             # Hold every list until a turn adds no new real constraint (the "no
@@ -187,7 +191,7 @@ class Agent:
         shown.update(picks)
         return [{"parent_asin": asin} for asin in picks]
 
-    def _confident(self, candidates: list[tuple[str, float]], turn: int) -> bool:
+    def _confident(self, candidates: list[tuple[str, float]], turn: int, is_buying: bool = False) -> bool:
         """True when the leader is far enough ahead to be worth showing early.
 
         Emitting a list ends the session the moment the target appears anywhere in
@@ -195,7 +199,7 @@ class Agent:
         trades a good rank later for a poor one now; the margin test is what
         distinguishes the two cases.
         """
-        margin = self.config.confidence_margin
+        margin = self.config.buying_confidence_margin if is_buying else self.config.confidence_margin
         if margin <= 0.0 or turn < self.config.earliest_recommend_turn or len(candidates) < 2:
             return False
         best, runner_up = candidates[0][1], candidates[1][1]

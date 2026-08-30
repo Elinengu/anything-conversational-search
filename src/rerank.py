@@ -42,6 +42,9 @@ class RerankConfig:
     # Candidate facets matching the customer's stated facets (material, colour, ...).
     facet_weight: float = 0.3
     category_weight: float = 0.4
+    # Title keyword overlap and store/brand exact match to maximize MRR.
+    title_weight: float = 0.25
+    store_weight: float = 0.05
 
     # Rescore the whole retrieval pool (RetrievalConfig.pool_size), not a prefix -
     # ~12% of cluster-target sessions had the target in the pool but past rank 200,
@@ -145,6 +148,7 @@ def rerank(
 
     # Normalise retrieval scores so the two signals combine on one scale.
     top_score = max(score for _asin, score in head) or 1.0
+    opening_terms = set(terms(state.opening, drop_boilerplate=True)) if config.title_weight > 0 else set()
 
     scored: list[tuple[str, float]] = []
     for parent_asin, retrieval_score in head:
@@ -153,10 +157,27 @@ def rerank(
             scored.append((parent_asin, 0.0))
             continue
         text = product["text"]
+        title_str = (product.get("title") or "").lower()
+        store_str = (product.get("store") or "").lower()
+
         coverage = 0.0
         for span in spans:
             if span in text:
                 coverage += 1.0 + config.length_bonus * len(span.split())
+                if config.title_weight > 0 and span in title_str:
+                    coverage += config.title_weight
+
+        title_overlap_score = 0.0
+        if config.title_weight > 0 and opening_terms:
+            title_toks = set(terms(title_str, drop_boilerplate=True))
+            overlap = opening_terms.intersection(title_toks)
+            if overlap:
+                title_overlap_score = len(overlap) / (len(opening_terms) + 1.0)
+
+        store_score = 0.0
+        if config.store_weight > 0 and store_str and store_str in state.full_text().lower():
+            store_score = config.store_weight
+
         facet_score = _facet_agreement(
             state.full_text(),
             product,
@@ -171,6 +192,8 @@ def rerank(
             + config.popularity_weight * _popularity(product)
             + config.facet_weight * facet_score
             + config.category_weight * category_score
+            + config.title_weight * title_overlap_score
+            + store_score
         )
         scored.append((parent_asin, total))
 
