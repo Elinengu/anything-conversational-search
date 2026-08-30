@@ -25,16 +25,20 @@ So a decided buyer and a vague browser are drained identically, and
 
 ## 2. What the branch adds
 
-### 2a. A realism harness — `tools/dual_track_harness.py`
+### 2a. A realism harness — `tools/stress_harness.py --customer browse-gated`
 
 Keeps the buying / intent_override / boundary customers exactly as the organizer
 wrote them. Changes only the **browsing** customer: with no shopping list to
 recite, they disclose a constraint only when the agent asks a *pointed* question
 whose attribute matches (`classify_constraint`), never on a broad "anything
-else?". One wrapper around `local_evaluator.customer_reply`, restored in a
-`finally`; `evaluator/` and `data/` are never edited. `--verify` runs the wrapper
-as a no-op and asserts bit-identical scoring against the official evaluator
-(delta `0.00e+00`).
+else?". Runs a faithful copy of `evaluate()`'s loop; `evaluator/` and `data/` are
+never edited. `--verify` asserts bit-identical scoring against the official
+evaluator (delta `3.6e-07`).
+
+(The `browse-gated` stressor was originally `tools/dual_track_harness.py` on this
+branch; it is now one composable customer in the merged `tools/stress_harness.py`
+— see `docs/team/stress_harness.md`, which also adds paraphrase / decoy stressors
+and the retrieval-vs-ranking diagnostic.)
 
 ### 2b. Track-aware behaviour — `AgentConfig.use_router`
 
@@ -91,7 +95,7 @@ the flat path is untouched.
 
 ### On the realism harness — the payoff the public sim can't see
 
-`python3 tools/dual_track_harness.py --dataset data/public_set.jsonl --configs router_off,router_on`
+`python3 tools/stress_harness.py --customer browse-gated --configs router_off,router_on`
 
 | | `router_off` | `router_on` | delta |
 |---|---|---|---|
@@ -108,7 +112,7 @@ it to 95% — while leaving every buyer's number untouched.
 
 ### The misroute cost is ~10× asymmetric
 
-`python3 tools/dual_track_harness.py --misroute-matrix`
+`python3 tools/stress_harness.py --customer browse-gated --misroute-matrix`
 
 | | true buyer | true browser |
 |---|---|---|
@@ -146,14 +150,14 @@ which until now was only asserted.
 ## 5. Reproduction
 
 ```
-git checkout dual_tracking
-python3 -m unittest discover -s tests -t .                      # 89 tests
-python3 tools/sweep.py --split holdout --configs router_off     # == pre-branch floor
-python3 -m evaluator.local_evaluator                            # public, use_router on
-python3 tools/hard_cases.py --run                               # per-bucket
-python3 tools/dual_track_harness.py --verify --split holdout    # delta 0
-python3 tools/dual_track_harness.py --dataset data/public_set.jsonl --configs router_off,router_on
-python3 tools/dual_track_harness.py --misroute-matrix
+git checkout stress_harness            # dual_tracking + the merged harness
+python3 -m unittest discover -s tests -t .                          # 95 tests
+python3 tools/sweep.py --split holdout --configs router_off         # == pre-branch floor
+python3 -m evaluator.local_evaluator                                # public, use_router on
+python3 tools/hard_cases.py --run                                   # per-bucket
+python3 tools/stress_harness.py --verify                            # delta 3.6e-07
+python3 tools/stress_harness.py --customer browse-gated --configs router_off,router_on
+python3 tools/stress_harness.py --customer browse-gated --misroute-matrix
 ```
 
 ## 6. Files
@@ -161,7 +165,8 @@ python3 tools/dual_track_harness.py --misroute-matrix
 `starter/agent.py` (AgentConfig fields, `_track` / `_policy_for` / `_rerank_config`
 / `_first_recommend_turn` / `_list_size_ramp`, `_shortlist` threading),
 `src/rerank.py` (`track` kwarg, `RerankConfig.hard_filter`, banish branch),
-`tools/dual_track_harness.py` (new), `tools/sweep.py` (`router_off` / `router_on`
-/ `router_on_hardfilter` rows), `tests/test_components.py` (+10),
-`tests/test_dual_track_harness.py` (new, +6). `src/router.py` unchanged —
-`detect_turn_intent` was already there, just never called.
+`tools/sweep.py` (`router_off` / `router_on` / `router_on_hardfilter` rows),
+`tests/test_components.py` (+10). The `browse-gated` customer and its tests live
+in `tools/stress_harness.py` / `tests/test_stress_harness.py` (branch
+`stress_harness`). `src/router.py` unchanged — `detect_turn_intent` was already
+there, just never called.

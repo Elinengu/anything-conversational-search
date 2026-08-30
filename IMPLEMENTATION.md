@@ -521,7 +521,7 @@ in the right direction: …"; a buying customer hears "To narrow this down: …"
 product requirement even where it is not a scoring one, and the measurement is recorded in the
 module docstring so the next reader doesn't repeat the experiment.
 
-#### Branch `dual_tracking` — routing the *behaviour*, and a harness that can score it
+#### Branch `dual_tracking` / `stress_harness` — routing the *behaviour*, and a harness that can score it
 
 On the branch `dual_tracking` (not merged to `main`), `AgentConfig.use_router` is
 widened: the track now drives the clarification policy (buying → `FixedPolicy`,
@@ -534,18 +534,29 @@ Why it stayed on a branch: on the fully-cooperative public simulator this costs
 ~0.013 (public 0.9305 → 0.9177, dev 0.9418 → 0.9268, holdout 0.9136 → 0.9041,
 one adversarial bucket −0.013) and gains nothing, because that simulator hands
 over every constraint on the broad "anything else?" question regardless of track.
-`tools/dual_track_harness.py` makes the browsing customer realistic — it discloses
-only when asked a pointed question — and there routing lifts browsing Hit@10 0.59
-→ 0.95 and MRR 0.24 → 0.67 (+0.147 overall) with buyers unchanged, and the
-misroute cost comes out ~10× asymmetric (browser-as-buyer −0.66 MRR vs
-buyer-as-browser −0.07). Full write-up: `docs/team/dual_track_routing.md`.
+`tools/stress_harness.py --customer browse-gated` makes the browsing customer
+realistic — it discloses only when asked a pointed question — and there routing
+lifts browsing Hit@10 0.59 → 0.95 and MRR 0.24 → 0.67 (+0.147 overall) with
+buyers unchanged; misroute cost is ~10× asymmetric (browser-as-buyer −0.66 MRR
+vs buyer-as-browser −0.07). The `stress_harness` branch also composes that with
+paraphrase, and its retrieval diagnostic shows the real gap: under a
+gated + paraphrasing browser, **9/80 browsing targets never enter the pool** vs
+1/80 for buyers — the retrieval weakness is on the browsing track. Write-ups:
+`docs/team/dual_track_routing.md`, `docs/team/stress_harness.md`.
 
 #### Ideas for this stage
 
 - ~~**Route the *question*, not the retrieval.**~~ **Done on branch `dual_tracking`**
   (`starter/agent.py` `_policy_for` / `_track`): buying keeps the broad question,
   browsing runs `InfoGainPolicy`. Measured net-negative on the public simulator,
-  strongly positive on `tools/dual_track_harness.py`.
+  strongly positive on `tools/stress_harness.py --customer browse-gated`.
+- **Route the *retrieval* for browsers (not buyers).** The `stress_harness`
+  diagnostic shows a gated + paraphrasing browser loses 9/80 targets out of the
+  300-pool (buyers: 1/80). A browsing-only query-expansion route, or a
+  category-only fallback when disclosure is too sparse to form a query, is the
+  next lever — and it is the *opposite* of "narrow the buyer's pool" (buyers are
+  the healthy case; `rerank.py:depth=300` exists because targets already sit deep
+  in BM25 order).
 - **Detect scenario, not just track.** The router distinguishes two of four scenarios. Detecting
   *boundary* customers (people who answer "I have no preference") early would let the agent stop
   spending questions on someone who won't answer them — currently that is only learned after a
