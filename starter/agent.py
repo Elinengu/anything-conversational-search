@@ -39,6 +39,11 @@ from src.retrieval import RetrievalConfig, retrieve  # noqa: E402
 from src.router import classify, detect_turn_intent  # noqa: E402
 from src.state import DialogState  # noqa: E402
 
+try:  # optional dense sentence-embedding signal - needs onnxruntime + tokenizers
+    from src.embed import load_embedding_index  # noqa: E402
+except Exception:  # pragma: no cover
+    load_embedding_index = None  # type: ignore[assignment]
+
 
 @dataclass
 class AgentConfig:
@@ -168,6 +173,16 @@ class Agent:
         # disclosure.
         self._buying_policy = FixedPolicy()
         self._browsing_policy = InfoGainPolicy(self.facets, expected_broad_answers=4.0)
+        # Dense sentence-embedding index for the S6 dense_weight term. Loaded only
+        # when a RerankConfig asks for it; missing artifact / deps -> None and the
+        # reranker runs BM25-only exactly as before.
+        self.embed = None
+        if self.config.rerank.dense_weight > 0.0 and load_embedding_index is not None:
+            try:
+                candidate = load_embedding_index(catalog_path=catalog_path)
+                self.embed = candidate if candidate.available else None
+            except Exception:
+                self.embed = None
         self._states: dict[str, DialogState] = {}
         # last track decided per session - promotion to "buying" is sticky and
         # one-way (see _track).
@@ -218,9 +233,18 @@ class Agent:
         # that will still dig for the constraints they have left to give.
         track = self._track(state) if self.config.use_router else None
         opening_track = route.name if route is not None else None
+        # One query vector per turn, shared by every dense consumer (only the S6
+        # dense_weight term here). None unless a RerankConfig asked for it.
+        qvec = None
+        if self.embed is not None:
+            try:
+                qvec = self.embed.encode_query(state.full_text())
+            except Exception:
+                qvec = None
         candidates = retrieve(self.index, state, self.config.retrieval)
         candidates = rerank(
-            self.index, state, candidates, self._rerank_config(track), track=track
+            self.index, state, candidates, self._rerank_config(track),
+            track=track, embed=self.embed, qvec=qvec,
         )
 
         attribute = self._policy_for(opening_track).select(state, candidates)

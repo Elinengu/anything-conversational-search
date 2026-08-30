@@ -316,6 +316,27 @@ class RerankTests(unittest.TestCase):
         self.assertEqual(ranked[0][0], "right")
         self.assertEqual(ranked[-1][0], "wrong")
 
+    def test_dense_weight_zero_is_a_noop(self) -> None:
+        index = _StubIndex({"a": {"text": "cotton shirt grey"}, "b": {"text": "cotton shirt black"}})
+        state = DialogState("s")
+        state.observe(1, "I'm looking for shirts")
+        state.observe(2, "For that, what matters is: cotton shirt.")
+        pool = [("a", 1.0), ("b", 0.5)]
+        base = rerank(index, state, list(pool), RerankConfig())
+        self.assertEqual(base, rerank(index, state, list(pool), RerankConfig(dense_weight=0.0),
+                                      embed=_StubEmbed(), qvec=[1.0]))
+
+    def test_dense_term_reorders_toward_the_semantic_match(self) -> None:
+        # identical lexical evidence; the stub embed says "b" is the closer meaning.
+        index = _StubIndex({"a": {"text": "cotton shirt classic"}, "b": {"text": "cotton shirt classic"}})
+        state = DialogState("s")
+        state.observe(1, "I'm looking for shirts")
+        state.observe(2, "For that, what matters is: cotton shirt.")
+        embed = _StubEmbed({"a": 0.5, "b": 0.9})
+        ranked = rerank(index, state, [("a", 1.0), ("b", 0.9)],
+                        RerankConfig(dense_weight=2.0), embed=embed, qvec=[1.0])
+        self.assertEqual(ranked[0][0], "b")
+
     def test_hard_filter_keeps_the_slate_when_every_candidate_contradicts(self) -> None:
         index = _StubIndex({
             "a": {"text": "cotton shirt black only"},
@@ -522,6 +543,21 @@ class _StubFacets:
 class _StubIndex:
     def __init__(self, products: dict[str, dict]) -> None:
         self.products = products
+
+
+class _StubEmbed:
+    """Stands in for src.embed.EmbeddingIndex - fixed cosine per asin."""
+
+    available = True
+
+    def __init__(self, sims: dict[str, float] | None = None) -> None:
+        self._sims = sims or {}
+
+    def encode_query(self, text: str):
+        return [1.0]
+
+    def similarities(self, qvec, asins):
+        return {a: self._sims.get(a, 0.0) for a in asins}
 
 
 class _SplitFacets:

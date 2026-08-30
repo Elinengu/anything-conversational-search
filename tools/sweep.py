@@ -161,6 +161,19 @@ def build_configs(catalog: str) -> dict[str, AgentConfig]:
             use_router=True,
             buying_rerank=RerankConfig(hard_filter=True),
         ),
+        # Dense sentence-embedding cosine as an S6 rerank signal (branch
+        # dense_rerank). The only S6 term that scores meaning rather than exact
+        # tokens - the paraphrase hypothesis. 0.0 is router_on; these bracket the
+        # weight. `_spans` encodes the disclosed spans instead of full_text.
+        "dense_rr_02": AgentConfig(use_router=True, rerank=RerankConfig(dense_weight=0.2)),
+        "dense_rr_05": AgentConfig(use_router=True, rerank=RerankConfig(dense_weight=0.5)),
+        "dense_rr_10": AgentConfig(use_router=True, rerank=RerankConfig(dense_weight=1.0)),
+        "dense_rr_15": AgentConfig(use_router=True, rerank=RerankConfig(dense_weight=1.5)),
+        "dense_rr_05_spans": AgentConfig(
+            use_router=True, rerank=RerankConfig(dense_weight=0.5, dense_query="spans")),
+        "dense_rr_05_rns": AgentConfig(   # also rescore when no verbatim span exists
+            use_router=True,
+            rerank=RerankConfig(dense_weight=0.5, rescore_without_spans=True)),
     }
 
 
