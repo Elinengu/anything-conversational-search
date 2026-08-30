@@ -38,7 +38,6 @@ Everything under [`team/`](team/) is ours to edit freely.
 | [`team/category_tail_match.md`](team/category_tail_match.md) | The last public-set miss, and the evidence that the fix does not overfit |
 | [`team/reranking_explained.md`](team/reranking_explained.md) | How the reranking stage works, from first principles |
 | [`team/intent_override_retrieval.md`](team/intent_override_retrieval.md) | Handling the intent-override scenario in retrieval |
-| [`team/semantic_rerank_setup.md`](team/semantic_rerank_setup.md) | How to enable the optional S6b neural reranker: install, model download, verification |
 
 Each `.md` has a `.pdf` rendering beside it.
 

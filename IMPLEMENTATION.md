@@ -1127,7 +1127,7 @@ not repeat the experiment.
 | **Turn-1 exclusion from facet extraction** | public 0.9159 → 0.9150, holdout 0.9048 → 0.9035 | Rejected. Removes every false conflict against the target (8 public, 5 hard) and still loses — the opening's category words are a real constraint, and the impostors they demote outweigh the targets they cost. |
 | **Multi-valued facet extraction** | agreement −0.0006 public / −0.0023 hard; conflict-only 0.0000 | Rejected. The agreement half dilutes the signal by matching more candidates; the conflict half is exactly neutral and was not shipped, because a code path no measurement justifies does not earn its place. |
 | **Explicit constraint ledger (S3)** | not built | Cancelled after specifying and measuring all six operations — see below. |
-| **Neural cross-encoder reranking (S6b)** | dev 0.9268 → 0.9211, hard 0.7981 → 0.7944 | Built, measured, kept off. Loses on every split and every setting; the optimum semantic weight is zero. `src/semantic.py`. |
+| **Neural cross-encoder reranking (S6b)** | dev 0.9268 → 0.9211, hard 0.7981 → 0.7944 | Built, measured, removed. Loses on every split and every setting; the optimum semantic weight is zero. Code preserved on branch `semantic-rerank`. |
 
 **The constraint ledger, and why measuring a design beats arguing about it.** A typed
 `Constraint` ledger (slot, value, turn, polarity, status) with CARRY / UPDATE / ADD / DELETE /
@@ -1196,10 +1196,11 @@ Cost, for the record: mean turn latency 30.7 ms → 389.8 ms, p95 73.7 ms → 13
 1.48 s, with the gate firing on 28% of rerank calls. `docs/competition_specification.md` notes that
 timeouts may count as a miss, so even a *positive* result at this latency would have needed care.
 
-The stage stays in the tree, disabled, because the measurement is the deliverable — full numbers in
-`docs/team/rerank_signals.md`. It is not a parked option: nothing selects it, no reported score
-depends on it, and with it off every session's rank and turn is bit-identical to the pipeline
-without it.
+The stage was removed from the working branch and preserved on `semantic-rerank`: it never ran on
+the scored path — disabled by default, and a silent no-op without its gitignored weights — so
+carrying it would have meant carrying a dependency manifest and a download tool for code that never
+executed. The measurement is the deliverable, and it survives in full in
+`docs/team/rerank_signals.md` §9, along with the oracle ceiling it established.
 
 **A bug worth learning from.** The first version of `InfoGainPolicy` opened every conversation by
 asking the customer's preferred *brand*. The cause was using raw entropy: brand has thousands of

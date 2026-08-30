@@ -22,7 +22,7 @@ public labels and API contract were **not** touched.
 | + pair spans + word-bounded matching | Elinengu | **0.9159** | **0.7944** | keep key:value associations intact; worst hard bucket +4.7 MRR pts |
 | + constraint-ledger investigation | Elinengu | 0.9159 | 0.7944 | change 9; **no code shipped** — six ledger operations measured, all flat or worse; corrected a wrong diagnosis in `src/rerank.py`; two dead functions deleted |
 | + narrow first slate `(4,10)` | Elinengu | **0.9199** | **0.7981** | change 10; one config default. Started as a conditional-MMR assessment — MMR measured and rejected, the deferral it stumbled on kept |
-| + semantic reranking (S6b) | Elinengu | 0.9199 | 0.7981 | change 11; built, measured, **kept off** — cross-encoder loses on every split; oracle reranking ceiling established at +0.043 / +0.084 |
+| + semantic reranking (S6b) | Elinengu | 0.9199 | 0.7981 | change 11; built, measured, **removed** (code on branch `semantic-rerank`) — cross-encoder loses on every split; oracle reranking ceiling established at +0.043 / +0.084 |
 | + popularity weight 0.02 → 0.4 | Elinengu | **0.9305** | **0.8020** | change 12; the tie-break regime fix — every split up, a hard-set miss converted; coordinate-ascent argmax measured and *not* shipped |
 
 Net: **public 0.859 -> 0.9305, adversarial 0.684 -> 0.8020.** 70/70 tests pass.
@@ -612,11 +612,18 @@ at once, not that any single split is decisive.
 
 ---
 
-## Change 11 — Neural cross-encoder reranking, built and measured off (Elinengu)
+## Change 11 — Neural cross-encoder reranking, built, measured, removed (Elinengu)
 
-**Files:** `src/semantic.py` (new), `tools/fetch_model.py` (new), `requirements.txt`
-(new), `starter/agent.py`, `tools/sweep.py`, `tests/test_components.py`,
-`README.md`, `ARCHITECTURE.md`, `.gitignore`
+> **Removed from this branch.** The stage never ran on the scored path — off by
+> default, and a no-op without the gitignored weights — so it was deleted rather
+> than carried as unused dependency-bearing code. Full working state preserved on
+> the **`semantic-rerank`** branch. The measurements below stand; they produced the
+> oracle ceiling that change 12 then exploited.
+
+**Files (on branch `semantic-rerank`):** `src/semantic.py`, `tools/fetch_model.py`,
+`requirements.txt`, `docs/team/semantic_rerank_setup.md`, plus wiring in
+`starter/agent.py`, `tools/sweep.py`, `tests/test_components.py`, `README.md`,
+`ARCHITECTURE.md`, `.gitignore`
 
 ### Problem
 

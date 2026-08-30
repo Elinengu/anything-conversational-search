@@ -20,9 +20,9 @@ from facet extraction and multi-valued facet extraction were both measured and
 rejected, and the explicit constraint ledger was specified operation by
 operation and not built. That round also corrected the stated diagnosis in §1 —
 the `focused_text()` guard is right, but not for the reason first recorded.
-§9 is the one signal that was fully built and still not switched on: a neural
+§9 is the one signal that was fully built and then removed: a neural
 cross-encoder, which loses on every split and every setting, and whose optimum
-weight is zero. It also establishes the oracle ceiling — +0.043 public, +0.084
+weight is zero (its code now lives on the `semantic-rerank` branch). It also establishes the oracle ceiling — +0.043 public, +0.084
 hard — that bounds every future reranking idea in this document. §10 dissects
 where that ceiling actually lives (a pure tie-break regime in which the
 retrieval score picks the impostor 33/33 and popularity picks the target
@@ -524,7 +524,16 @@ express — and the `PRE_OVERRIDE_WEIGHT` tuning / slot-erasure ideas in
 
 ---
 
-## 9. Built, measured and kept off: neural cross-encoder reranking (S6b)
+## 9. Built, measured, and removed: neural cross-encoder reranking (S6b)
+
+> **Status: removed from the working branch.** The stage was never used — off by
+> default, and a no-op even when enabled without weights — so the code was
+> deleted rather than carried as an unused dependency-bearing module. It is
+> preserved in full on the **`semantic-rerank`** branch (`src/semantic.py`,
+> `tools/fetch_model.py`, `requirements.txt`,
+> `docs/team/semantic_rerank_setup.md`), reproducible with the commands in
+> §12. Everything below is the measurement, which is the reason the section
+> stays.
 
 ### The ceiling, measured first
 
@@ -598,15 +607,20 @@ details. The task it was handed — separating cluster-mates that share every
 stated facet — is also the hardest discrimination in the pool, which is exactly
 why it was chosen and exactly why a mismatched model has nothing to add.
 
-### Kept, not deleted
+### Why it was removed rather than parked
 
-Unlike the rejected signals above, this module stays in the tree, disabled. The
-reproducible measurement is the deliverable against the "semantic reranking"
-innovation direction, and `requirements.txt` plus `tools/fetch_model.py` let
-anyone re-run it. It is not a parked option: nothing selects it, no reported
-score depends on it, and with the stage off every session's rank and turn is
-bit-identical to the pipeline without it — verified by stashing the branch and
-re-running both sets.
+It was first kept in the tree, disabled, as a reproducible artifact. That was
+the wrong call by this repo's own rule — dead options are deleted, not parked —
+and the stage was doubly dead: off by default, and a silent no-op even when
+enabled, because the weights it needs are gitignored and absent on any clean
+clone. It was never on the scored path for a single evaluation. Carrying it
+meant carrying a `requirements.txt`, a download tool, an ONNX runtime import
+path and a macOS teardown quirk for code that never ran.
+
+So the code moved to the **`semantic-rerank`** branch and this section kept the
+numbers. Nothing measured is lost: the branch is one `git checkout` away and
+§12 carries the commands. The oracle ceiling this work established (+0.043
+public, +0.084 hard) outlived the code and directly produced §10.
 
 ### One sub-signal that was deleted
 
@@ -762,6 +776,7 @@ python3 -m evaluator.local_evaluator \
     --dataset data/hard_set.jsonl                # 0.7944
 python3 tools/sweep.py --split dev \
     --configs conflict00,conflict04,pair00,pair08   # the ablation rows
+git checkout semantic-rerank                        # §9 lives on its own branch
 pip install -r requirements.txt && python3 tools/fetch_model.py
 python3 tools/sweep.py --split dev \
     --configs semantic_off,semantic_on              # §9, needs the model
