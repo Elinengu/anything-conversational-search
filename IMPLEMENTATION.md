@@ -1462,7 +1462,7 @@ aimed at it.
 
 | | |
 |---|---|
-| Model / API | **None by default.** No LLM, no network, no credentials required. An optional Gemini polish layer (`src/llm.py`, `GEMINI_API_KEY`) restyles clarification wording only (`src/phrasing.py`) and never touches `ask_attribute` or retrieval/rerank/routing decisions; unset or unreachable, the agent is bit-identical to the offline path below. |
+| Model / API | **None by default.** No LLM, no network, no credentials required. An optional DeepSeek polish layer (`src/llm.py`, `DEEPSEEK_API_KEY`) restyles clarification wording only (`src/phrasing.py`) and never touches `ask_attribute` or retrieval/rerank/routing decisions; unset or unreachable, the agent is bit-identical to the offline path below. |
 | Dependencies | Python standard library only |
 | Cost | $0.00 |
 | Tokens | 0 prompt, 0 completion |

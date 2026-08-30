@@ -26,8 +26,8 @@ vocabularies (``src/facets.py`` VOCABULARIES) are small enough that "which
 facet, top few values, which template" is enumerable, exactly like the rest of
 the pipeline.
 
-An optional Gemini polish pass (``_llm_polish``, ``src/llm.py``) restyles the
-already-computed template sentence for fluency when ``GEMINI_API_KEY`` is
+An optional DeepSeek polish pass (``_llm_polish``, ``src/llm.py``) restyles the
+already-computed template sentence for fluency when ``DEEPSEEK_API_KEY`` is
 configured. It never chooses the facet, the values, or ``ask_attribute`` -
 only wording - and on any missing key, network failure, or malformed reply it
 falls straight back to the deterministic template text. ``ask_attribute`` and
@@ -323,12 +323,12 @@ def _grounded(
 
 
 def _llm_polish(text: str) -> str:
-    """Optional Gemini restyling of an already-computed, pool-grounded question.
+    """Optional DeepSeek restyling of an already-computed, pool-grounded question.
 
     ``text`` is the deterministic question - the source of truth and the return
-    value whenever no ``GEMINI_API_KEY`` is configured, the request fails for any
+    value whenever no ``DEEPSEEK_API_KEY`` is configured, the request fails for any
     reason (network down, timeout, bad response), or the reply does not look
-    like a single clean sentence. Gemini only restyles wording here; it is never
+    like a single clean sentence. DeepSeek only restyles wording here; it is never
     asked to choose a fact, a facet, or a value, so a bad response can only ever
     degrade back to the original template text, never invent a claim.
     """

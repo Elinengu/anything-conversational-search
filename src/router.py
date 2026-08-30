@@ -174,10 +174,10 @@ def extract_opening_facets(text: str) -> dict[str, tuple[str, ...]]:
 
 
 def _llm_route_hint(text: str) -> Route | None:
-    """Optional Gemini-backed routing hint. Returns None when the client is
+    """Optional DeepSeek-backed routing hint. Returns None when the client is
     unavailable, unreachable, or returns anything that doesn't parse cleanly.
 
-    ``GeminiClient.generate``/``generate_json`` already catch network and
+    ``DeepSeekClient.generate``/``generate_json`` already catch network and
     parsing errors internally, but this call site guards independently too -
     a caller here must never propagate an exception into ``classify()``, which
     has no caller of its own that treats a raised exception as anything softer
@@ -230,7 +230,7 @@ def classify(opening: str) -> Route:
     real behaviour downstream (rerank weights, recommendation timing, the
     clarification policy), so letting a network call override a confident,
     tuned decision would trade a measured score floor for an unmeasured one. An
-    optional Gemini hint is consulted only to break a tie on the small residue
+    optional DeepSeek hint is consulted only to break a tie on the small residue
     of openings this classifier itself is unsure about (see the ``ambiguous``
     branch below) - never to overrule a confident deterministic call, and only
     ever when configured, reachable, and returning a well-formed answer.
@@ -287,7 +287,7 @@ def classify(opening: str) -> Route:
     else:
         # Neither cue list matched with any real signal - the deterministic
         # classifier is guessing (browsing, as the safe default). This is the
-        # one case the optional Gemini hint is allowed to break the tie for.
+        # one case the optional DeepSeek hint is allowed to break the tie for.
         name = "browsing"
         tone = "To point you in the right direction: "
         confidence = 0.5

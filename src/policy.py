@@ -227,7 +227,7 @@ class InfoGainPolicy:
     #
     # ``select`` only ever returns an ``ALLOWED_ATTRIBUTES`` value - it is what
     # the simulator reads as ``ask_attribute`` and the response contract requires
-    # it. Rewording *how* the question is asked (an optional Gemini polish layer)
+    # it. Rewording *how* the question is asked (an optional DeepSeek polish layer)
     # happens downstream in ``src/phrasing.py::clarify``, never here - that keeps
     # this policy deterministic and keeps a flaky LLM call from ever being able
     # to turn a valid attribute into an invalid one.

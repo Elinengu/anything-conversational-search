@@ -1,8 +1,8 @@
 """Shared LLM adapter for the shopping agent.
 
-This is the only module allowed to talk to the remote Gemini API. The routing,
-policy, and orchestration layers should depend on this adapter rather than
-issuing HTTP requests or importing Google's SDK directly.
+This is the only module allowed to talk to the remote DeepSeek API. The
+routing, policy, and orchestration layers should depend on this adapter
+rather than issuing HTTP requests directly.
 """
 
 from __future__ import annotations
@@ -37,17 +37,18 @@ else:
             os.environ.setdefault(key.strip(), value.strip())
 
 
-DEFAULT_GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
-_DEFAULT_API_URL = "https://generativelanguage.googleapis.com/v1beta/models"
+DEFAULT_DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+_DEFAULT_API_URL = "https://api.deepseek.com/chat/completions"
 
 
-class GeminiClient:
-    """Thin client for Gemini-backed LLM features.
+class DeepSeekClient:
+    """Thin client for DeepSeek-backed LLM features.
 
-    The rest of the project should call this adapter instead of reaching into the
-    Google API directly. When the environment variable ``GEMINI_API_KEY`` is not
-    set, the client degrades gracefully and returns ``None`` so the deterministic
-    rule-based pipeline continues to work.
+    The rest of the project should call this adapter instead of reaching into
+    DeepSeek's (OpenAI-compatible) chat-completions API directly. When the
+    environment variable ``DEEPSEEK_API_KEY`` is not set, the client degrades
+    gracefully and returns ``None`` so the deterministic rule-based pipeline
+    continues to work.
     """
 
     def __init__(
@@ -56,8 +57,8 @@ class GeminiClient:
         model: str | None = None,
         timeout: int = 30,
     ) -> None:
-        self.api_key = api_key or os.getenv("GEMINI_API_KEY")
-        self.model = model or DEFAULT_GEMINI_MODEL
+        self.api_key = api_key or os.getenv("DEEPSEEK_API_KEY")
+        self.model = model or DEFAULT_DEEPSEEK_MODEL
         self.timeout = timeout
 
     @property
@@ -65,16 +66,16 @@ class GeminiClient:
         return bool(self.api_key) and requests is not None
 
     def _url(self) -> str:
-        return f"{_DEFAULT_API_URL}/{self.model}:generateContent"
+        return _DEFAULT_API_URL
 
     def _headers(self) -> dict[str, str]:
         return {
             "Content-Type": "application/json",
-            "x-goog-api-key": self.api_key or "",
+            "Authorization": f"Bearer {self.api_key or ''}",
         }
 
     def generate(self, prompt: str, *, system_prompt: str | None = None) -> str | None:
-        """Generate a text response from Gemini.
+        """Generate a text response from DeepSeek.
 
         Returns ``None`` when no API key is configured or the request fails so the
         calling code can safely fall back to deterministic logic.
@@ -82,12 +83,17 @@ class GeminiClient:
         if not self.is_configured:
             return None
 
-        body: dict[str, Any] = {
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"temperature": 0.2},
-        }
+        messages: list[dict[str, str]] = []
         if system_prompt:
-            body["system_instruction"] = {"parts": [{"text": system_prompt}]}
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+
+        body: dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": 0.2,
+            "stream": False,
+        }
 
         try:
             response = requests.post(
@@ -98,19 +104,17 @@ class GeminiClient:
             )
             response.raise_for_status()
             payload = response.json()
-            candidates = payload.get("candidates") or []
-            if not candidates:
+            choices = payload.get("choices") or []
+            if not choices:
                 return None
-            parts = candidates[0].get("content", {}).get("parts") or []
-            if not parts:
-                return None
-            text = parts[0].get("text")
+            message = choices[0].get("message") or {}
+            text = message.get("content")
             return text if isinstance(text, str) else None
         except Exception:
             return None
 
     def generate_json(self, prompt: str, *, system_prompt: str | None = None) -> dict[str, Any] | None:
-        """Generate a JSON object from Gemini when the prompt asks for structured output."""
+        """Generate a JSON object from DeepSeek when the prompt asks for structured output."""
         text = self.generate(prompt, system_prompt=system_prompt)
         if text is None:
             return None
@@ -120,9 +124,9 @@ class GeminiClient:
             return {"raw_text": text}
 
 
-def get_llm_client() -> GeminiClient:
-    """Return the shared default Gemini client for the application."""
-    return GeminiClient()
+def get_llm_client() -> DeepSeekClient:
+    """Return the shared default DeepSeek client for the application."""
+    return DeepSeekClient()
 
 
 DEFAULT_LLM_CLIENT = get_llm_client()
