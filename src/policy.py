@@ -226,15 +226,31 @@ class InfoGainPolicy:
 
     # ---- interface ------------------------------------------------------------
 
-    def _llm_question_hint(self, state: DialogState, candidates: list[tuple[str, float]], selected_attribute: str) -> str:
-        """Optional Gemini hint for better rewording of the next question.
+    def _llm_question_hint(
+        self,
+        state: DialogState,
+        candidates: list[tuple[str, float]],
+        selected_attribute: str,
+        *,
+        gains: dict[str, float] | None = None,
+    ) -> str:
+        """Optional Gemini hint for better wording when the choice is genuinely ambiguous.
 
-        This keeps the deterministic policy in charge of choosing *what* to ask;
-        Gemini only helps with *how* to ask it when a key is configured.
+        The attribute selection remains deterministic and rule-based. Gemini only
+        rewrites the natural-language question when the top choice is weakly
+        separated from the runner-up or when the policy is asking a broad question.
         """
         client = get_llm_client()
         if not client.is_configured:
-            return selected_attribute
+            return QUESTION_TEXT.get(selected_attribute, QUESTION_TEXT["other"])
+
+        if gains is not None:
+            ranked = sorted(gains.items(), key=lambda item: item[1], reverse=True)
+            if len(ranked) >= 2:
+                best_score = ranked[0][1]
+                runner_up = ranked[1][1]
+                if best_score - runner_up > 0.05:
+                    return QUESTION_TEXT.get(selected_attribute, QUESTION_TEXT["other"])
 
         prompt = (
             "You are helping a shopping assistant choose the next clarifying question. "
@@ -244,8 +260,8 @@ class InfoGainPolicy:
         )
         question = client.generate(prompt)
         if not question:
-            return selected_attribute
-        return selected_attribute
+            return QUESTION_TEXT.get(selected_attribute, QUESTION_TEXT["other"])
+        return question.strip()
 
     def select(self, state: DialogState, candidates: list[tuple[str, float]]) -> str:
         # Two reasons to ask broadly, both evidence-driven rather than prior-driven:
@@ -267,7 +283,7 @@ class InfoGainPolicy:
         ):
             for attribute in self.BROAD:
                 if attribute not in state.dead_attributes:
-                    return self._llm_question_hint(state, candidates, attribute)
+                    return attribute
 
         gains = self.scores(state, candidates)
         attribute, best = max(gains.items(), key=lambda item: (item[1], item[0]))
@@ -276,9 +292,20 @@ class InfoGainPolicy:
             # most open-ended question rather than repeating a dead one.
             for candidate in ("feature", "other", "style"):
                 if candidate not in state.dead_attributes:
-                    return self._llm_question_hint(state, candidates, candidate)
-            return self._llm_question_hint(state, candidates, "other")
-        return self._llm_question_hint(state, candidates, attribute)
+                    return candidate
+            return "other"
+        return attribute
 
     def question(self, attribute: str) -> str:
-        return QUESTION_TEXT.get(attribute, QUESTION_TEXT["other"])
+        text = QUESTION_TEXT.get(attribute, QUESTION_TEXT["other"])
+        client = get_llm_client()
+        if not client.is_configured:
+            return text
+        # Gemini is optional: only used to smooth wording when the policy is
+        # already choosing a valid attribute. The selection API itself must remain
+        # the deterministic contract value.
+        return self._llm_question_hint(
+            DialogState("llm-question"),
+            [("placeholder", 1.0)],
+            attribute,
+        ) if attribute in ALLOWED_ATTRIBUTES else text

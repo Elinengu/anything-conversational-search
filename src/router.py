@@ -173,6 +173,11 @@ def extract_opening_facets(text: str) -> dict[str, tuple[str, ...]]:
     return results
 
 
+def detect_intent_override(text: str) -> bool:
+    """True when the customer explicitly reverses or revises a prior preference."""
+    return bool((text or "") and OVERRIDE_CUES.search(text))
+
+
 def route_with_tie_breaker(
     buying_score: float,
     browsing_score: float,
@@ -180,12 +185,19 @@ def route_with_tie_breaker(
     tie_breaker: callable | None = None,
     high_confidence_margin: float = 0.6,
     strong_signal_threshold: float = 1.5,
+    override_detected: bool = False,
 ) -> str:
     """Choose a route with a confidence gate and explicit tie-breaker fallback.
 
-    This matches the PR1 design: strong signals route immediately, ambiguous ones
-    defer to the tie-breaker rather than forcing a brittle all-or-nothing decision.
+    When the customer explicitly reverses their prior intent, the new intent
+    should dominate the route decision rather than being buried under stale cues.
     """
+    if override_detected:
+        if buying_score > browsing_score:
+            return "buying"
+        if browsing_score > buying_score:
+            return "browsing"
+
     if buying_score >= strong_signal_threshold and buying_score >= browsing_score + high_confidence_margin:
         return "buying"
     if browsing_score >= strong_signal_threshold and browsing_score >= buying_score + high_confidence_margin:
@@ -281,7 +293,12 @@ def classify(opening: str) -> Route:
     # Strong evidence returns immediately; ambiguous scores intentionally defer to
     # the tie-breaker so that near-equal signals do not trigger a brittle route.
     tie_breaker = lambda b_score, br_score: "browsing" if br_score >= b_score else "buying"
-    name = route_with_tie_breaker(b_score, br_score, tie_breaker=tie_breaker)
+    name = route_with_tie_breaker(
+        b_score,
+        br_score,
+        tie_breaker=tie_breaker,
+        override_detected=bool(override_matches),
+    )
 
     # Gemini is only used for genuinely ambiguous routing decisions, not for every
     # message in the evaluator. This avoids burning quota on routine traffic while

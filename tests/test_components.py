@@ -7,7 +7,7 @@ import unittest
 from src.facets import extract
 from src.policy import ALLOWED_ATTRIBUTES, FixedPolicy, InfoGainPolicy
 from src.rerank import RerankConfig, rerank
-from src.router import classify, detect_turn_intent, extract_opening_facets, route_with_tie_breaker
+from src.router import classify, detect_turn_intent, extract_opening_facets, route_with_tie_breaker, detect_intent_override
 from src.state import PRE_OVERRIDE_WEIGHT, DialogState
 from src.text import constraint_spans, pair_spans, terms
 from starter.agent import Agent, AgentConfig
@@ -79,6 +79,45 @@ class StateTests(unittest.TestCase):
         self.assertEqual(state.productive_turns, 1)
         state.observe(3, "For that, what matters is: water resistant case.")
         self.assertEqual(state.productive_turns, 1, "repeat disclosure counted as new")
+
+    def test_intent_override_detection(self) -> None:
+        self.assertTrue(detect_intent_override("Actually, forget that, I want boots instead."))
+        self.assertTrue(detect_intent_override("Changed my mind. No leather."))
+        self.assertTrue(detect_intent_override("Scratch that. Let's try silk."))
+        self.assertFalse(detect_intent_override("I like leather boots."))
+        self.assertFalse(detect_intent_override(None))
+        self.assertFalse(detect_intent_override(""))
+
+
+class ContextRewriteTests(unittest.TestCase):
+    def test_state_rewrite_structure(self) -> None:
+        from src.context_llm import StateRewriteInstruction
+        # Valid instruction
+        instr = StateRewriteInstruction.from_llm({
+            "erase": ["hiking", "boots"],
+            "keep": ["waterproof"],
+            "add": ["office", "shoes"]
+        })
+        self.assertIsNotNone(instr)
+        self.assertEqual(instr.erase, ["hiking", "boots"])
+        self.assertEqual(instr.keep, ["waterproof"])
+        self.assertEqual(instr.add, ["office", "shoes"])
+
+        # Invalid payload (not a dict)
+        invalid = StateRewriteInstruction.from_llm(None)
+        self.assertIsNone(invalid)
+
+        # Invalid payload (missing keys)
+        incomplete = StateRewriteInstruction.from_llm({"erase": ["x"]})
+        self.assertIsNone(incomplete)
+
+        # Invalid payload (non-list values)
+        malformed = StateRewriteInstruction.from_llm({
+            "erase": "hiking",
+            "keep": [],
+            "add": []
+        })
+        self.assertIsNone(malformed)
 
 
 class FacetTests(unittest.TestCase):
