@@ -1,10 +1,10 @@
 {
   "sample_count": 200,
   "hit_rate_at_10": 1.0,
-  "mrr": 0.909236,
-  "mttc": 2.92,
-  "efficiency": 0.808,
-  "recommended_technical_score": 0.934371,
+  "mrr": 0.888528,
+  "mttc": 3.035,
+  "efficiency": 0.7965,
+  "recommended_technical_score": 0.925858,
   "reported_token_usage": {
     "prompt_tokens": 0,
     "completion_tokens": 0,
@@ -14,14 +14,14 @@
     "boundary": {
       "sample_count": 10,
       "hit_rate_at_10": 1.0,
-      "mrr": 0.86,
-      "mttc": 3.5
+      "mrr": 0.808333,
+      "mttc": 3.1
     },
     "browsing": {
       "sample_count": 80,
       "hit_rate_at_10": 1.0,
-      "mrr": 0.920833,
-      "mttc": 2.7625
+      "mrr": 0.875521,
+      "mttc": 3.1
     },
     "buying": {
       "sample_count": 80,
@@ -129,7 +129,7 @@
       "sample_id": "public_0012",
       "scenario_type": "browsing",
       "hit": true,
-      "first_hit_turn": 3,
+      "first_hit_turn": 4,
       "best_rank": 1,
       "reciprocal_rank": 1.0
     },
@@ -153,7 +153,7 @@
       "sample_id": "public_0015",
       "scenario_type": "browsing",
       "hit": true,
-      "first_hit_turn": 3,
+      "first_hit_turn": 4,
       "best_rank": 1,
       "reciprocal_rank": 1.0
     },
@@ -161,7 +161,7 @@
       "sample_id": "public_0016",
       "scenario_type": "browsing",
       "hit": true,
-      "first_hit_turn": 3,
+      "first_hit_turn": 5,
       "best_rank": 1,
       "reciprocal_rank": 1.0
     },
@@ -233,7 +233,7 @@
       "sample_id": "public_0025",
       "scenario_type": "browsing",
       "hit": true,
-      "first_hit_turn": 2,
+      "first_hit_turn": 3,
       "best_rank": 1,
       "reciprocal_rank": 1.0
     },
@@ -298,8 +298,8 @@
       "scenario_type": "browsing",
       "hit": true,
       "first_hit_turn": 3,
-      "best_rank": 1,
-      "reciprocal_rank": 1.0
+      "best_rank": 4,
+      "reciprocal_rank": 0.25
     },
     {
       "sample_id": "public_0034",
@@ -329,7 +329,7 @@
       "sample_id": "public_0037",
       "scenario_type": "browsing",
       "hit": true,
-      "first_hit_turn": 3,
+      "first_hit_turn": 4,
       "best_rank": 1,
       "reciprocal_rank": 1.0
     },
@@ -353,7 +353,7 @@
       "sample_id": "public_0040",
       "scenario_type": "browsing",
       "hit": true,
-      "first_hit_turn": 3,
+      "first_hit_turn": 4,
       "best_rank": 1,
       "reciprocal_rank": 1.0
     },
@@ -409,7 +409,7 @@
       "sample_id": "public_0047",
       "scenario_type": "browsing",
       "hit": true,
-      "first_hit_turn": 3,
+      "first_hit_turn": 4,
       "best_rank": 1,
       "reciprocal_rank": 1.0
     },
@@ -418,14 +418,14 @@
       "scenario_type": "browsing",
       "hit": true,
       "first_hit_turn": 3,
-      "best_rank": 1,
-      "reciprocal_rank": 1.0
+      "best_rank": 2,
+      "reciprocal_rank": 0.5
     },
     {
       "sample_id": "public_0049",
       "scenario_type": "browsing",
       "hit": true,
-      "first_hit_turn": 3,
+      "first_hit_turn": 2,
       "best_rank": 1,
       "reciprocal_rank": 1.0
     },
@@ -441,7 +441,7 @@
       "sample_id": "public_0051",
       "scenario_type": "browsing",
       "hit": true,
-      "first_hit_turn": 2,
+      "first_hit_turn": 3,
       "best_rank": 1,
       "reciprocal_rank": 1.0
     },
@@ -473,7 +473,7 @@
       "sample_id": "public_0055",
       "scenario_type": "browsing",
       "hit": true,
-      "first_hit_turn": 2,
+      "first_hit_turn": 3,
       "best_rank": 1,
       "reciprocal_rank": 1.0
     },
@@ -481,7 +481,7 @@
       "sample_id": "public_0056",
       "scenario_type": "browsing",
       "hit": true,
-      "first_hit_turn": 2,
+      "first_hit_turn": 3,
       "best_rank": 1,
       "reciprocal_rank": 1.0
     },
@@ -490,8 +490,8 @@
       "scenario_type": "browsing",
       "hit": true,
       "first_hit_turn": 3,
-      "best_rank": 1,
-      "reciprocal_rank": 1.0
+      "best_rank": 3,
+      "reciprocal_rank": 0.3333333333333333
     },
     {
       "sample_id": "public_0058",
@@ -529,7 +529,7 @@
       "sample_id": "public_0062",
       "scenario_type": "browsing",
       "hit": true,
-      "first_hit_turn": 3,
+      "first_hit_turn": 4,
       "best_rank": 1,
       "reciprocal_rank": 1.0
     },
@@ -585,7 +585,7 @@
       "sample_id": "public_0069",
       "scenario_type": "browsing",
       "hit": true,
-      "first_hit_turn": 2,
+      "first_hit_turn": 3,
       "best_rank": 1,
       "reciprocal_rank": 1.0
     },
@@ -593,7 +593,7 @@
       "sample_id": "public_0070",
       "scenario_type": "browsing",
       "hit": true,
-      "first_hit_turn": 2,
+      "first_hit_turn": 3,
       "best_rank": 1,
       "reciprocal_rank": 1.0
     },
@@ -625,7 +625,7 @@
       "sample_id": "public_0074",
       "scenario_type": "browsing",
       "hit": true,
-      "first_hit_turn": 3,
+      "first_hit_turn": 4,
       "best_rank": 1,
       "reciprocal_rank": 1.0
     },
@@ -642,8 +642,8 @@
       "scenario_type": "browsing",
       "hit": true,
       "first_hit_turn": 4,
-      "best_rank": 4,
-      "reciprocal_rank": 0.25
+      "best_rank": 8,
+      "reciprocal_rank": 0.125
     },
     {
       "sample_id": "public_0077",
@@ -665,7 +665,7 @@
       "sample_id": "public_0079",
       "scenario_type": "browsing",
       "hit": true,
-      "first_hit_turn": 3,
+      "first_hit_turn": 2,
       "best_rank": 1,
       "reciprocal_rank": 1.0
     },
@@ -721,7 +721,7 @@
       "sample_id": "public_0086",
       "scenario_type": "browsing",
       "hit": true,
-      "first_hit_turn": 2,
+      "first_hit_turn": 3,
       "best_rank": 1,
       "reciprocal_rank": 1.0
     },
@@ -761,7 +761,7 @@
       "sample_id": "public_0091",
       "scenario_type": "browsing",
       "hit": true,
-      "first_hit_turn": 2,
+      "first_hit_turn": 3,
       "best_rank": 1,
       "reciprocal_rank": 1.0
     },
@@ -817,7 +817,7 @@
       "sample_id": "public_0098",
       "scenario_type": "browsing",
       "hit": true,
-      "first_hit_turn": 2,
+      "first_hit_turn": 3,
       "best_rank": 1,
       "reciprocal_rank": 1.0
     },
@@ -849,7 +849,7 @@
       "sample_id": "public_0102",
       "scenario_type": "browsing",
       "hit": true,
-      "first_hit_turn": 2,
+      "first_hit_turn": 3,
       "best_rank": 1,
       "reciprocal_rank": 1.0
     },
@@ -866,8 +866,8 @@
       "scenario_type": "boundary",
       "hit": true,
       "first_hit_turn": 3,
-      "best_rank": 1,
-      "reciprocal_rank": 1.0
+      "best_rank": 4,
+      "reciprocal_rank": 0.25
     },
     {
       "sample_id": "public_0105",
@@ -930,8 +930,8 @@
       "scenario_type": "boundary",
       "hit": true,
       "first_hit_turn": 3,
-      "best_rank": 1,
-      "reciprocal_rank": 1.0
+      "best_rank": 3,
+      "reciprocal_rank": 0.3333333333333333
     },
     {
       "sample_id": "public_0113",
@@ -993,15 +993,15 @@
       "sample_id": "public_0120",
       "scenario_type": "browsing",
       "hit": true,
-      "first_hit_turn": 3,
-      "best_rank": 2,
-      "reciprocal_rank": 0.5
+      "first_hit_turn": 4,
+      "best_rank": 3,
+      "reciprocal_rank": 0.3333333333333333
     },
     {
       "sample_id": "public_0121",
       "scenario_type": "browsing",
       "hit": true,
-      "first_hit_turn": 3,
+      "first_hit_turn": 2,
       "best_rank": 1,
       "reciprocal_rank": 1.0
     },
@@ -1042,8 +1042,8 @@
       "scenario_type": "browsing",
       "hit": true,
       "first_hit_turn": 4,
-      "best_rank": 3,
-      "reciprocal_rank": 0.3333333333333333
+      "best_rank": 6,
+      "reciprocal_rank": 0.16666666666666666
     },
     {
       "sample_id": "public_0127",
@@ -1057,7 +1057,7 @@
       "sample_id": "public_0128",
       "scenario_type": "browsing",
       "hit": true,
-      "first_hit_turn": 2,
+      "first_hit_turn": 3,
       "best_rank": 1,
       "reciprocal_rank": 1.0
     },
@@ -1105,7 +1105,7 @@
       "sample_id": "public_0134",
       "scenario_type": "browsing",
       "hit": true,
-      "first_hit_turn": 2,
+      "first_hit_turn": 3,
       "best_rank": 1,
       "reciprocal_rank": 1.0
     },
@@ -1137,7 +1137,7 @@
       "sample_id": "public_0138",
       "scenario_type": "browsing",
       "hit": true,
-      "first_hit_turn": 3,
+      "first_hit_turn": 2,
       "best_rank": 1,
       "reciprocal_rank": 1.0
     },
@@ -1154,14 +1154,14 @@
       "scenario_type": "browsing",
       "hit": true,
       "first_hit_turn": 4,
-      "best_rank": 1,
-      "reciprocal_rank": 1.0
+      "best_rank": 4,
+      "reciprocal_rank": 0.25
     },
     {
       "sample_id": "public_0141",
       "scenario_type": "browsing",
       "hit": true,
-      "first_hit_turn": 2,
+      "first_hit_turn": 3,
       "best_rank": 1,
       "reciprocal_rank": 1.0
     },
@@ -1241,7 +1241,7 @@
       "sample_id": "public_0151",
       "scenario_type": "browsing",
       "hit": true,
-      "first_hit_turn": 3,
+      "first_hit_turn": 4,
       "best_rank": 1,
       "reciprocal_rank": 1.0
     },
@@ -1297,7 +1297,7 @@
       "sample_id": "public_0158",
       "scenario_type": "browsing",
       "hit": true,
-      "first_hit_turn": 2,
+      "first_hit_turn": 3,
       "best_rank": 1,
       "reciprocal_rank": 1.0
     },
@@ -1329,7 +1329,7 @@
       "sample_id": "public_0162",
       "scenario_type": "browsing",
       "hit": true,
-      "first_hit_turn": 2,
+      "first_hit_turn": 3,
       "best_rank": 2,
       "reciprocal_rank": 0.5
     },
@@ -1345,7 +1345,7 @@
       "sample_id": "public_0164",
       "scenario_type": "browsing",
       "hit": true,
-      "first_hit_turn": 3,
+      "first_hit_turn": 2,
       "best_rank": 1,
       "reciprocal_rank": 1.0
     },
@@ -1369,7 +1369,7 @@
       "sample_id": "public_0167",
       "scenario_type": "browsing",
       "hit": true,
-      "first_hit_turn": 3,
+      "first_hit_turn": 4,
       "best_rank": 1,
       "reciprocal_rank": 1.0
     },
@@ -1385,9 +1385,9 @@
       "sample_id": "public_0169",
       "scenario_type": "boundary",
       "hit": true,
-      "first_hit_turn": 4,
-      "best_rank": 10,
-      "reciprocal_rank": 0.1
+      "first_hit_turn": 3,
+      "best_rank": 1,
+      "reciprocal_rank": 1.0
     },
     {
       "sample_id": "public_0170",
@@ -1417,7 +1417,7 @@
       "sample_id": "public_0173",
       "scenario_type": "browsing",
       "hit": true,
-      "first_hit_turn": 3,
+      "first_hit_turn": 4,
       "best_rank": 1,
       "reciprocal_rank": 1.0
     },
@@ -1481,7 +1481,7 @@
       "sample_id": "public_0181",
       "scenario_type": "browsing",
       "hit": true,
-      "first_hit_turn": 2,
+      "first_hit_turn": 3,
       "best_rank": 1,
       "reciprocal_rank": 1.0
     },
@@ -1489,7 +1489,7 @@
       "sample_id": "public_0182",
       "scenario_type": "browsing",
       "hit": true,
-      "first_hit_turn": 2,
+      "first_hit_turn": 3,
       "best_rank": 1,
       "reciprocal_rank": 1.0
     },
@@ -1505,7 +1505,7 @@
       "sample_id": "public_0184",
       "scenario_type": "browsing",
       "hit": true,
-      "first_hit_turn": 3,
+      "first_hit_turn": 4,
       "best_rank": 1,
       "reciprocal_rank": 1.0
     },
@@ -1529,7 +1529,7 @@
       "sample_id": "public_0187",
       "scenario_type": "boundary",
       "hit": true,
-      "first_hit_turn": 7,
+      "first_hit_turn": 4,
       "best_rank": 1,
       "reciprocal_rank": 1.0
     },
@@ -1594,14 +1594,14 @@
       "scenario_type": "browsing",
       "hit": true,
       "first_hit_turn": 3,
-      "best_rank": 1,
-      "reciprocal_rank": 1.0
+      "best_rank": 2,
+      "reciprocal_rank": 0.5
     },
     {
       "sample_id": "public_0196",
       "scenario_type": "browsing",
       "hit": true,
-      "first_hit_turn": 2,
+      "first_hit_turn": 3,
       "best_rank": 1,
       "reciprocal_rank": 1.0
     },

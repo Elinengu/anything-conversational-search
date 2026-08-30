@@ -302,7 +302,29 @@ class Agent:
         return route
 
     def _policy_for_state(self, state: DialogState, plan: object | None):
-        """Switch to targeted clarification only when progress has genuinely stalled."""
+        """Switch to targeted clarification on the browsing track, or once progress
+        has genuinely stalled.
+
+        A browsing customer needs a pointed question to draw out disclosure at
+        all: the broad "other" ask (``self.config.policy``'s default) only pays
+        off when the customer volunteers information unprompted, and a
+        non-cooperative browser never does (see ``docs/team/stress_harness.md``
+        and ``tools/stress_harness.py --customer browse-gated`` - this branch
+        measured 10/80 -> 24/80 browsing ``never_retrieved`` under
+        ``heavy+browse-gated`` before this switch was restored). This mirrors
+        the ``route_policies`` lever from the earlier ``dual_tracking`` branch,
+        wired through the state machine's own ``intent_track`` instead of a
+        parallel per-track config surface.
+
+        ``not state.dead_attributes`` guards this exactly like the STAGNATING
+        branch below: once the customer has declined anything, this falls
+        through to the ordered FixedPolicy fallback rather than an
+        info-gain guess - dropping the guard regressed boundary-scenario
+        hit rate to 0.50 (measured; boundary sessions are declining
+        customers, so they hit dead_attributes almost immediately).
+        """
+        if state.intent_track == "browsing" and not state.dead_attributes:
+            return self._targeted_policy
         if not self.config.use_adaptive_orchestration or plan is None:
             return self.config.policy
         phase = getattr(plan, "phase", None)
