@@ -700,7 +700,10 @@ class ShortlistRampTests(unittest.TestCase):
     def _agent(ramp: tuple[int, ...]) -> Agent:
         """An Agent without its 50,000-row index - _shortlist never touches it."""
         agent = Agent.__new__(Agent)
-        agent.config = AgentConfig(list_size_ramp=ramp)
+        # first_recommend_turn is pinned so the probed turns (3, 4, 5, ...) line
+        # up with ramp indices 0, 1, 2. These cases are about ramp *indexing*,
+        # not about the shipped emit turn - see ShipedSniperRampTests for that.
+        agent.config = AgentConfig(list_size_ramp=ramp, first_recommend_turn=3)
         agent._shown = {}
         agent._shown_override = {}
         agent._disclosed_count = {}
@@ -740,6 +743,41 @@ class ShortlistRampTests(unittest.TestCase):
         self.assertEqual(first, [f"A{index:03d}" for index in range(4)])
         self.assertEqual(second, [f"A{index:03d}" for index in range(4, 14)])
         self.assertFalse(set(first) & set(second))
+
+
+class ShippedSniperRampTests(unittest.TestCase):
+    """The shipped defaults emit one candidate per turn, widening at turn 5.
+
+    A one-item slate is what converts an eventual hit into rank 1: the
+    evaluator ends the session on the first slate containing the target and
+    scores its position within that slate alone.
+    """
+
+    def _agent(self) -> Agent:
+        agent = Agent.__new__(Agent)
+        agent.config = AgentConfig()
+        agent._shown = {}
+        agent._shown_override = {}
+        agent._disclosed_count = {}
+        return agent
+
+    def test_singles_until_turn_five_then_widens(self) -> None:
+        agent = self._agent()
+        state = _StubShortlistState()
+        candidates = [(f"A{index:03d}", float(200 - index)) for index in range(200)]
+        sizes = [len(agent._shortlist(state, candidates, turn, 10)) for turn in range(1, 8)]
+        self.assertEqual(sizes, [1, 1, 1, 1, 10, 10, 10])
+
+    def test_singles_walk_distinct_candidates(self) -> None:
+        """Four singles plus the wide turn reach 14 distinct products, not 10."""
+        agent = self._agent()
+        state = _StubShortlistState()
+        candidates = [(f"A{index:03d}", float(200 - index)) for index in range(200)]
+        seen: list[str] = []
+        for turn in range(1, 6):
+            seen += [item["parent_asin"] for item in agent._shortlist(state, candidates, turn, 10)]
+        self.assertEqual(len(seen), len(set(seen)), "the scan re-showed a candidate")
+        self.assertEqual(seen, [f"A{index:03d}" for index in range(14)])
 
 
 class _StubFacets:

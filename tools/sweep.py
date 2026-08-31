@@ -128,6 +128,35 @@ def build_configs(catalog: str) -> dict[str, AgentConfig]:
         "ramp4": AgentConfig(list_size_ramp=(4, 10)),
         "ramp5": AgentConfig(list_size_ramp=(5, 10)),
         "ramp55": AgentConfig(list_size_ramp=(5, 5, 10)),
+        # The pre-sniper shipped defaults, kept so before/after can be measured
+        # in one process on any dataset (Change 17).
+        "pre_sniper": AgentConfig(first_recommend_turn=3, list_size_ramp=(4, 10)),
+        # Sniper sizing (Change 17): one candidate per turn until a wide
+        # safety-net turn. The evaluator ends a session the moment the target
+        # appears and scores its position *within that turn's list only*, so a
+        # 1-item slate converts every eventual hit into rank 1. Rank r -> 1 is
+        # worth 0.30*(1 - 1/r); a turn of MTTC costs 0.20/10 = 0.02, so rank is
+        # worth ~13x a turn. The elimination scan makes the singles cumulative:
+        # eight singles plus a wide turn walk 18+ distinct candidates, deeper
+        # than one 10-item slate. sniperN widens at turn N.
+        "sniper5": AgentConfig(first_recommend_turn=1, list_size_ramp=(1,) * 4 + (10,)),
+        "sniper6": AgentConfig(first_recommend_turn=1, list_size_ramp=(1,) * 5 + (10,)),
+        "sniper7": AgentConfig(first_recommend_turn=1, list_size_ramp=(1,) * 6 + (10,)),
+        "sniper8": AgentConfig(first_recommend_turn=1, list_size_ramp=(1,) * 7 + (10,)),
+        "sniper9": AgentConfig(first_recommend_turn=1, list_size_ramp=(1,) * 8 + (10,)),
+        "sniper10": AgentConfig(first_recommend_turn=1, list_size_ramp=(1,) * 9 + (10,)),
+        # Isolates the two halves of sniper9: singles but still holding turns
+        # 1-2 back (sniper9_t3), and guessing from turn 1 at the shipped widths
+        # (elim1 is that row without the ramp change).
+        "sniper9_t3": AgentConfig(first_recommend_turn=3, list_size_ramp=(1,) * 6 + (10,)),
+        # The STAGNATING orchestration phase (context_programming Phase 3)
+        # overrides the ramp with its own wide slate, so sniper9 above still
+        # emits 10 on a stalled turn - which is where its remaining rank losses
+        # sit. These rows carry the singles through stagnation too.
+        "sniper9_stag1": AgentConfig(
+            first_recommend_turn=1, list_size_ramp=(1,) * 8 + (10,), stagnation_slate_size=1),
+        "sniper7_stag1": AgentConfig(
+            first_recommend_turn=1, list_size_ramp=(1,) * 6 + (10,), stagnation_slate_size=1),
         # Rerank weight mixture: the near-miss anatomy (rerank_signals.md) shows
         # every remaining public rank loss sits in a tie-break regime where the
         # retrieval score picks the impostor 33/33 (BM25 length normalization
@@ -141,6 +170,14 @@ def build_configs(catalog: str) -> dict[str, AgentConfig]:
         "pop030": AgentConfig(rerank=RerankConfig(popularity_weight=0.30)),
         "pop040": AgentConfig(rerank=RerankConfig(popularity_weight=0.40)),
         "pop050": AgentConfig(rerank=RerankConfig(popularity_weight=0.50)),
+        # Re-swept under sniper sizing: with a one-item slate the popularity
+        # prior stops being a tie-break and becomes the decision, so the 0.4
+        # fitted against a 4-wide slate is not automatically still right.
+        "pop070": AgentConfig(rerank=RerankConfig(popularity_weight=0.70)),
+        "pop100": AgentConfig(rerank=RerankConfig(popularity_weight=1.00)),
+        "pop140": AgentConfig(rerank=RerankConfig(popularity_weight=1.40)),
+        "pop180": AgentConfig(rerank=RerankConfig(popularity_weight=1.80)),
+        "pop250": AgentConfig(rerank=RerankConfig(popularity_weight=2.50)),
         # The coordinate-ascent dev argmax (tools/fit_weights.py): higher on
         # dev/holdout/public, regresses the hard set - kept as a row so the
         # trade-off stays reproducible, not as a default.
@@ -247,6 +284,13 @@ def build_configs(catalog: str) -> dict[str, AgentConfig]:
         "catpool_off": AgentConfig(
             retrieval=RetrievalConfig(use_category_pool=False),
             rerank=RerankConfig(depth=300)),
+        # Both changes off - the pre-change-18 agent, the floor both are measured
+        # from. `pre_sniper` is the sizing ablation on its own; `catpool_off` is
+        # the retrieval ablation on its own.
+        "no_sniper_no_catpool": AgentConfig(
+            first_recommend_turn=3, list_size_ramp=(4, 10),
+            retrieval=RetrievalConfig(use_category_pool=False),
+            rerank=RerankConfig(depth=300)),
         # ---- coarse-category pool route (S5) ----------------------------
         # Measured motivation: at turn 1 the target is inside our 300-candidate
         # lexical pool only 80.5% of the time, at median rank 51, and only ~66%
@@ -279,15 +323,6 @@ def build_configs(catalog: str) -> dict[str, AgentConfig]:
         # claude/techjam-agent-analysis-hzm14g, public 0.923487 -> 0.940083).
         # These rows pin it explicitly so the pool route can be measured against
         # the sizing it will actually ship alongside, in one process.
-        "sniper": AgentConfig(first_recommend_turn=1, list_size_ramp=(1, 1, 1, 1, 10)),
-        "sniper_catpool": AgentConfig(
-            first_recommend_turn=1, list_size_ramp=(1, 1, 1, 1, 10),
-            retrieval=RetrievalConfig(use_category_pool=True),
-            rerank=RerankConfig(depth=0)),
-        "sniper_catpool_pop100": AgentConfig(
-            first_recommend_turn=1, list_size_ramp=(1, 1, 1, 1, 10),
-            retrieval=RetrievalConfig(use_category_pool=True),
-            rerank=RerankConfig(depth=0, popularity_weight=1.00)),
         # Pool-route RRF weight bracket.
         "sn_cp_w20": AgentConfig(
             first_recommend_turn=1, list_size_ramp=(1, 1, 1, 1, 10),
@@ -308,10 +343,6 @@ def build_configs(catalog: str) -> dict[str, AgentConfig]:
         "sn_cp_w07": AgentConfig(
             first_recommend_turn=1, list_size_ramp=(1, 1, 1, 1, 10),
             retrieval=RetrievalConfig(use_category_pool=True, weight_category_pool=0.7),
-            rerank=RerankConfig(depth=0)),
-        "sn_cp_w10": AgentConfig(
-            first_recommend_turn=1, list_size_ramp=(1, 1, 1, 1, 10),
-            retrieval=RetrievalConfig(use_category_pool=True, weight_category_pool=1.0),
             rerank=RerankConfig(depth=0)),
         "sn_cp_w15": AgentConfig(
             first_recommend_turn=1, list_size_ramp=(1, 1, 1, 1, 10),

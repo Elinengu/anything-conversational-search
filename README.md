@@ -9,12 +9,12 @@ frozen 50,000-item Amazon catalog.
 The committed default configuration keeps LLM reranking **off**. It makes no
 model API calls, requires no credentials, and reports zero token usage. On the
 repository's bundled frozen local evaluator, this offline configuration
-achieves a **0.934554 TechnicalScore** and **1.000 Hit Rate@10**.
+achieves a **0.954975 TechnicalScore** and **1.000 Hit Rate@10**.
 
 | System | Hit@10 | MRR | MTTC | Efficiency | TechnicalScore |
 |---|---:|---:|---:|---:|---:|
 | Supplied BM25 baseline | 0.125 | 0.068 | 9.81 | 0.119 | 0.1067 |
-| This project (offline default, frozen local evaluator) | **1.000** | **0.908** | **2.90** | **0.811** | **0.934554** |
+| This project (offline default, frozen local evaluator) | **1.000** | **0.961** | **2.67** | **0.834** | **0.954975** |
 
 The result above is recorded in [`results.json`](results.json) and can be
 reproduced with the commands in [Reproducing the results](#reproducing-the-results).
@@ -26,24 +26,49 @@ the official customer behavior. The stress customer paraphrases constraints and
 uses **gated browsing**: a browsing customer discloses information only when the
 agent asks for a specific `ask_attribute` rather than a broad `other` question.
 
-| Customer | LLM reranking | Sessions | Hit@10 | MRR | MTTC | TechnicalScore |
-|---|---|---:|---:|---:|---:|---:|
-| Official customer | Off — default | 200 | 1.000 | 0.9082 | 2.895 | **0.934554** |
-| Official customer | **On — gated** | 200 | **1.000** | **0.8930** | **3.045** | **0.927012** |
-| Stress: paraphrase + gated browsing | Off — default | 200 | **0.990** | 0.7708 | 3.580 | **0.874730** |
-| Stress: paraphrase + gated browsing | **On — gated** | 200 | 0.880 | **0.6734** | **4.405** | **0.773924** |
+| Customer | Sessions | Hit@10 | MRR | MTTC | TechnicalScore |
+|---|---:|---:|---:|---:|---:|
+| Official customer | 200 | 1.000 | 0.9609 | 2.665 | **0.954975** |
+| Stress: paraphrase + gated browsing | 200 | 0.990 | 0.8379 | 3.370 | **0.899070** |
 
-The two **On — gated** rows were measured before the coarse-category pool
-route (`docs/team/agent_changes.md` change 19) and have not been re-run,
-because reproducing them needs a `DEEPSEEK_API_KEY`; the **Off** rows above
-are current. On the official customer, gated LLM reranking keeps Hit@10 at `1.000`, raises
-MRR by `0.0120`, and improves the score by **0.003525**. MTTC changes only
-slightly, from `3.040` to `3.045`. On the harder stress customer, it keeps
-Hit@10 at `0.880`, raises MRR by `0.0106`, reduces MTTC by `0.005`, and improves
-the score by **0.003273**. In both conditions, the measured gain comes mainly
-from better ordering of retrieved candidates. Under paraphrase and gated
-browsing, reranking alone does not recover the remaining retrieval and
-clarification misses.
+Both rows are the current committed default, which now combines two changes —
+**sniper list sizing** (one candidate per turn until turn 5) and the
+**coarse-category pool retrieval route**. Measured over the same 200 official
+sessions in one process:
+
+| configuration | TechnicalScore | gain |
+|---|---:|---:|
+| neither | 0.9235 | — |
+| category pool only | 0.9346 | +0.0111 |
+| sniper sizing only | 0.9401 | +0.0166 |
+| **both (ships)** | **0.9550** | **+0.0315** |
+
+The two gains sum to `0.0277` and together deliver `0.0315`, so they are
+**super-additive**: a one-candidate slate is only worth anything if that
+candidate is right, and the pool is what makes the turn-1 candidate good.
+Hit@10 does not move on any evaluated set; the whole gain is MRR
+(`0.881 → 0.961`) and MTTC (`3.04 → 2.67`). See `docs/team/agent_changes.md`
+changes 18 and 19.
+
+### Optional LLM reranking layer
+
+The repository also carries an opt-in LLM reranking layer, **off by default**
+(`llm_weight=0.0`), which needs a `DEEPSEEK_API_KEY`. It was measured against
+the agent as it stood *before* both changes above and has not been re-run,
+so these numbers are historical and are not comparable to the table above:
+
+| Customer | LLM reranking | Hit@10 | MRR | MTTC | TechnicalScore |
+|---|---|---:|---:|---:|---:|
+| Official customer | Off | 1.000 | 0.8810 | 3.040 | 0.923487 |
+| Official customer | On — gated | 1.000 | 0.8930 | 3.045 | 0.927012 |
+| Stress: paraphrase + gated browsing | Off | 0.880 | 0.6628 | 4.410 | 0.770651 |
+| Stress: paraphrase + gated browsing | On — gated | 0.880 | 0.6734 | 4.405 | 0.773924 |
+
+It was worth `+0.003525` on the official customer and `+0.003273` under stress,
+in both cases through better ordering of already-retrieved candidates rather
+than through finding anything new. Since both shipped changes take their gain
+from the same place — the rank a hit is scored at, and what is in the pool to
+rank — the layer is unlikely to still be additive, and it stays off.
 
 ## Project overview
 
@@ -310,10 +335,10 @@ This evaluates all 200 public sessions and writes the detailed output to
 
 ```text
 Hit Rate@10:    1.000000
-MRR:            0.908181
-MTTC:           2.895000
-Efficiency:     0.810500
-TechnicalScore: 0.934554
+MRR:            0.960917
+MTTC:           2.665000
+Efficiency:     0.833500
+TechnicalScore: 0.954975
 Token usage:    0
 ```
 
