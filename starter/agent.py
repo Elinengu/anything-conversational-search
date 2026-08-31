@@ -146,6 +146,16 @@ class Agent:
         # Used only after the live state detects over-generality or stagnation.
         # Broad questions remain the measured default while they are productive.
         self._targeted_policy = InfoGainPolicy(self.facets, allow_broad=False)
+        # Browsing-track policy (see _policy_for_state). Broad stays allowed here,
+        # unlike _targeted_policy: on turn 1 it still asks "other" once, and only
+        # a browse-gated customer's refusal of that ask (unproductive turn) tips
+        # scores() toward specific attributes via the decaying `remaining` term.
+        # allow_broad=False was tried first and picked a specific attribute from
+        # turn 1 by gain-ratio over the still catalog-wide pool a vague opening
+        # leaves behind - a near-blind guess, and it recovered almost none of the
+        # browse-gated loss (measured). expected_broad_answers=4.0 is what
+        # branch dual_tracking shipped for the same job (docs/team/agent_changes.md).
+        self._browsing_policy = InfoGainPolicy(self.facets, expected_broad_answers=4.0)
         # Dense sentence-embedding index, shared by the S5 dense retrieval route
         # and the S6 dense_weight term. Loaded only when some config asks for it
         # (rerank.dense_weight > 0, or retrieval.use_dense); missing artifact /
@@ -302,8 +312,8 @@ class Agent:
         return route
 
     def _policy_for_state(self, state: DialogState, plan: object | None):
-        """Switch to targeted clarification on the browsing track, or once progress
-        has genuinely stalled.
+        """Switch to a browsing-tuned info-gain policy on the browsing track, or
+        to a targeted one once progress has genuinely stalled.
 
         A browsing customer needs a pointed question to draw out disclosure at
         all: the broad "other" ask (``self.config.policy``'s default) only pays
@@ -316,6 +326,17 @@ class Agent:
         wired through the state machine's own ``intent_track`` instead of a
         parallel per-track config surface.
 
+        ``_browsing_policy`` (``expected_broad_answers=4.0``, broad allowed) is
+        used rather than ``_targeted_policy`` (``allow_broad=False``): the first
+        attempt at this switch used ``_targeted_policy`` and picked a specific
+        attribute from turn 1 by gain-ratio over the still catalog-wide pool a
+        vague opening leaves behind - a near-blind guess that recovered almost
+        none of the browse-gated loss (measured). Leaving broad allowed lets
+        turn 1 still ask "other"; it is the browse-gated customer's *refusal* of
+        that ask (an unproductive turn) that tips ``scores()`` toward specific
+        attributes from turn 2 on - the mechanism branch ``dual_tracking``
+        measured a 0.59 -> 0.95 browsing hit-rate recovery from.
+
         ``not state.dead_attributes`` guards this exactly like the STAGNATING
         branch below: once the customer has declined anything, this falls
         through to the ordered FixedPolicy fallback rather than an
@@ -324,7 +345,7 @@ class Agent:
         customers, so they hit dead_attributes almost immediately).
         """
         if state.intent_track == "browsing" and not state.dead_attributes:
-            return self._targeted_policy
+            return self._browsing_policy
         if not self.config.use_adaptive_orchestration or plan is None:
             return self.config.policy
         phase = getattr(plan, "phase", None)

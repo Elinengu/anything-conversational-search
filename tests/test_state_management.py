@@ -102,10 +102,34 @@ class PlanApplicationTests(unittest.TestCase):
         agent._targeted_policy = targeted_policy
         plan = SimpleNamespace(phase=DialogPhase.STAGNATING)
         state = DialogState("s")
+        # intent_track defaults to "browsing" (src/state.py), which now has its
+        # own routing ahead of the STAGNATING check this test targets - pin the
+        # track to isolate the mechanism under test.
+        state.intent_track = "buying"
 
         self.assertIs(agent._policy_for_state(state, plan), targeted_policy)
         state.dead_attributes.add("other")
         self.assertIs(agent._policy_for_state(state, plan), default_policy)
+
+    def test_browsing_track_uses_the_browsing_policy_until_a_decline(self) -> None:
+        default_policy = object()
+        browsing_policy = object()
+        agent = Agent.__new__(Agent)
+        agent.config = AgentConfig(policy=default_policy, use_adaptive_orchestration=True)
+        agent._browsing_policy = browsing_policy
+        state = DialogState("s")
+        state.intent_track = "browsing"
+
+        # No plan (adaptive orchestration effectively off for this call) still
+        # routes browsing-track turns to the browsing policy - it is not gated
+        # on the plan/phase machinery the STAGNATING branch below it is.
+        self.assertIs(agent._policy_for_state(state, None), browsing_policy)
+
+        state.dead_attributes.add("other")
+        # A decline falls through to the ordered FixedPolicy fallback exactly
+        # like the buying track does - see the STAGNATING test above, and the
+        # boundary-scenario regression this guards against.
+        self.assertIs(agent._policy_for_state(state, None), default_policy)
 
     def test_plan_controls_recommendation_cutoff_and_slate_size(self) -> None:
         agent = Agent.__new__(Agent)
