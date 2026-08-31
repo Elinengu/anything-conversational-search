@@ -275,12 +275,11 @@ Base (rounded vector) dev = **0.947667**. Baseline (shipped) dev = 0.942757.
 | pair (0.2) | 0.947667 | 0.947833 | ~flat |
 | conflict (0.05) | 0.947667 | 0.949375 | ×1.5 better |
 
-Identical shape to `plain`: `popularity` is a dip, and `facet` / `tail` /
-`conflict` all want to move **back up toward the shipped values**. The pairwise
-fit and the real metric agree on the sign of every move (kill retrieval, raise
-popularity, drop pair/tail) but not the magnitude — the fit overshoots on
-`popularity` and undershoots on `facet` / `conflict` / `tail` relative to where
-the evaluator's own line-search would put them.
+Identical shape to `plain`: the dev metric is **non-convex at the pairwise
+vector** — `popularity` scores better at both 0.5× and 1.5×, and `facet` /
+`tail` / `conflict` all improve when nudged **back toward the shipped values**.
+The offline fit and the online metric disagree not just on magnitude but on
+whether this point is even a local optimum: it is not.
 
 ---
 
