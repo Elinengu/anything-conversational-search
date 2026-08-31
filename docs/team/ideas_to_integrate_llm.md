@@ -69,7 +69,7 @@ replacing it), local scorer as fallback.
   disqualify on any public hit@10 regression.
 - Note: a `semantic-rerank-experiment` branch already exists.
 - **Status: built and measured with a real DeepSeek call** (`src/llm.py`,
-  `agent_changes.md` change 16) - fused (not replacing) and gated on
+  `agent_changes.md` change 17) - fused (not replacing) and gated on
   `state.leader_margin`, exactly as prescribed above. Every split moved
   flat-to-positive with hit@10 never regressing, but the size of the gain
   and one scenario regression (`intent_override` under stress) kept it an

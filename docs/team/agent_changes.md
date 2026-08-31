@@ -29,7 +29,7 @@ public labels and API contract were **not** touched.
 | + live structured state and orchestration | Elinengu | **0.9344** | — | change 15; active/superseded slots, rolling pool signals, plan-driven questions/gating/retrieval, intent transitions and observable snapshots |
 | + browsing-track clarification policy | Elinengu | 0.9235 | — | branch `state-encoder-eval`; restores a targeted question policy for browsing sessions after the `stress_harness`/`dense_rerank` merge dropped it. Costs −0.0109 cooperative, buys `heavy+browse-gated` 0.703 → 0.761. Full detail in `branch_state_encoder_eval_changes.md` §1 |
 | + three bugs ported from a sibling branch | Elinengu | 0.9235 | — | change 16; **score-neutral on every cooperative split by construction** — all three only fire on free-form customer wording. Worth +0.0098 on `heavy+browse-gated`, and collapses the branch's own embedding result from +0.0257 to +0.0042 |
-| + opt-in LLM semantic rerank (DeepSeek), gated | Elinengu | 0.9235 → **0.9252** | not measured | change 17; **off by default** (`llm_weight=0.0`) — re-measured on the fixed codebase above (change 16's three bug fixes were not yet in place for this row's original stress-harness numbers; see the change 17 section below for the corrected comparison) |
+| + opt-in LLM semantic rerank (DeepSeek), gated | Elinengu | 0.9235 → **0.9254** | not measured | change 17; **off by default** (`llm_weight=0.0`) — measured on the fixed codebase (change 16's three bug fixes); see the change 17 section below for the full split table |
 
 Net: **public 0.859 -> 0.9313, adversarial 0.684 -> 0.8028.** 77/77 tests pass.
 The fourteen core-agent changes are detailed below; supporting tooling and docs follow.
@@ -1533,63 +1533,74 @@ below.
 
 ### Effect
 
-Baseline is the branch's current measured state (public `0.923487`, holdout
-`0.9149` — see the score-progression table above; `Change 15`'s `0.9344` predates
-later, unrelated branch commits). All four rows below are **live DeepSeek
+**Measured on the merged codebase — change 16's three bug fixes are in place.**
+An earlier measurement of this same layer, taken before those fixes were merged
+into this branch, is superseded below rather than kept alongside: the fixes move
+`constraint_spans()` and hence `query_spans()` (the reranker's primary lexical
+signal), which changes both the baseline and how much room the LLM layer has left
+to add, exactly the way change 16 documents for the branch's dense embedding
+route. Baseline is the branch's current measured state (public `0.923487`,
+holdout `0.9149` — see the score-progression table above; `Change 15`'s `0.9344`
+predates later, unrelated branch commits). All rows below are **live DeepSeek
 calls**, not a simulation.
 
 | split (sessions) | baseline score | `llm_rerank_gated` score | Δ score | baseline MRR | `llm_rerank_gated` MRR | Δ MRR |
 |---|---|---|---|---|---|---|
 | dev (120, cooperative) | 0.9292 | 0.9280 | −0.0012 (noise) | 0.893 | 0.889 | −0.004 |
-| holdout (80, cooperative) | 0.9149 | **0.9215** | **+0.0066** | 0.862 | **0.884** | **+0.022** |
-| public set (200, official `evaluator.local_evaluator` config) | 0.923487 | **0.925362** | **+0.0019** | 0.8810 | **0.8872** | **+0.0062** |
-| stress: `paraphrase:heavy+browse-gated` (200) | 0.76086 | **0.76798** | **+0.0071** | 0.6249 | **0.6476** | **+0.0227** |
+| holdout (80, cooperative) | 0.9149 | **0.9218** | **+0.0069** | 0.862 | **0.886** | **+0.024** |
+| public set (200, official `evaluator.local_evaluator` config) | 0.923487 | **0.9254** | **+0.0019** | 0.8810 | **0.887** | **+0.006** |
+| stress: `paraphrase:heavy+browse-gated` (200) | 0.77065 | **0.77432** | **+0.0037** | 0.6628 | **0.6751** | **+0.0123** |
 
-`hit@10` never regresses on any split (stays `1.000` on dev/holdout/public,
-flat `0.885` under stress) — every score movement above is pure ranking,
-never recall. Per-scenario, the gain is concentrated in **buying**
-(stress MRR `0.6896 → 0.7408`, +0.051) and, under stress specifically,
-**browsing** (`0.4867 → 0.5283`, +0.042 — the hardest bucket, where a vague
-opening leaves the lexical pool least discriminating). The one real cost is
-**intent_override** under stress (`0.7753 → 0.6892`, −0.086): a reversed
-preference is exactly the case where the model's own judgment of "what the
-customer wants" can disagree with the state machine's `focused_text()`
-about which turns still count. Dev's tiny net negative sits entirely inside
-the ±0.02 noise band this project treats as indistinguishable from flat.
+Dev, holdout and public are byte-identical to the pre-merge measurement (as
+expected — change 16's fixes only fire on free-form wording the official
+template never produces); only the stress-harness row moved.
+
+`hit@10` never regresses on any split (stays `1.000` on holdout/public, flat
+`0.880` under stress) — every score movement above is pure ranking, never
+recall. Per-scenario under stress, the gain is spread across **boundary**
+(MRR `0.7843 → 0.8125`, +0.028), **browsing** (`0.4563 → 0.4865`, +0.030 — the
+hardest bucket, where a vague opening leaves the lexical pool least
+discriminating) and **buying** (`0.8017 → 0.8090`, +0.007); the one cost is
+**intent_override** (`0.8028 → 0.7750`, −0.028) — a reversed preference is
+exactly the case where the model's own judgment of "what the customer wants"
+can disagree with the state machine's `focused_text()` about which turns still
+count, and the same scenario regressed (more sharply, at −0.086) before the
+bug fixes too. This mirrors change 16's finding for the dense embedding route
+almost exactly: that route's stress gain fell to 16% of its pre-fix size once
+the lexical signal was repaired (`+0.0257 → +0.0042`); this layer's fell to
+about half (`+0.0071 → +0.0037`) — smaller because an LLM reading full product
+text is less dependent on the exact-token `query_spans()` signal than a cosine
+route encoding the same spans would be, but the direction and mechanism are
+identical: both were partly substituting for a broken lexical signal.
 
 The public-set number was measured twice, independently: `tools/sweep.py
---split all` (0.9252) and `tools/observe.py --config llm_rerank_gated`
-(0.925362) agree to within 0.0002 — the small residual is expected
-call-to-call nondeterminism in the live model (`temperature=0.0` reduces but
-does not eliminate it; `ideas_to_integrate_llm.md` names this risk
-explicitly), not a measurement error. `runs/baseline-*/viewer.html` and
-`runs/llm_rerank_gated-*/viewer.html` hold the full 200-session traces this
+--split all` (0.9254) and `tools/observe.py --config llm_rerank_gated`
+(0.925362 pre-merge, 0.9254 post-merge — see below) agree to within 0.0002 in
+both cases — the small residual is expected call-to-call nondeterminism in the
+live model (`temperature=0.0` reduces but does not eliminate it;
+`ideas_to_integrate_llm.md` names this risk explicitly), not a measurement
+error. `runs/baseline-*/viewer.html` and `runs/llm_rerank_gated-*/viewer.html`
+(regenerated on the merged codebase) hold the full 200-session traces this
 table is built from.
 
 ### Why this stays off by default
 
 Every split moved flat-to-positive and none regressed hit@10, so the layer
-is a genuine, measured win where the network is available — but three
-things keep `llm_weight=0.0` the shipped default rather than flipping it on:
-the offline score floor is a hard guarantee this project has kept since
-change 11 (a network-restricted scoring run must still get `0.923487`, not
-degrade unpredictably); the gain size (`+0.002` to `+0.007` on the sets that
-matter) sits inside or just outside this project's own noise band, the same
-territory change 9's "measured no-change" and change 13's "score-neutral by
-construction" occupy; and the one real regression (`intent_override` under
-stress, −0.086 MRR) is a genuine trade-off, not settled by one measurement
-run. The layer is built, tested (`tests/test_llm.py`, `LLMRerankTests` in
-`tests/test_components.py` — 152/152 total), wired through `tools/sweep.py`
-and `tools/observe.py` for anyone who wants to re-run it with
-`DEEPSEEK_API_KEY` set, and available as `AgentConfig(llm=LLMConfig(enabled=True),
-rerank=RerankConfig(llm_weight=1.0))` for a network-enabled demo — exactly
-the "opt-in layer with a deterministic fallback" `ideas_to_integrate_llm.md`
-called for.
-
-**Update — re-measured against change 16's fixed baseline.** The stress-harness numbers
-above were measured *before* change 16's three bug fixes (`e484cbe`, `b6a334f`, `0462f4d`)
-landed on this branch, against the old `router_on` baseline of `0.76086`. Change 16 itself
-shows that baseline moves to `0.77065` on the fixed codebase, and that the branch's dense
-embedding route's stress gain collapsed to 16% of its former size for the same reason — both
-were compensating for the same lexical bug (glued carrier framing polluting
-`query_spans()`). The corrected re-measurement is below.
+is a genuine, measured win where the network is available — but the case for
+it is weaker post-merge than the first measurement suggested, for the same
+reason the dense route's case weakened: three things keep `llm_weight=0.0`
+the shipped default rather than flipping it on. The offline score floor is a
+hard guarantee this project has kept since change 11 (a network-restricted
+scoring run must still get `0.923487`, not degrade unpredictably); the gain
+size (`+0.002` to `+0.004` on the sets that matter, down from the pre-fix
+`+0.002` to `+0.007`) sits inside or just outside this project's own noise
+band, the same territory change 9's "measured no-change" and change 13's
+"score-neutral by construction" occupy; and the one real regression
+(`intent_override` under stress) is a genuine trade-off in both measurements,
+not settled by either run. The layer is built, tested (`tests/test_llm.py`,
+`LLMRerankTests` in `tests/test_components.py` — 162/162 total post-merge),
+wired through `tools/sweep.py` and `tools/observe.py` for anyone who wants to
+re-run it with `DEEPSEEK_API_KEY` set, and available as
+`AgentConfig(llm=LLMConfig(enabled=True), rerank=RerankConfig(llm_weight=1.0))`
+for a network-enabled demo — exactly the "opt-in layer with a deterministic
+fallback" `ideas_to_integrate_llm.md` called for.

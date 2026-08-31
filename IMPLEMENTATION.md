@@ -1095,21 +1095,27 @@ turn score worse than leaving the layer off.
 The signals added since (facet agreement, category agreement, and the category tail match) are
 recorded per change in `agent_changes.md`.
 
-**The LLM layer, measured with live DeepSeek calls (change 16, `agent_changes.md`), against
-this branch's current baseline (public `0.923487`):**
+**The LLM layer, measured with live DeepSeek calls (change 17, `agent_changes.md`), against
+this branch's current baseline (public `0.923487`) — on the codebase with change 16's three
+lexical-span bug fixes in place:**
 
 | split | offline baseline | with the LLM layer on, gated | Δ |
 |---|---|---|---|
-| public set (200, official) | 0.923487 | 0.925362 | +0.0019 |
-| holdout (80) | 0.9149 | 0.9215 | +0.0066 |
-| stress: `paraphrase:heavy+browse-gated` | 0.76086 | 0.76798 | +0.0071 |
-| dev (120) | 0.9292 | 0.9280 | −0.0012 (noise) |
+| public set (200, official) | 0.923487 | 0.9254 | +0.0019 |
+| holdout (80) | 0.9149 | 0.9218 | +0.0069 |
+| stress: `paraphrase:heavy+browse-gated` | 0.77065 | 0.77432 | +0.0037 |
 
 `hit@10` never regresses anywhere — the layer only ever moves ordering. It stays off by
 default (`RerankConfig.llm_weight = 0.0`): the gains are real but small (inside or just past
 this project's own noise floor), and one scenario — `intent_override` under stress — gets
-measurably worse (MRR `0.7753 → 0.6892`), a genuine trade-off rather than something one run
-settles. See `agent_changes.md` change 16 for the full per-scenario breakdown.
+measurably worse (MRR `0.8028 → 0.7750`), a genuine trade-off rather than something one run
+settles. An earlier measurement, taken before change 16's fixes landed, found roughly double
+this stress-harness gain (`+0.0071`) against a baseline the fixes have since moved
+(`0.76086 → 0.77065`) — the same lexical-signal repair that shrank the branch's dense
+embedding route's stress gain to 16% of its former size shrank this layer's gain too, by
+about half, for the identical reason: both were partly compensating for `query_spans()`
+carrying glued, unmatched carrier text. See `agent_changes.md` change 17 for the full
+per-scenario breakdown.
 
 #### Ideas for this stage
 
@@ -1138,7 +1144,7 @@ settles. See `agent_changes.md` change 16 for the full per-scenario breakdown.
   DeepSeek call fused into the top of the pool and gated on `state.leader_margin` moves every
   split flat-to-positive with `hit@10` never regressing — but the gain is small and one
   scenario (`intent_override` under stress) regresses, so `RerankConfig.llm_weight` ships at
-  `0.0` rather than flipping the default. See the measured-effect table above and change 16.
+  `0.0` rather than flipping the default. See the measured-effect table above and change 17.
 - **Correct the retrieval score's length bias at its source.** The near-miss anatomy says the
   impostor wins on the retrieval score alone, and the reason is BM25's length normalisation
   favouring thin listings. Three attempts to correct it *after* the fact — as an additive
