@@ -88,10 +88,23 @@ class DeepSeekClient:
         api_key: str | None = None,
         model: str | None = None,
         timeout: int = 30,
+        temperature: float = 0.0,
     ) -> None:
         self.api_key = api_key or os.getenv("DEEPSEEK_API_KEY")
         self.model = model or DEFAULT_DEEPSEEK_MODEL
         self.timeout = timeout
+        # 0.0, not DeepSeek's own default: rerank_candidates() asks for a
+        # ranking, not creative text, and a re-traced session (tools/observe.py,
+        # tools/stress_observe) should reproduce the same rank it showed last
+        # time. At 0.2 (this project's old default, never actually wired to
+        # this client - see LLMConfig.temperature) two identical calls minutes
+        # apart on the same 15-candidate prompt returned different orderings,
+        # confirmed live while investigating why a session's viewer.html rank
+        # didn't match a later re-run (docs/team/agent_changes.md change 21).
+        # 0.0 does not guarantee bit-identical output (DeepSeek's own docs
+        # note residual nondeterminism even at 0), only makes it far less
+        # likely than at 0.2.
+        self.temperature = temperature
 
     @property
     def is_configured(self) -> bool:
@@ -123,7 +136,7 @@ class DeepSeekClient:
         body: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
-            "temperature": 0.2,
+            "temperature": self.temperature,
             "stream": False,
         }
 
@@ -191,7 +204,10 @@ class LLMConfig:
     enabled: bool = False
     provider: str = "deepseek"  # "deepseek" or "mock"
     model: str = DEFAULT_DEEPSEEK_MODEL
-    temperature: float = 0.2
+    #: 0.0 for reproducibility - rerank_candidates() is a ranking task, not
+    #: creative generation, and a retraced session should show the same rank
+    #: it showed before. See DeepSeekClient.__init__.
+    temperature: float = 0.0
     max_tokens: int = 1000
     timeout_seconds: float = 8.0
 
@@ -212,7 +228,11 @@ class LLMClient:
 
     def __init__(self, config: LLMConfig | None = None) -> None:
         self.config = config or LLMConfig()
-        self._deepseek = DeepSeekClient(model=self.config.model, timeout=int(self.config.timeout_seconds) or 30)
+        self._deepseek = DeepSeekClient(
+            model=self.config.model,
+            timeout=int(self.config.timeout_seconds) or 30,
+            temperature=self.config.temperature,
+        )
         self._consecutive_failures = 0
 
     def is_available(self) -> bool:

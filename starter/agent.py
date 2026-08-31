@@ -302,7 +302,17 @@ class Agent:
                     self.config.retrieval,
                     route_hint=plan.retrieval_route,
                 )
-                candidates = rerank(self.index, state, candidates, rerank_config, track=track)
+                # llm_scores=llm_scores, not a bare deterministic rerank: without
+                # it, a reroute silently discards any real DeepSeek ranking
+                # already paid for this turn (found live while investigating a
+                # traced session whose shown rank didn't match a re-run - see
+                # docs/team/agent_changes.md change 21). Re-fusing the same
+                # llm_scores dict against the rerouted pool is a safe reuse: it
+                # is keyed by parent_asin, so an asin the LLM never saw simply
+                # contributes 0, same as it would have contributed pre-reroute.
+                candidates = rerank(
+                    self.index, state, candidates, rerank_config, track=track, llm_scores=llm_scores
+                )
                 state.observe_pool(candidates, advance=False)
             self._apply_plan_to_state(state, plan)
         else:
