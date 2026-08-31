@@ -104,17 +104,22 @@ def install_probes():
         _PROBE["route"] = route
         return route
 
-    def retrieve_probe(index, state, config=None, route_hint=None):
+    # **kwargs rather than a fixed signature: on this branch Agent._respond()
+    # also passes track=, embed= and qvec= (dual-track routing and the dense
+    # sentence-embedding signal) on top of route_hint=. A fixed signature
+    # raises TypeError inside Agent.respond()'s catch-all handler, so the turn
+    # returns an empty envelope and the traced session silently scores 0.000.
+    def retrieve_probe(index, state, config=None, **kwargs):
         started = time.perf_counter()
-        pool = original["retrieve"](index, state, config, route_hint=route_hint)
+        pool = original["retrieve"](index, state, config, **kwargs)
         _PROBE["retrieve_ms"] = (time.perf_counter() - started) * 1000.0
         _PROBE["pool"] = pool
-        _PROBE["retrieval_route"] = route_hint or "terms"
+        _PROBE["retrieval_route"] = kwargs.get("route_hint") or "terms"
         return pool
 
-    def rerank_probe(index, state, candidates, config=None):
+    def rerank_probe(index, state, candidates, config=None, **kwargs):
         started = time.perf_counter()
-        ranked = original["rerank"](index, state, candidates, config)
+        ranked = original["rerank"](index, state, candidates, config, **kwargs)
         _PROBE["rerank_ms"] = (time.perf_counter() - started) * 1000.0
         _PROBE["ranked"] = ranked
         return ranked
