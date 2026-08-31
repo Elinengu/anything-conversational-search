@@ -819,6 +819,10 @@ def main() -> None:
     parser.add_argument("--dataset", default="data/public_set.jsonl")
     parser.add_argument("--out", default="runs", help="root directory for run folders")
     parser.add_argument("--tag", default="public", help="label for this run")
+    parser.add_argument(
+        "--config", default="",
+        help="name of a tools/sweep.py config to trace instead of the default AgentConfig()",
+    )
     parser.add_argument("--scenario", help="only sessions of this scenario_type")
     parser.add_argument("--only", help="comma-separated sample_ids")
     parser.add_argument("--limit", type=int, help="first N sessions after filtering")
@@ -845,7 +849,16 @@ def main() -> None:
     print(f"loading catalog {args.catalog} ...", flush=True)
     catalog_ids, categories, products = catalog_index(args.catalog)
 
-    agent = Agent(args.catalog)
+    agent_config = None
+    if args.config:
+        from tools.sweep import build_configs  # local import - avoids a load-time cycle
+
+        configs = build_configs(args.catalog)
+        if args.config not in configs:
+            raise SystemExit(f"unknown --config {args.config!r}; see tools/sweep.py build_configs()")
+        agent_config = configs[args.config]
+
+    agent = Agent(args.catalog, agent_config)
     tracer = TracingAgent(agent, samples, products, top_n=args.top)
 
     print(f"tracing {len(samples)} sessions ...", flush=True)
@@ -859,7 +872,7 @@ def main() -> None:
 
     if args.verify:
         print("verifying against an untraced official run ...", flush=True)
-        control = evaluate(Agent(args.catalog), samples, catalog_ids, categories, products)
+        control = evaluate(Agent(args.catalog, agent_config), samples, catalog_ids, categories, products)
         traced_score = result["recommended_technical_score"]
         control_score = control["recommended_technical_score"]
         if abs(traced_score - control_score) > 1e-9:
