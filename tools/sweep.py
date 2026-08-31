@@ -38,6 +38,16 @@ from starter.agent import Agent, AgentConfig  # noqa: E402
 DEV_FRACTION = 0.6
 
 
+def _lm_model_path() -> str:
+    """EXPLORATORY (kwongweng_fit_lambdamart): the LambdaMART model file for the
+    fit_lm_* rows. LM_MODEL_DIR points at the directory
+    tools/fit_weights_lambdamart.py wrote. Empty when unset -> the rows are
+    inert (model_path="" disables the term regardless of model_weight)."""
+    import os
+    d = os.environ.get("LM_MODEL_DIR", "")
+    return str(Path(d) / "lambdamart.txt") if d else ""
+
+
 def split_samples(samples: list[dict], split: str) -> list[dict]:
     """Deterministic split, stratified by scenario_type.
 
@@ -151,6 +161,24 @@ def build_configs(catalog: str) -> dict[str, AgentConfig]:
         # score bit-for-bit identically - the row exists to prove that.
         "natural_off": AgentConfig(natural_questions=False),
         "natural_on": AgentConfig(natural_questions=True),
+        # EXPLORATORY (branch kwongweng_fit_lambdamart) - Method 4, the non-linear
+        # (LightGBM LambdaMART) ranker trained on ~50k synthetic sessions across
+        # the whole catalog. See docs/team/lambdamart.md. Not a shipping
+        # candidate. Needs the trained model: set LM_MODEL_DIR to the directory
+        # tools/fit_weights_lambdamart.py wrote (holding lambdamart.txt +
+        # zstats.json). model_weight bracket-tuned on dev in the doc.
+        # fit_lm_additive: the shipped linear sum + a GBDT term (9th feature).
+        # fit_lm_replace: retrieval + GBDT term only (span_weight kept as the
+        # unit, all other linear weights zeroed) - the full-replacement probe.
+        "fit_lm_additive": AgentConfig(rerank=RerankConfig(
+            model_path=_lm_model_path(), model_weight=float(
+                __import__("os").environ.get("LM_MODEL_WEIGHT", "0.3")))),
+        "fit_lm_replace": AgentConfig(rerank=RerankConfig(
+            model_path=_lm_model_path(), model_weight=float(
+                __import__("os").environ.get("LM_MODEL_WEIGHT", "1.0")),
+            retrieval_weight=0.0, pair_weight=0.0, popularity_weight=0.0,
+            facet_weight=0.0, category_weight=0.0, tail_weight=0.0,
+            facet_conflict_weight=0.0)),
     }
 
 

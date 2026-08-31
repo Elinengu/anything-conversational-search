@@ -118,6 +118,17 @@ class RerankConfig:
     # where it was left in bm25 order and the span signal never applied.
     depth: int = 300
 
+    # ------------------------------------------------------------------ #
+    # EXPLORATORY, default-off (branch kwongweng_fit_lambdamart).
+    # Optional 9th additive term: a LightGBM LambdaMART ranker trained on
+    # ~50k synthetic sessions across the whole catalog (Method 4, see
+    # docs/team/lambdamart.md). model_path points at a LightGBM text model
+    # whose directory also holds zstats.json (feature z-score stats).
+    # model_weight == 0.0 (the default) is byte-identical to the shipped
+    # reranker - the term is never computed and the model is never loaded.
+    model_path: str = ""
+    model_weight: float = 0.0
+
 
 def _popularity(product: dict) -> float:
     """Small, bounded prior in [0, 1]. Tie-break only - see module docstring."""
@@ -263,6 +274,43 @@ def _category_match(
     return score
 
 
+# EXPLORATORY (branch kwongweng_fit_lambdamart) - see docs/team/lambdamart.md.
+# Feature order MUST match tools/fit_weights_lambdamart.py:FEATURES.
+_LM_FEATURES = (
+    "f_span_cov", "f_pair_cov", "f_retr_norm", "f_popularity", "f_facet_agree",
+    "f_category", "f_tail", "f_facet_conflict", "f_rating_number",
+    "f_average_rating", "f_text_len", "f_span_gap_to_max", "f_retr_rank",
+    "f_pool_size",
+)
+_LM_CACHE: dict = {}
+
+
+def _load_lm(model_path: str):
+    hit = _LM_CACHE.get(model_path)
+    if hit is not None:
+        return hit
+    import json as _json
+    import lightgbm as _lgb  # optional dep, only imported when a model is set
+
+    p = __import__("pathlib").Path(model_path)
+    booster = _lgb.Booster(model_file=str(p))
+    stats = _json.loads((p.parent / "zstats.json").read_text())
+    mean = [stats[c]["mean"] for c in _LM_FEATURES]
+    std = [stats[c]["std"] or 1.0 for c in _LM_FEATURES]
+    _LM_CACHE[model_path] = (booster, mean, std)
+    return _LM_CACHE[model_path]
+
+
+def _model_scores(model_path: str, feats: list, max_cov: float) -> list:
+    import numpy as _np
+
+    booster, mean, std = _load_lm(model_path)
+    m = _np.asarray(feats, dtype=float)
+    m[:, 11] = max_cov - m[:, 11]  # placeholder coverage -> span gap to pool max
+    m = (m - _np.asarray(mean)) / _np.asarray(std)
+    return list(booster.predict(m))
+
+
 def rerank(
     index: CatalogIndex,
     state: DialogState,
@@ -306,8 +354,13 @@ def rerank(
     # docs/team/rerank_signals.md records all four variants.
     authoritative_facets = extract_query_facets(state.focused_text())
 
+    use_model = bool(config.model_path and config.model_weight)
+    model_feats: list = []  # 14-float rows aligned with model_rows, or building
+    model_rows: list[int] = []  # index into `scored` each feature row belongs to
+    max_cov = 0.0
+
     scored: list[tuple[str, float]] = []
-    for parent_asin, retrieval_score in head:
+    for rank0, (parent_asin, retrieval_score) in enumerate(head):
         product = index.products.get(parent_asin)
         if product is None:
             scored.append((parent_asin, 0.0))
@@ -343,17 +396,37 @@ def rerank(
             state,
             product,
         )
+        popularity = _popularity(product)
         total = (
             config.span_weight * coverage
             + config.pair_weight * pair_coverage
             + config.retrieval_weight * (retrieval_score / top_score)
-            + config.popularity_weight * _popularity(product)
+            + config.popularity_weight * popularity
             + config.facet_weight * facet_score
             + config.category_weight * category_score
             + config.tail_weight * tail_score
             - config.facet_conflict_weight * conflict_score
         )
+        if coverage > max_cov:
+            max_cov = coverage
+        if use_model:
+            model_rows.append(len(scored))
+            model_feats.append([
+                coverage, pair_coverage, retrieval_score / top_score, popularity,
+                facet_score, category_score, tail_score, conflict_score,
+                float(product.get("rating_number") or 0),
+                float(product.get("average_rating") or 0.0),
+                float(len(text)),
+                coverage,  # placeholder; becomes (max_cov - coverage) below
+                float(rank0 + 1), float(len(head)),
+            ])
         scored.append((parent_asin, total))
+
+    if use_model and model_feats:
+        contrib = _model_scores(config.model_path, model_feats, max_cov)
+        for slot, delta in zip(model_rows, contrib):
+            asin, base = scored[slot]
+            scored[slot] = (asin, base + config.model_weight * delta)
 
     scored.sort(key=lambda item: (-item[1], item[0]))
     return scored + tail
