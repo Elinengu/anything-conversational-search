@@ -5,11 +5,15 @@ and cross-encoder work from branches `dense_rerank` / `semantic-rerank-experimen
 the live state machine and the paraphrase/browse-gated stress harness, neither of which
 existed when those branches were originally measured.
 
-**Headline: the S5 dense retrieval route (Step 3.4) is the first result in this whole
-investigation that clears this project's own noise floor at full 200-session scale -
-+0.0263 overall, +0.0561 on the specific browsing scenario the harness stresses. All four
-S6-rerank variants (ungated, two gated, a cleaner query-text version) measured net-zero
-or worse at full scale. The cross-encoder is still blocked.**
+**Headline: the S5 dense retrieval route (Step 3.4) is a genuine trade-off, confirmed
+across three full-scale measurements - a small, consistent cost on the cooperative
+simulator and holdout split (−0.004 to −0.007, both driven by the same browsing-MRR
+dilution the pre-state-machine bi-encoder attempts documented), bought back several times
+over under the realistic worst case this branch exists to defend against (+0.0263
+overall, +0.0561 browsing, `heavy+browse-gated`). It currently fires unconditionally and
+should not ship that way - the next step is gating it the way Step 3.2 already gates the
+S6 rerank term. All four S6-rerank variants (ungated, two gated, a cleaner query-text
+version) measured net-zero or worse at full scale. The cross-encoder is still blocked.**
 
 ---
 
@@ -26,7 +30,7 @@ each stage.
 | S6 rerank | same `dense_weight` term | **state-gated** on `state.over_general` (pool has stopped discriminating) | ✅ measured, 21 sessions — **identical to ungated**; the gate never closed on this subset (§3b) |
 | S6 rerank | same `dense_weight` term | **state-gated** — withheld on `intent_track=="browsing"` | ✅ measured, 21 sessions — small overall gain, but structurally limited: browsing only lasts 2-3 turns before promoting to buying, so the gate has almost no turns left to act on (§3b, traced directly) |
 | S6 rerank | `dense_query="slots"` — feed it `state.authoritative_text()` instead of the raw conversation | none (unconditional) | ✅ **measured at both 21 and 200 sessions** — 21: **+0.044**; 200: **+0.0023 (noise)**. The small-sample result did not hold (§3c) |
-| **S5 retrieval** — searches the full 50,000-product catalog by meaning, builds the candidate pool | `RetrievalConfig.use_dense` — a 5th RRF-fused route alongside the BM25 ones | none | ✅ **measured, 200 sessions — +0.0263 overall, +0.0561 browsing** (§3d). Beats the ~0.02 noise floor. Historically recovered 0/10 missing targets pre-state-machine (`docs/team/dense_route.md`) - this run recovered 1/18, so the mechanism is qualitatively different this time (see §3d) |
+| **S5 retrieval** — searches the full 50,000-product catalog by meaning, builds the candidate pool | `RetrievalConfig.use_dense` — a 5th RRF-fused route alongside the BM25 ones | none — fires unconditionally | ✅ **measured, 200 sessions, three ways** (§3d): stressed **+0.0263** (clears noise), official **−0.0042**, holdout **−0.0065** (both within noise, same browsing-MRR-dilution mechanism). A confirmed trade-off, not shipped unconditionally |
 | Cross-encoder rerank (S6, different model) | scores `(query, candidate)` pairs jointly | top-20 only, fired on state ambiguity signals (Plan Part 4) | ⬜ **blocked** — no reachable model source found, not attempted |
 
 **In short: all four S6-rerank variants are net-zero-or-worse at full scale. The S5
@@ -258,17 +262,51 @@ matters more here than it did pre-state-machine.
 measured at full scale directly, on the exact scenario this whole branch exists to
 stress, and it holds up where every S6 rerank variant did not.
 
+### Robustness: cooperative simulator + holdout split
+
+Two follow-up checks, both at trustworthy sample sizes:
+
+| customer / split | router_on | dense_route_all | Δ |
+|---|---|---|---|
+| `official` (200, cooperative) | 0.92349 | 0.91931 | **−0.0042** |
+| holdout (80, cooperative) | 0.9149 | 0.9084 | **−0.0065** |
+| `heavy+browse-gated` (200, stressed) | 0.76086 | 0.78718 | **+0.0263** |
+
+**Both cooperative checks agree, and land on the same mechanism.** Small, consistent,
+within-noise cost - and in both, it's driven by the *same* thing: browsing MRR drops
+(official: 0.8715 -> 0.8343; holdout: 0.87 -> 0.80). Hit@10 is unchanged at 1.000 in both
+- no recall is lost, only some ranking precision. This is exactly the "dilutes good
+lexical matches when the pool is already correct" pattern `dense_rerank.md` /
+`dense_route.md` documented for the pre-state-machine agent, just smaller in magnitude
+here (there: browsing MRR 0.855 -> 0.829 pre-state-machine cooperative; here: 0.87 ->
+0.83-0.80).
+
+**Verdict: this is a genuine, coherent trade-off, not noise on one side and a fluke on
+the other.** The embedding costs a small, consistent amount when the lexical routes are
+already working (cooperative/holdout) and buys a real, noise-clearing gain specifically
+when they are not (paraphrased + browse-gated). That is the shape a *gated* signal is
+for - `use_dense` currently fires unconditionally (§3d intro); Step 3.2 already built
+`_dense_gate_open` for the S6 rerank term (`state.over_general`,
+`intent_track`-exclusion) but it was never wired to the S5 retrieval route. Given this
+trade-off, that extension - fire `use_dense` only when the state machine's own signals
+say lexical retrieval is struggling - is the natural next step, not shipping
+`dense_route_all` unconditionally. It should stay flag-gated and off by default (which is
+already how it ships: `RetrievalConfig.use_dense: bool = False`) until that gate exists
+and is measured.
+
 ---
 
 ## 4. What has not been checked
 
-- **Whether §3d's dense_route_all gain is robust to the official (cooperative) simulator
-  and to `--verify`-level scrutiny** - it has one measurement, on the stressed customer
-  only. Not yet checked: the cooperative `official` customer (does it cost anything
-  there, the way earlier bi-encoder attempts did - `docs/team/dense_rerank.md`,
-  `dense_route.md`), the holdout split (`tools/sweep.py --split holdout`), and whether
-  it is stable across a second run (RRF/embedding paths are deterministic here, but this
-  has not been independently re-run to confirm).
+- **Gating `use_dense` on the state machine's own signals** (`state.over_general`,
+  `intent_track`), the way `_dense_gate_open` already does for the S6 rerank term (§3b) -
+  motivated directly by the robustness result above: `dense_route_all` fires
+  unconditionally and has a real (if small) cooperative cost, so a gate that gives it up
+  only when word-matching has visibly stopped working is the natural next step. Not
+  designed or coded for the retrieval route yet.
+- **Whether §3d's result is stable across a second run** - RRF fusion and ONNX inference
+  are deterministic here in principle, but this has not been independently re-run to
+  confirm, only reasoned about.
 - **Whether combining §3d (S5 retrieval) with §3c (slots query text) does better than
   either alone** - untested. §3d used `full_text()` for its query (the default); §3c
   showed query-text quality plausibly matters more on this branch than it used to.
@@ -309,6 +347,10 @@ python3 tools/stress_harness.py --customer paraphrase:heavy+browse-gated \
 # §3d at full scale - the one result that clears the noise floor
 python3 tools/stress_harness.py --customer paraphrase:heavy+browse-gated \
     --configs router_on,dense_route_all
+
+# §3d robustness: cooperative simulator + holdout split
+python3 tools/stress_harness.py --customer official --configs router_on,dense_route_all
+python3 tools/sweep.py --split holdout --configs router_on,dense_route_all
 ```
 
 Everything above is off by default (`dense_weight=0.0`, `use_dense=False`, both
