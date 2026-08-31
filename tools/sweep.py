@@ -146,6 +146,22 @@ def build_configs(catalog: str) -> dict[str, AgentConfig]:
         "weights_argmax": AgentConfig(rerank=RerankConfig(
             popularity_weight=0.8, retrieval_weight=0.1, facet_weight=0.5,
             tail_weight=1.2, facet_conflict_weight=0.0)),
+        # Gaussian-process Bayesian-optimization dev argmax (tools/fit_weights_bo.py,
+        # branch kwongweng_fit_bo, docs/team/bo.md). Rounded to the fit-grid.
+        # Exploratory - NOT a shipping candidate: every fitted vector regresses the
+        # adversarial hard set 0.803 -> ~0.784 and the plain popularity_weight=2.0
+        # is a knife-edge (dev improves when it is halved). Same overfit corner as
+        # weights_argmax, reached in a third of the evaluations.
+        "fit_bo_plain": AgentConfig(
+            use_router=False, policy=FixedPolicy(),
+            rerank=RerankConfig(
+                popularity_weight=2.0, retrieval_weight=0.4, facet_weight=0.3,
+                category_weight=0.02, tail_weight=0.3, pair_weight=0.8,
+                facet_conflict_weight=0.4)),
+        "fit_bo_default": AgentConfig(rerank=RerankConfig(
+            popularity_weight=2.0, retrieval_weight=0.3, facet_weight=0.8,
+            category_weight=0.0, tail_weight=1.2, pair_weight=2.0,
+            facet_conflict_weight=0.0)),
         # Pool-aware clarification wording (src/phrasing.py). ask_attribute is
         # unchanged and the simulator never reads `message`, so these two must
         # score bit-for-bit identically - the row exists to prove that.
