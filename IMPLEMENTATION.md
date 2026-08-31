@@ -345,6 +345,21 @@ python3 tools/sweep.py --split holdout
 python3 tools/sweep.py --split all --configs floor,rerank,infogain
 ```
 
+**A probe must accept whatever the agent passes it.** `tools/observe.py` and
+`tools/stress_observe/` trace a session by temporarily replacing `retrieve()` and `rerank()`
+with wrappers that record timings and candidate pools. Those wrappers had fixed signatures
+written before the agent grew extra keyword arguments, so every call raised `TypeError` — which
+the agent's own catch-all handler swallowed, returning an empty answer for the turn. The traced
+session then scored `0.000` while looking like a legitimate result. Worse, the empty answer made
+the diagnostic report the target as `never_retrieved` — "never entered the candidate pool, a
+recall problem" — which is a conclusion about the *retrieval stage*, drawn entirely from a
+broken tracing tool. Both wrappers now accept and forward arbitrary keyword arguments, so they
+cannot drift out of step with the agent again. Aggregate scores from `tools/stress_harness.py`
+were never affected: it does not install these wrappers.
+
+The general lesson is the one this stage exists to enforce — **a measurement tool that fails
+silently is worse than no tool**, because it produces numbers that look real.
+
 #### Measured effect
 
 No direct score. Every measurement in this document exists because of it.
@@ -521,19 +536,52 @@ in the right direction: …"; a buying customer hears "To narrow this down: …"
 product requirement even where it is not a scoring one, and the measurement is recorded in the
 module docstring so the next reader doesn't repeat the experiment.
 
+#### Branch `dual_tracking` / `stress_harness` — routing the *behaviour*, and a harness that can score it
+
+On the branch `dual_tracking` (not merged to `main`), `AgentConfig.use_router` is
+widened: the track now drives the clarification policy (buying → `FixedPolicy`,
+browsing → `InfoGainPolicy`), per-track rerank weights, an optional buying-track
+hard filter, and per-track recommendation timing, with `detect_turn_intent`
+re-checking the track every turn. `use_router=False` restores the flat pipeline
+bit-for-bit.
+
+Why it stayed on a branch: on the fully-cooperative public simulator this costs
+~0.013 (public 0.9305 → 0.9177, dev 0.9418 → 0.9268, holdout 0.9136 → 0.9041,
+one adversarial bucket −0.013) and gains nothing, because that simulator hands
+over every constraint on the broad "anything else?" question regardless of track.
+`tools/stress_harness.py --customer browse-gated` makes the browsing customer
+realistic — it discloses only when asked a pointed question — and there routing
+lifts browsing Hit@10 0.59 → 0.95 and MRR 0.24 → 0.67 (+0.147 overall) with
+buyers unchanged; misroute cost is ~10× asymmetric (browser-as-buyer −0.66 MRR
+vs buyer-as-browser −0.07). The `stress_harness` branch also composes that with
+paraphrase, and its retrieval diagnostic shows the real gap: under a
+gated + paraphrasing browser, **9/80 browsing targets never enter the pool** vs
+1/80 for buyers — the retrieval weakness is on the browsing track. Write-ups:
+`docs/team/dual_track_routing.md`, `docs/team/stress_harness.md`.
+
 #### Ideas for this stage
 
-- **Route the *question*, not the retrieval.** The measurement showed routing retrieval is
-  pointless, but nobody tested routing the clarification policy. A buying customer who has
-  already stated a hard requirement might be better served by a *narrow* confirming question,
-  while a browser needs broad ones. That is a different lever and remains untested.
+- ~~**Route the *question*, not the retrieval.**~~ **Done on branch `dual_tracking`**
+  (`starter/agent.py` `_policy_for` / `_track`): buying keeps the broad question,
+  browsing runs `InfoGainPolicy`. Measured net-negative on the public simulator,
+  strongly positive on `tools/stress_harness.py --customer browse-gated`.
+- **Route the *retrieval* for browsers (not buyers).** The `stress_harness`
+  diagnostic shows a gated + paraphrasing browser loses 9/80 targets out of the
+  300-pool (buyers: 1/80). A browsing-only query-expansion route, or a
+  category-only fallback when disclosure is too sparse to form a query, is the
+  next lever — and it is the *opposite* of "narrow the buyer's pool" (buyers are
+  the healthy case; `rerank.py:depth=300` exists because targets already sit deep
+  in BM25 order).
 - **Detect scenario, not just track.** The router distinguishes two of four scenarios. Detecting
   *boundary* customers (people who answer "I have no preference") early would let the agent stop
   spending questions on someone who won't answer them — currently that is only learned after a
-  wasted turn, via `dead_attributes` in `src/state.py`.
-- **Confidence-weighted routing.** `classify()` returns a hard label. Returning a confidence, and
-  blending behaviour when uncertain, would avoid an all-or-nothing decision made on a single
-  sentence.
+  wasted turn, via `dead_attributes` in `src/state.py`. The branch confirms the cost of *not*
+  doing this: boundary customers open identically to browsers, get routed to the browsing
+  policy, and lose ~0.24 MRR on the public dev split.
+- ~~**Confidence-weighted routing.**~~ Partially addressed on branch `dual_tracking`:
+  `classify()` still returns a hard label, but `_track` re-evaluates every turn via
+  `detect_turn_intent`, so a wrong turn-1 call is corrected once the customer discloses
+  (browsing → buying, one-way).
 
 ---
 
@@ -600,6 +648,36 @@ comparing the code to the brief will otherwise think it is a bug.
 - **`productive_turns`** — whether an answer actually disclosed something new. This is how the
   policy tells the difference between "the customer is still telling me things" and "I have
   exhausted this line of questioning".
+
+**Reading a message that was not written to a template.** Both signals above are computed from
+`constraint_spans()` (`src/text.py`), which splits a customer message on punctuation and keeps
+each resulting fragment as a stated constraint. That is exactly right for the evaluator's own
+wording, where a colon always separates the framing from the value — "For that, what matters
+is: Stainless Steel Band." splits cleanly into the value alone. It is wrong for any customer
+who phrases things freely, and two such cases were found and fixed:
+
+- **Carrier framing was being glued onto the value.** "I'd also want it to be synthetic sole."
+  has no separator between the framing and the value, so the whole sentence was recorded as one
+  constraint — `i d also want it to be synthetic sole` — and the real value, `synthetic sole`,
+  was lost. "One more thing - a breathable net weave." recorded a bogus `one more thing`
+  alongside the real value. The fix strips a run of stopwords off *both ends* of each fragment,
+  generalising the leading-only strip `pair_spans()` in the same file already did. This matters
+  well beyond this stage: `query_spans()` feeds S6's span-coverage signal, and a glued fragment
+  almost never appears literally in a product's text, so the pollution was quietly weakening the
+  main ranking signal rather than merely making the ledger untidy.
+- **A refusal was being recorded as a disclosure.** A customer who is only browsing may answer a
+  broad question with a stall — "I'm still just browsing, ask me about one particular thing" —
+  which split into two invented constraints *and* counted as a productive turn, resetting the
+  unproductive streak. Since that streak is the only input to stagnation detection, a
+  conversation stuck in exactly the loop stagnation recovery exists for could never trigger it.
+  A `STALL_CUES` pattern now treats a stall like a decline for recording purposes, but **not**
+  for `dead_attributes` — a stall is not "no preference for X", so the attribute stays live.
+  The check is deliberately skipped on turn 1, because the evaluator opens every browsing
+  session with "I'm looking for {category}, but I'm still exploring." — matching the pattern.
+  Applying it there would discard the single most informative message of every browsing session.
+
+Both were found by auditing this branch against a sibling branch that had already fixed them,
+and both were confirmed present here by running them, not by reading the code.
 
 #### Measured effect
 
@@ -717,9 +795,9 @@ Agent(catalog, AgentConfig(policy=InfoGainPolicy(agent.facets)))
 Separate from *what to ask* is *how to say it*. `FixedPolicy` keeps
 `ask_attribute="other"` because that is the score-optimal extraction (§3
 consequence: the simulator returns two constraints of any type for `other` and
-can return zero for a specific attribute, which also retires that attribute), and
-the simulator never reads the English `message` field at all. So the sentence is
-free to be a real, guiding question while the machine-readable field stays put.
+can return zero for a specific attribute, which also retires that attribute).
+The simulator never reads the English `message`, but the two outputs still form a
+public contract: the natural question now always agrees with the structured field.
 
 `clarify()` (`src/phrasing.py`) builds the message. From turn 2 onward — once
 the retrieval pool has been shaped by something the shopper actually said — it
@@ -729,13 +807,17 @@ declined, measures how evenly the pool is split on it — the same `gain_ratio`
 (entropy ÷ maximum entropy) the `InfoGainPolicy` uses. Facets that are genuinely
 split (at least 25% of the pool resolves it, the top value holds no more than
 90% of the mass, two or more values present) are collected, ordered by split
-quality, and the one at `turn_count % count` is voiced — so a session that stays
-on this path asks about a different facet each turn rather than repeating one.
-It names the top two or three values in one of ten complete sentence templates:
+quality, and the one at `turn_count % count` is voiced as optional guidance for
+an open `other` question. It names the top two or three values while explicitly
+allowing the customer to provide another detail:
 
-> "The materials I'm looking at come in leather and canvas — do you lean one way
->  on material?"
-> "So far the list covers black, gold and silver — any steer on colour?"
+> "The shortlist differs on material: leather and canvas. Is that important, or
+>  is there another detail I should prioritize?"
+
+When `ask_attribute` is specific, the grounded path is restricted to that exact
+facet: a `material` action may name leather and canvas; a `size` action can never
+voice a material split. Non-voiceable attributes use their matching specific
+question bank.
 
 The turn-2 gate does **not** require a *productive* turn. Single-word
 disclosures ("leather", "black") never form a multi-word constraint span, so
@@ -751,7 +833,8 @@ rotation of the broad question ("Anything else I should keep in mind?"); when a
 specific ladder rung is asked (`FixedPolicy.FALLBACK` after `other` is declined)
 it uses a three-way rotation of that attribute's own question ("Any must-have
 features?", "How should this fit?"). The whole path is wrapped so a phrasing bug
-degrades to a good question, never an empty turn. `brand` and `budget` and
+degrades to a question for the same `ask_attribute`, never an unrelated broad
+question or an empty turn. `brand` and `budget` and
 `category` are excluded from the *voiced* facets — brand has thousands of
 values, budget is null for 79% of the catalog, and the `category` facet's values
 are path fragments ("women", "novelty").
@@ -777,7 +860,7 @@ session-to-session. `natural_questions=False` bypasses all of this through
 
 This lives in S4 rather than S9 because it is the customer-facing half of the
 clarification decision, and it belongs *beside* `InfoGainPolicy` — it reuses the
-same pool-split measure, just to choose what to voice rather than what to ask.
+same pool-split measure while preserving the question/action contract.
 
 It is deterministic and template-based on purpose: the facet vocabularies are
 small (§S1) so the space is enumerable, exactly like the rest of the pipeline.
@@ -814,10 +897,10 @@ clarification prompts"), not score. Default on;
 - **Two-step lookahead.** The policy is greedy, picking the best single question. Some pairs of
   questions are worth more together than either is alone.
 - **Question phrasing from the candidates.** *Done — `src/phrasing.py`, see "Phrasing" above.*
-  The `message` now names the facet the live pool is most split on and its top values
-  ("For the material, I'm seeing leather and canvas — do you have a preference?"), rotated so
-  it does not repeat, while `ask_attribute` stays `other`. Deterministic, no model, score
-  unchanged by construction. An LLM polish layer would slot in as `_grounded`'s replacement.
+  For `ask_attribute="other"`, the message can name a useful live-pool split but
+  explicitly remains open to another detail. A specific action only voices that
+  same facet. Deterministic, no model, score unchanged by construction. An LLM
+  polish layer would slot in as `_grounded`'s replacement.
 
 ---
 
@@ -980,11 +1063,59 @@ candidates on the right leaf. It is worth **+0.0058** on the public set and **+0
 adversarial set, entirely through better ordering — hit rate does not move on either set, which
 is exactly what a reranking signal should look like (`RerankConfig.tail_weight = 0.8`).
 
+**Later addition — opt-in LLM semantic reranking (DeepSeek), gated on pool ambiguity.**
+Every signal above is exact-token: `span_coverage`, facet agreement and the category
+tail match all go to zero the moment a candidate says "cowhide" where the customer said
+"leather". A real language model can read past that. `src/llm.py` adds a small client
+(`urllib` only, no new dependency) for DeepSeek's chat API: once per turn it can be shown
+the top handful of already-ranked candidates and asked to reorder them by how well each
+matches the conversation so far.
+
+Two design choices keep this from ever costing the guaranteed offline score. First, it is
+*fused*, not a replacement: the model's suggested order becomes one more additive term in
+`rerank()`'s scoring formula (`RerankConfig.llm_weight`, same shape as `dense_weight`), so
+a bad reorder from the model can only nudge the ranking, never override the lexical
+evidence outright. Second, it is *gated*: `RerankConfig.llm_gate_margin` reads
+`state.leader_margin` — the previous turn's gap between the top two candidates — and only
+calls the model when that gap is small (`< 0.05`, the same signal `dense_gate_over_general`
+already uses). A pool with a clear lexical leader has nothing to gain from a second,
+nondeterministic opinion; an undecided one is exactly where a semantic read can break a
+tie exact-token matching cannot see. `RerankConfig.llm_weight = 0.0` by default, so nothing
+about the shipped agent's offline guarantee changes — every existing test and config still
+runs with zero network calls.
+
+`LLMReranker.rank()` treats *any* failure — no API key, a timeout, a malformed reply, an
+id the model invented — as "no opinion" and returns `None`; `rerank()` then leaves the
+lexical order exactly as it was. There is no path where a flaky network call can make a
+turn score worse than leaving the layer off.
+
 #### Measured effect
 
 **0.7799 → 0.8543** for verbatim span coverage — the single largest gain after dialog state.
 The signals added since (facet agreement, category agreement, and the category tail match) are
 recorded per change in `agent_changes.md`.
+
+**The LLM layer, measured with live DeepSeek calls (change 17, `agent_changes.md`), against
+this branch's current baseline (public `0.923487`) — on the codebase with change 16's three
+lexical-span bug fixes in place:**
+
+| split | offline baseline | with the LLM layer on, gated | Δ |
+|---|---|---|---|
+| public set (200, official) | 0.923487 | 0.9254 | +0.0019 |
+| holdout (80) | 0.9149 | 0.9218 | +0.0069 |
+| stress: `paraphrase:heavy+browse-gated` | 0.77065 | 0.77432 | +0.0037 |
+
+`hit@10` never regresses anywhere — the layer only ever moves ordering. It stays off by
+default (`RerankConfig.llm_weight = 0.0`): the gains are real but small (inside or just past
+this project's own noise floor), and one scenario — `intent_override` under stress — gets
+measurably worse (MRR `0.8028 → 0.7750`), a genuine trade-off rather than something one run
+settles. An earlier measurement, taken before change 16's fixes landed, found roughly double
+this stress-harness gain (`+0.0071`) against a baseline the fixes have since moved
+(`0.76086 → 0.77065`) — the same lexical-signal repair that shrank the branch's dense
+embedding route's stress gain to 16% of its former size shrank this layer's gain too, by
+about half, for the identical reason: both were partly compensating for `query_spans()`
+carrying glued, unmatched carrier text. See `agent_changes.md` change 17 for the full
+per-scenario breakdown.
 
 #### Ideas for this stage
 
@@ -1008,6 +1139,12 @@ recorded per change in `agent_changes.md`.
   never mentions grey was merely left unrewarded, not pushed down. This ships as
   `RerankConfig.facet_conflict_weight` (`_facet_conflicts`), judged against `focused_text()`
   and guarded so that silence is never punished.
+- ~~**LLM semantic reranking (Tier 2 #3, `docs/team/ideas_to_integrate_llm.md`).**~~ **Built,
+  measured, kept — off by default.** Unlike the cross-encoder (change 11, removed), a real
+  DeepSeek call fused into the top of the pool and gated on `state.leader_margin` moves every
+  split flat-to-positive with `hit@10` never regressing — but the gain is small and one
+  scenario (`intent_override` under stress) regresses, so `RerankConfig.llm_weight` ships at
+  `0.0` rather than flipping the default. See the measured-effect table above and change 17.
 - **Correct the retrieval score's length bias at its source.** The near-miss anatomy says the
   impostor wins on the retrieval score alone, and the reason is BM25's length normalisation
   favouring thin listings. Three attempts to correct it *after* the fact — as an additive

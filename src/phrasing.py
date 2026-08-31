@@ -5,16 +5,17 @@ the ``ask_attribute`` field the simulator reads. This module decides *how to say
 it*.
 
 ``FixedPolicy`` keeps ``ask_attribute="other"`` because that is the score-optimal
-extraction on the local evaluator: the simulator ignores the English sentence
-entirely, and a specific attribute can whiff (0 constraints returned) and retire
-itself, while ``other`` never does. So the sentence is pure product realism -
-instead of repeating "Is there anything else that matters for this one?" every
-turn, the agent names a facet the live candidate pool is genuinely split on:
+extraction on the local evaluator: a specific attribute can whiff (0 constraints
+returned) and retire itself, while ``other`` never does. The customer-facing
+sentence must still ask the same question as that structured field. For ``other``
+we may ground the prompt in a facet the live candidate pool is split on, but the
+question stays explicitly open-ended:
 
-    "The materials I'm looking at come in leather and canvas - do you lean one
-     way on material?"
+    "The shortlist differs on material: leather and canvas. Is that important,
+     or is there another detail I should prioritize?"
 
-while ``ask_attribute`` is untouched.
+For a specific ``ask_attribute``, a grounded prompt is allowed only for that same
+attribute. This keeps the natural message and machine-readable action aligned.
 
 Everything customer-facing here is deterministic and template-based on purpose.
 Three template banks (a lead-in by dialogue posture, a grounded question over
@@ -81,6 +82,18 @@ GROUNDED_TEMPLATES = (
     "So far the list covers {vals} - any steer on {noun}?",
     "For {noun} I've got {vals} in the running. Want me to favour one?",
     "{subject} vary here - {vals}. Is there one you'd prefer?",
+)
+
+#: Pool-aware prompts for ``ask_attribute="other"``. They can point out a useful
+#: dimension, but every template explicitly leaves the answer open to another
+#: detail. This is different from ``GROUNDED_TEMPLATES``, which asks directly
+#: about one specific attribute.
+GROUNDED_BROAD_TEMPLATES = (
+    "The shortlist differs on {noun}: {vals}. Is that important, or is there another detail I should prioritize?",
+    "I'm seeing {vals} across {noun}. Should I use that to narrow things down, or is there another detail that matters more?",
+    "One useful split is {noun}: {vals}. Does that matter to you, or should I focus on another detail?",
+    "The current options vary on {noun}, including {vals}. Is that relevant, or is there another detail I should keep in mind?",
+    "I could narrow these by {noun} - the main directions are {vals}. Would that help, or is another detail more important?",
 )
 
 #: Used when the pool is not cleanly split on any facet, or on turn 1.
@@ -266,27 +279,40 @@ def _broad(state: DialogState, attribute: str) -> str:
 
 
 def _grounded(
+    attribute: str,
     state: DialogState,
     candidates: list[tuple[str, float]],
     store: FacetStore,
     depth: int,
 ) -> str | None:
-    """A question about a facet the live pool is genuinely split on, or None.
+    """A contract-aligned question grounded in a live pool split, or None.
 
-    Qualifying facets are ranked by split quality and rotated by turn, so a
-    session that stays on this path varies the facet rather than repeating one.
+    A specific ``attribute`` can only voice its own split. ``other`` may point to
+    the most useful unresolved split, but uses an explicitly open-ended template.
+    Non-voiceable specific attributes fall back to their specific question bank.
     """
     if not candidates:
         return None
+    if attribute == "other":
+        eligible = VOICEABLE
+    elif attribute in VOICEABLE:
+        eligible = (attribute,)
+    else:
+        return None
+
     counts, total = weighted_value_counts(candidates, store, depth, VOICEABLE)
     if total <= 0.0:
         return None
 
+    # Agent._respond records the current ask before calling clarify(). Exclude
+    # questions from earlier turns, but do not make the current attribute
+    # ineligible merely because it was just recorded.
+    prior_asks = state.asked[:-1] if state.asked and state.asked[-1] == attribute else state.asked
     qualifying: list[tuple[float, str, list[str]]] = []
-    for attribute in VOICEABLE:
-        if attribute in state.dead_attributes or attribute in state.asked:
+    for candidate_attribute in eligible:
+        if candidate_attribute in state.dead_attributes or candidate_attribute in prior_asks:
             continue
-        distribution = counts.get(attribute) or {}
+        distribution = counts.get(candidate_attribute) or {}
         resolved = sum(distribution.values())
         if resolved <= 0.0 or resolved / total < _MIN_COVERAGE:
             continue
@@ -296,21 +322,23 @@ def _grounded(
         present = [value for value, mass in ordered if mass / resolved >= _MIN_VALUE_SHARE]
         if len(present) < 2:
             continue
-        qualifying.append((_gain_ratio(distribution), attribute, present[:3]))
+        qualifying.append((_gain_ratio(distribution), candidate_attribute, present[:3]))
 
     if not qualifying:
         return None
-    # Most-split facet first, then rotate by turn so a session that stays on the
-    # grounded path does not ask about the same facet every turn.
+    # For ``other``, rotate among qualifying directions so the guidance does not
+    # repeat. A specific ask has at most one qualifying direction.
     qualifying.sort(key=lambda item: -item[0])
-    _, attribute, values = qualifying[state.turn_count % len(qualifying)]
+    _, voiced_attribute, values = qualifying[state.turn_count % len(qualifying)]
+    templates = GROUNDED_BROAD_TEMPLATES if attribute == "other" else GROUNDED_TEMPLATES
     template = _pick(
-        GROUNDED_TEMPLATES,
-        state.opening or state.session_id, "grounded", attribute, state.turn_count,
+        templates,
+        state.opening or state.session_id, "grounded", attribute, voiced_attribute,
+        state.turn_count,
     )
     return template.format(
-        noun=ATTR_NOUN[attribute],
-        subject=ATTR_SUBJECT[attribute],
+        noun=ATTR_NOUN[voiced_attribute],
+        subject=ATTR_SUBJECT[voiced_attribute],
         vals=_join(values),
     )
 
@@ -343,7 +371,8 @@ def clarify(
         # facet the pool has not split on.
         if state.turn_count >= 2:
             grounded = _grounded(
-                state, candidates, store, int(getattr(config, "phrasing_depth", 40))
+                attribute, state, candidates, store,
+                int(getattr(config, "phrasing_depth", 40)),
             )
             if grounded:
                 return _tone(route, grounded, state)
@@ -351,4 +380,4 @@ def clarify(
     except Exception:
         # A phrasing bug must never cost a session - degrade to a good question,
         # not to the empty response the outer handler would produce.
-        return _tone(route, _broad(state, "other"), state)
+        return _tone(route, _broad(state, attribute), state)

@@ -38,8 +38,16 @@ Everything under [`team/`](team/) is ours to edit freely.
 | [`team/category_tail_match.md`](team/category_tail_match.md) | The last public-set miss, and the evidence that the fix does not overfit |
 | [`team/reranking_explained.md`](team/reranking_explained.md) | How the reranking stage works, from first principles |
 | [`team/intent_override_retrieval.md`](team/intent_override_retrieval.md) | Handling the intent-override scenario in retrieval |
+| [`team/bm25.md`](team/bm25.md) | How BM25 / BM25F lexical scoring works, grounded in `src/index.py`, and why recall is ~100% on the public set but brittle to paraphrase |
+| [`team/stress_harness.md`](team/stress_harness.md) | (branch `stress_harness`) `tools/stress_harness.py` — paraphrase / browsing-gated / decoy customer stressors and the retrieval-vs-ranking diagnostic |
+| [`team/dual_track_routing.md`](team/dual_track_routing.md) | (branch `dual_tracking`) making Buying/Browsing routing drive behaviour, and why it stayed on a branch |
+| [`team/dense_rerank.md`](team/dense_rerank.md) | (branch `dense_rerank`) `bge-small` embedding cosine as an S6 rerank signal, tested under paraphrase: helps only the degenerate tail, wash on the full set |
+| [`team/dense_route.md`](team/dense_route.md) | (branch `dense_rerank`) same `bge-small` as an S5 retrieval route, browsing-track-only — recovers **none** of the `never_retrieved` tail, slightly negative overall |
+| [`team/branch_state_encoder_eval_changes.md`](team/branch_state_encoder_eval_changes.md) | (branch `state-encoder-eval`) re-running the dense work against the live state machine, and a cross-branch bug audit — the one embedding result that cleared the noise floor turned out to be compensating for a broken lexical signal, and does not survive fixing it; no embedding configuration now clears noise on any check |
 
-Each `.md` has a `.pdf` rendering beside it.
+Each `.md` has a `.pdf` rendering beside it; regenerate with
+`python3 tools/md_to_pdf.py <file>.md <file>.pdf` (a lightweight reportlab
+renderer — headings, tables, code, lists).
 
 Three documents live at the repository root rather than here, because they are the
 first things a reader opens: [`../README.md`](../README.md),

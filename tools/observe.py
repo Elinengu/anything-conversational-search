@@ -87,7 +87,11 @@ def install_probes():
     import starter.agent as agent_module
 
     original = {
-        name: getattr(agent_module, name) for name in ("classify", "retrieve", "rerank")
+        name: getattr(agent_module, name)
+        for name in (
+            "classify", "detect_turn_intent", "retrieve", "rerank",
+            "AdaptiveOrchestrator",
+        )
     }
 
     def classify_probe(opening):
@@ -95,23 +99,49 @@ def install_probes():
         _PROBE["route"] = route
         return route
 
-    def retrieve_probe(index, state, config=None):
+    def detect_probe(*args, **kwargs):
+        route = original["detect_turn_intent"](*args, **kwargs)
+        _PROBE["route"] = route
+        return route
+
+    # **kwargs rather than a fixed signature: Agent._respond() passes track=,
+    # embed= and qvec= (dual-track routing and the dense sentence-embedding
+    # signal) on top of route_hint= - a fixed signature raises TypeError inside
+    # Agent.respond()'s catch-all handler, so the turn silently returns an
+    # empty envelope and the traced session reports a false never_retrieved.
+    # Independently found and fixed both here and on state-encoder-eval
+    # (e484cbe); this is that fix, extended to cover any future new keyword.
+    def retrieve_probe(index, state, config=None, **kwargs):
         started = time.perf_counter()
-        pool = original["retrieve"](index, state, config)
+        pool = original["retrieve"](index, state, config, **kwargs)
         _PROBE["retrieve_ms"] = (time.perf_counter() - started) * 1000.0
         _PROBE["pool"] = pool
+        _PROBE["retrieval_route"] = kwargs.get("route_hint") or "terms"
         return pool
 
-    def rerank_probe(index, state, candidates, config=None):
+    def rerank_probe(index, state, candidates, config=None, **kwargs):
         started = time.perf_counter()
-        ranked = original["rerank"](index, state, candidates, config)
+        ranked = original["rerank"](index, state, candidates, config, **kwargs)
         _PROBE["rerank_ms"] = (time.perf_counter() - started) * 1000.0
         _PROBE["ranked"] = ranked
         return ranked
 
+    class OrchestratorProbe:
+        @staticmethod
+        def align_strategy(*args, **kwargs):
+            plan = original["AdaptiveOrchestrator"].align_strategy(*args, **kwargs)
+            _PROBE["plan"] = plan
+            return plan
+
+        @staticmethod
+        def compute_pool_entropy(*args, **kwargs):
+            return original["AdaptiveOrchestrator"].compute_pool_entropy(*args, **kwargs)
+
     agent_module.classify = classify_probe
+    agent_module.detect_turn_intent = detect_probe
     agent_module.retrieve = retrieve_probe
     agent_module.rerank = rerank_probe
+    agent_module.AdaptiveOrchestrator = OrchestratorProbe
 
     def undo() -> None:
         for name, function in original.items():
@@ -228,6 +258,7 @@ class TracingAgent:
         pool = _PROBE.get("pool") or []
         ranked = _PROBE.get("ranked") or []
         route = _PROBE.get("route")
+        plan = _PROBE.get("plan")
 
         shown = [
             str(item.get("parent_asin"))
@@ -238,16 +269,7 @@ class TracingAgent:
         state = getattr(self.inner, "_states", {}).get(session_id)
         state_view = None
         if state is not None:
-            state_view = {
-                "turn_count": state.turn_count,
-                "override_turn": state.override_turn,
-                "asked": list(state.asked),
-                "dead_attributes": sorted(state.dead_attributes),
-                "productive_turns": state.productive_turns,
-                "last_turn_productive": state.last_turn_productive,
-                "spans": state.query_spans()[:12],
-                "focused_text": state.focused_text()[:400],
-            }
+            state_view = state.snapshot()
 
         record = {
             "turn": turn,
@@ -264,10 +286,18 @@ class TracingAgent:
                 "facets": {k: list(v) for k, v in (route.detected_facets or {}).items()},
             },
             "state": state_view,
+            "plan": None if plan is None else {
+                "phase": plan.phase.value,
+                "retrieval_route": plan.retrieval_route,
+                "recommendation_cutoff": plan.recommendation_cutoff,
+                "recommended_slate_size": plan.recommended_slate_size,
+                "guidance_action": plan.guidance_action,
+            },
             "retrieval": {
                 "pool_size": len(pool),
                 "target_pool_rank": _rank_of(target, pool),
                 "ms": round(_PROBE.get("retrieve_ms", 0.0), 2),
+                "route": _PROBE.get("retrieval_route", "terms"),
             },
             "rerank": {
                 "target_rank": _rank_of(target, ranked),
@@ -288,6 +318,25 @@ class TracingAgent:
                 "ask_attribute": response.get("ask_attribute"),
                 "shown_count": len(shown),
                 "shown": shown,
+                # The list the customer actually saw, which is NOT ``rerank.top``:
+                # _shortlist()'s elimination scan drops every product shown on an
+                # earlier turn, so each elimination shifts everything below it up
+                # and ``shown`` can begin deep in the reranked list. ``rerank_rank``
+                # carries that offset so the two tables can be read against each
+                # other - e.g. public_0083 turn 5, target shown 5th but reranked
+                # 19th, with 14 already-shown products eliminated above it.
+                # ``target_shown_rank`` indexes THIS list, and it is the rank the
+                # evaluator scores (best_rank comes from response["recommendations"]).
+                "shown_detail": [
+                    {
+                        "position": position + 1,
+                        "parent_asin": parent_asin,
+                        "rerank_rank": _rank_of(parent_asin, ranked),
+                        "title": _title(self.products, parent_asin),
+                        "is_target": parent_asin == target,
+                    }
+                    for position, parent_asin in enumerate(shown)
+                ],
                 "target_shown_rank": _rank_of(target, [(a, 0.0) for a in shown]),
                 "withheld": len(shown) == 0,
             },
@@ -474,9 +523,31 @@ def render_session_markdown(record: dict) -> str:
         state = turn["state"]
         if state:
             lines.append(
-                f"**State** asked so far: {state['asked'] or '-'} | dead: {state['dead_attributes'] or '-'} | "
-                f"override turn: {state['override_turn']} | productive turns: {state['productive_turns']}"
+                f"**State** phase: `{state['phase']}` ({state['phase_reason']}) | "
+                f"intent: `{state['intent']['track']}` | asked: {state['asked'] or '-'} | "
+                f"dead: {state['dead_attributes'] or '-'}"
             )
+            lines.append("")
+            lines.append(
+                f"**Progress** productive turns: {state['productive_turns']} | "
+                f"unproductive streak: {state['unproductive_streak']} | "
+                f"pool entropy: {state['pool']['entropy']} | "
+                f"stable pool turns: {state['pool']['stable_turns']}"
+            )
+            if state["active_slots"]:
+                lines.append("")
+                lines.append(
+                    "**Active slots** `"
+                    + json.dumps(state["active_slots"], ensure_ascii=False)
+                    + "`"
+                )
+            if state["superseded_slots"]:
+                lines.append("")
+                lines.append(
+                    "**Superseded slots** `"
+                    + json.dumps(state["superseded_slots"], ensure_ascii=False)
+                    + "`"
+                )
             if state["spans"]:
                 lines.append("")
                 lines.append(
@@ -519,6 +590,14 @@ def render_session_markdown(record: dict) -> str:
                 f"  - showed {out['shown_count']} products; "
                 + (f"**target at position {position}**" if position else "target not among them")
             )
+            # The shown list, not the reranked table above it: the elimination scan
+            # drops already-shown products, so the two orderings differ.
+            for entry in out.get("shown_detail") or []:
+                marker = " **<- target**" if entry["is_target"] else ""
+                lines.append(
+                    f"    {entry['position']}. `{entry['parent_asin']}` "
+                    f"(rerank #{entry['rerank_rank'] or '-'}) {entry['title']}{marker}"
+                )
         lines.append(f"  - latency {turn['latency_ms']} ms")
         if turn["error"]:
             lines.append(f"  - **EXCEPTION** {turn['error']}")
@@ -710,13 +789,22 @@ function renderDetail(id) {
       ${(t.in.revealed || []).map(v => `<div class="mono">+ revealed: ${esc(v)}</div>`).join("")}
       ${t.route ? `<p><span class="tag">route ${esc(t.route.name)} @ ${t.route.confidence}</span>
         <span class="tag">cues: ${esc((t.route.cues || []).join(", ") || "none")}</span></p>` : ""}
-      <p><span class="tag">asked ${esc((st.asked || []).join(", ") || "-")}</span>
+      <p><span class="tag">phase ${esc(st.phase || "-")}</span>
+         <span class="tag">intent ${esc((st.intent || {}).track || "-")}</span>
+         <span class="tag">streak ${st.unproductive_streak ?? 0}</span>
+         <span class="tag">asked ${esc((st.asked || []).join(", ") || "-")}</span>
          <span class="tag">dead ${esc((st.dead_attributes || []).join(", ") || "-")}</span>
          <span class="tag">override turn ${st.override_turn ?? "-"}</span></p>
+      <p>${esc(st.phase_reason || "")}</p>
+      ${st.active_slots && Object.keys(st.active_slots).length
+        ? `<p class="mono">active slots: ${esc(JSON.stringify(st.active_slots))}</p>` : ""}
+      ${(st.superseded_slots || []).length
+        ? `<p class="mono">superseded: ${esc(JSON.stringify(st.superseded_slots))}</p>` : ""}
       ${(st.spans || []).length ? `<p class="mono">spans: ${esc(st.spans.join(" | "))}</p>` : ""}
-      <p>pool ${t.retrieval.pool_size} &middot; target at pool rank
+      <p>pool ${t.retrieval.pool_size} via ${esc(t.retrieval.route || "terms")} &middot; target at pool rank
          <b>${t.retrieval.target_pool_rank ?? "not in pool"}</b> &rarr; after rerank
          <b>${rr.target_rank ?? "not in pool"}</b></p>
+      <p class="mono">reranked candidates (diagnostic - <i>not</i> what was shown)</p>
       <table><tr><th>#</th><th>asin</th><th>score</th><th>product</th></tr>
         ${rr.top.map(e => `<tr class="${e.is_target ? "tgt" : ""}"><td>${e.rank}</td>
           <td class="mono">${esc(e.parent_asin)}</td><td>${e.score}</td><td>${esc(e.title)}</td></tr>`).join("")}
@@ -726,7 +814,14 @@ function renderDetail(id) {
       ${out.withheld
         ? `<p class="withheld">list withheld this turn</p>`
         : `<p>showed ${out.shown_count} &middot; ${out.target_shown_rank
-            ? "<b>target at position " + out.target_shown_rank + "</b>" : "target not among them"}</p>`}
+            ? "<b>target at position " + out.target_shown_rank + "</b>" : "target not among them"}</p>
+           <p class="mono">shown to the customer - positions differ from the table above
+             because already-shown products are eliminated</p>
+           <table><tr><th>#</th><th>asin</th><th>rerank #</th><th>product</th></tr>
+             ${(out.shown_detail || []).map(e => `<tr class="${e.is_target ? "tgt" : ""}">
+               <td>${e.position}</td><td class="mono">${esc(e.parent_asin)}</td>
+               <td>${e.rerank_rank ?? "-"}</td><td>${esc(e.title)}</td></tr>`).join("")}
+           </table>`}
       <p class="mono">${t.latency_ms} ms${t.error ? " &middot; EXCEPTION " + esc(t.error) : ""}</p></div>`;
   }
   document.getElementById("detail").innerHTML = h;
@@ -759,6 +854,10 @@ def main() -> None:
     parser.add_argument("--dataset", default="data/public_set.jsonl")
     parser.add_argument("--out", default="runs", help="root directory for run folders")
     parser.add_argument("--tag", default="public", help="label for this run")
+    parser.add_argument(
+        "--config", default="",
+        help="name of a tools/sweep.py config to trace instead of the default AgentConfig()",
+    )
     parser.add_argument("--scenario", help="only sessions of this scenario_type")
     parser.add_argument("--only", help="comma-separated sample_ids")
     parser.add_argument("--limit", type=int, help="first N sessions after filtering")
@@ -785,7 +884,16 @@ def main() -> None:
     print(f"loading catalog {args.catalog} ...", flush=True)
     catalog_ids, categories, products = catalog_index(args.catalog)
 
-    agent = Agent(args.catalog)
+    agent_config = None
+    if args.config:
+        from tools.sweep import build_configs  # local import - avoids a load-time cycle
+
+        configs = build_configs(args.catalog)
+        if args.config not in configs:
+            raise SystemExit(f"unknown --config {args.config!r}; see tools/sweep.py build_configs()")
+        agent_config = configs[args.config]
+
+    agent = Agent(args.catalog, agent_config)
     tracer = TracingAgent(agent, samples, products, top_n=args.top)
 
     print(f"tracing {len(samples)} sessions ...", flush=True)
@@ -799,7 +907,7 @@ def main() -> None:
 
     if args.verify:
         print("verifying against an untraced official run ...", flush=True)
-        control = evaluate(Agent(args.catalog), samples, catalog_ids, categories, products)
+        control = evaluate(Agent(args.catalog, agent_config), samples, catalog_ids, categories, products)
         traced_score = result["recommended_technical_score"]
         control_score = control["recommended_technical_score"]
         if abs(traced_score - control_score) > 1e-9:

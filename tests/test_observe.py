@@ -62,6 +62,67 @@ def _turn(turn: int, pool_rank, ranked_rank, withheld=True, shown_rank=None) -> 
     }
 
 
+class ShownListReportingTests(unittest.TestCase):
+    """The rank the caption reports must index the list the viewer renders.
+
+    Regression for a reported viewer.html mismatch on public_0083: the viewer
+    printed "target at position 5" (correct - that is the position in the shown
+    recommendations, and the rank the evaluator scores) directly under a table of
+    ``rerank.top``, the full reranked candidate list, in which the target sat at
+    rank 19 and so did not appear at all. _shortlist()'s elimination scan drops
+    every already-shown product, so the two lists legitimately differ; the bug was
+    rendering one and captioning it with the other's position.
+    """
+
+    def _record(self):
+        # Mirrors public_0083 turn 5: target shown 5th, reranked 19th.
+        target = "B0BPMCJ1RD"
+        shown = ["B0B3VC36QY", "B0B2JPRDMG", "B0BK944NF4", "B0B1MYKJBB", target]
+        rerank_ranks = [10, 12, 15, 17, 19]
+        return target, {
+            "shown_count": len(shown),
+            "shown": shown,
+            "shown_detail": [
+                {
+                    "position": i + 1,
+                    "parent_asin": asin,
+                    "rerank_rank": rr,
+                    "title": f"product {asin}",
+                    "is_target": asin == target,
+                }
+                for i, (asin, rr) in enumerate(zip(shown, rerank_ranks))
+            ],
+            "target_shown_rank": 5,
+            "withheld": False,
+        }
+
+    def test_reported_position_indexes_the_shown_list(self) -> None:
+        target, out = self._record()
+        position = out["target_shown_rank"]
+        entry = out["shown_detail"][position - 1]
+        self.assertEqual(entry["parent_asin"], target)
+        self.assertTrue(entry["is_target"])
+
+    def test_shown_detail_is_aligned_with_shown(self) -> None:
+        _, out = self._record()
+        self.assertEqual(
+            [e["parent_asin"] for e in out["shown_detail"]], out["shown"]
+        )
+        self.assertEqual(
+            [e["position"] for e in out["shown_detail"]],
+            list(range(1, out["shown_count"] + 1)),
+        )
+
+    def test_shown_position_may_differ_from_the_rerank_rank(self) -> None:
+        # The whole point of rendering both: these two numbers are different, and
+        # the gap is the count of eliminated products ranked above the target.
+        _, out = self._record()
+        entry = out["shown_detail"][out["target_shown_rank"] - 1]
+        self.assertEqual(entry["position"], 5)
+        self.assertEqual(entry["rerank_rank"], 19)
+        self.assertNotEqual(entry["position"], entry["rerank_rank"])
+
+
 class DiagnosisTests(unittest.TestCase):
     def test_missing_target_never_retrieved(self) -> None:
         record = {"turns": [_turn(1, None, None)], "behavior": {}}

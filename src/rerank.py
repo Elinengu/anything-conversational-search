@@ -55,6 +55,7 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 from src.index import CatalogIndex
 from src.state import DialogState
@@ -63,6 +64,10 @@ from src.facets import (
     extract_query_facets,
 )
 from src.text import terms
+
+if TYPE_CHECKING:  # avoid a hard numpy dependency on the BM25-only path
+    from src.embed import EmbeddingIndex
+    from src.llm import LLMReranker
 
 
 @dataclass
@@ -113,10 +118,121 @@ class RerankConfig:
     # fragments saturate. 0.4-1.5 score identically; mid-plateau. 0.0 disables.
     pair_weight: float = 0.8
 
+    # Dual-track routing (opt-in, off unless AgentConfig.use_router routes a
+    # "buying" track and hands rerank() a track-specific config with this set).
+    # A decided buyer has stated a hard requirement, so a candidate that
+    # *positively contradicts* an authoritative stated facet is not a ranking
+    # question - it is not the target. When True and track == "buying", such
+    # candidates are dropped from the head instead of merely penalised by
+    # facet_conflict_weight. Same three-part conflict test as _facet_conflicts
+    # (silence is never a contradiction), judged against focused_text() so an
+    # overridden-away or misparsed constraint cannot evict the target. Browsing
+    # keeps every candidate and the soft penalty. Default False = today's
+    # behaviour on every track.
+    hard_filter: bool = False
+
     # Rescore the whole retrieval pool (RetrievalConfig.pool_size), not a prefix -
     # ~12% of cluster-target sessions had the target in the pool but past rank 200,
     # where it was left in bm25 order and the span signal never applied.
     depth: int = 300
+
+    # Dense sentence-embedding cosine term (bge-small, src/embed.py). Every other
+    # S6 signal is exact-token: span coverage, facet agreement, category overlap
+    # all go to zero the moment the customer says "cowhide" instead of "leather".
+    # This term is the only one that scores meaning. 0.0 -> off, and every
+    # existing config/test keeps the exact behaviour. Needs `embed` + `qvec`
+    # passed to rerank() (AgentConfig loads the index when this is > 0); missing
+    # artifact / deps -> silently 0.
+    dense_weight: float = 0.0
+    #: Which text is encoded as the query vector: "full" reuses the agent's
+    #: full_text() vector (free - encoded once per turn), "spans" encodes the
+    #: disclosed constraint spans only, "blend" averages the two, "slots" encodes
+    #: state.authoritative_text() - the state machine's compact active-slot
+    #: query, no simulator boilerplate. Step 3.3: untested before this config -
+    #: shorter and cleaner, but shorter can also mean less to go on.
+    dense_query: str = "full"
+    #: Rescore the head even when no verbatim span was disclosed. Only meaningful
+    #: with dense_weight > 0 - the degenerate-card / paraphrased-opening lever
+    #: where span coverage is a frozen no-op.
+    rescore_without_spans: bool = False
+    #: Step 3.2: fire dense_weight only when state.over_general (pool_size>=100,
+    #: pool_entropy>=0.97, leader_margin<0.05 - src/state.py) says lexical
+    #: matching has stopped discriminating the live pool. False (default) is
+    #: today's behaviour: dense_weight applies unconditionally every turn - the
+    #: one measurement on record for that (branch_state_encoder_eval_changes.md)
+    #: is net -0.016 on the 21-session generic tail. See _dense_gate_open().
+    dense_gate_over_general: bool = False
+    #: Step 3.2, informed by that same measurement: buying (+0.0103) and
+    #: intent_override (+0.0396) improved, browsing collapsed (-0.0900) - the
+    #: embedding may be diluting an already-strong lexical signal specifically on
+    #: the track state-encoder-eval's policy fix made richest. True withholds
+    #: dense_weight on intent_track=="browsing" regardless of dense_gate_over_general.
+    #: A no-op alone if dense_weight would not otherwise fire.
+    dense_gate_exclude_browsing: bool = False
+
+    # Tier-2 opt-in layer (docs/team/ideas_to_integrate_llm.md #3): a remote LLM
+    # (DeepSeek, src/llm.py) reorders the top ``llm_depth`` lexically-ranked
+    # candidates once per turn. Fused with the lexical score exactly like
+    # dense_weight is - never a replacement, and a network failure, timeout or
+    # malformed reply is caught in LLMReranker.rank() and returns None, which
+    # this file treats as "no opinion" and leaves the lexical order untouched.
+    # 0.0 (default) never calls llm.rank() at all - see _llm_gate_open below and
+    # rerank()'s call site. Needs an ``llm`` (LLMReranker) passed to rerank()
+    # with ``.available`` True (LLMConfig.enabled plus an actual API key); the
+    # Agent builds one from AgentConfig.llm and passes it through.
+    llm_weight: float = 0.0
+    # Gate: only call the model when the *previous* turn's observed pool was
+    # this undecided (state.leader_margin, src/state.py) - the same live
+    # pool-shape signal Step 3.2 gates the dense term with. A pool with a clear
+    # lexical leader has nothing to gain and a nondeterministic call to lose;
+    # an ambiguous one (low leader_margin) is exactly where a semantic re-read
+    # of the candidates can break a tie exact-token matching cannot see.
+    # <= 0.0 disables the gate (always eligible, subject to llm_weight itself).
+    llm_gate_margin: float = 0.05
+    # How many of the already lexically-sorted head candidates go into the
+    # prompt. Bounds latency, cost and prompt size; the model can only ever
+    # reorder within this window; it never promotes a candidate ranked below it.
+    llm_depth: int = 8
+
+
+def _dense_similarities(
+    embed: "EmbeddingIndex",
+    state: DialogState,
+    spans: list[str],
+    qvec: Any,
+    mode: str,
+    asins: list[str],
+) -> dict[str, float]:
+    """Cosine of every head candidate against the chosen query vector."""
+    if mode == "full" and qvec is not None:
+        query_vec = qvec
+    elif mode == "spans":
+        query_vec = embed.encode_query(" ".join(spans)) if spans else qvec
+    elif mode == "blend":
+        import numpy as np
+
+        parts = [
+            v for v in (qvec, embed.encode_query(" ".join(spans)) if spans else None)
+            if v is not None
+        ]
+        if not parts:
+            return {}
+        stacked = np.mean(np.stack(parts), axis=0)
+        norm = float(np.linalg.norm(stacked))
+        query_vec = stacked / norm if norm > 0.0 else stacked
+    elif mode == "slots":
+        # The state machine's compact active-slot query - no simulator
+        # boilerplate, unlike full_text(). Encoded fresh (not the cached qvec,
+        # which is always full_text()); falls back to qvec if there is nothing
+        # active yet (authoritative_text() itself falls back to focused_text(),
+        # so this is only reached pre-turn-1).
+        text = state.authoritative_text()
+        query_vec = embed.encode_query(text) if text else qvec
+    else:
+        query_vec = qvec
+    if query_vec is None:
+        return {}
+    return embed.similarities(query_vec, asins)
 
 
 def _popularity(product: dict) -> float:
@@ -263,11 +379,89 @@ def _category_match(
     return score
 
 
+def _dense_gate_open(state: DialogState, config: RerankConfig, track: str | None) -> bool:
+    """True -> dense_weight applies this turn (RerankConfig.dense_gate_*, Step 3.2).
+
+    Both gates default False, and default-False -> always True (today's
+    unconditional behaviour, byte-identical). ``track`` (the router's live
+    per-turn track, e.g. from ``_route_for`` in starter/agent.py) takes
+    precedence when a caller passes it explicitly; ``state.intent_track``
+    (DialogState's own default is "browsing" - src/state.py) is only consulted
+    as a fallback when ``track is None``, never as an additional veto - an
+    explicit track="buying" must not be overridden by that default.
+    """
+    if config.dense_gate_exclude_browsing:
+        effective_track = track if track is not None else state.intent_track
+        if effective_track == "browsing":
+            return False
+    if config.dense_gate_over_general and not state.over_general:
+        return False
+    return True
+
+
+def _llm_gate_open(state: DialogState, config: RerankConfig) -> bool:
+    """True -> the LLM layer is eligible to fire this turn (RerankConfig.llm_gate_margin).
+
+    Mirrors ``_dense_gate_open``: consults the *previous* turn's observed pool
+    (``state.leader_margin``) since this turn's pool is exactly what is being
+    computed right now. ``llm_gate_margin <= 0.0`` disables the gate outright
+    (always eligible) - the caller still needs ``llm_weight > 0.0`` and an
+    available ``llm`` for anything to actually happen.
+    """
+    if config.llm_gate_margin <= 0.0:
+        return True
+    return state.leader_margin < config.llm_gate_margin
+
+
+def _llm_rerank(
+    scored: list[tuple[str, float]],
+    state: DialogState,
+    index: CatalogIndex,
+    config: RerankConfig,
+    llm: "LLMReranker",
+) -> list[tuple[str, float]]:
+    """Fuse the model's reordering of the top ``llm_depth`` candidates into the
+    lexical score. ``llm.rank()`` returning ``None`` (any failure at all - see
+    src/llm.py) is a no-op: ``scored`` comes back exactly as it went in, so a
+    flaky call degrades to precisely the ``llm_weight=0.0`` behaviour.
+    """
+    depth = max(2, config.llm_depth)
+    top = scored[:depth]
+    rest = scored[depth:]
+    items = []
+    for asin, _score in top:
+        product = index.products.get(asin)
+        items.append({"asin": asin, "text": product["text"] if product else ""})
+
+    try:
+        order = llm.rank(state.authoritative_text(), items)
+    except Exception:
+        order = None
+    if not order:
+        return scored
+
+    rank_of = {asin: position for position, asin in enumerate(order)}
+    denom = max(1, len(top) - 1)
+    boosted: list[tuple[str, float]] = []
+    for position, (asin, score) in enumerate(top):
+        # An asin the model dropped keeps its own lexical position as its
+        # implied rank, rather than being punished to the back of the window.
+        model_rank = rank_of.get(asin, position)
+        bonus = (len(top) - 1 - model_rank) / denom
+        boosted.append((asin, score + config.llm_weight * bonus))
+    boosted.sort(key=lambda item: (-item[1], item[0]))
+    return boosted + rest
+
+
 def rerank(
     index: CatalogIndex,
     state: DialogState,
     candidates: list[tuple[str, float]],
     config: RerankConfig | None = None,
+    track: str | None = None,
+    embed: "EmbeddingIndex | None" = None,
+    qvec: Any = None,
+    llm: "LLMReranker | None" = None,
 ) -> list[tuple[str, float]]:
     config = config or RerankConfig()
     if not config.enabled or not candidates:
@@ -276,8 +470,35 @@ def rerank(
     spans = state.query_spans()
     head = candidates[: config.depth]
     tail = candidates[config.depth :]
-    if not spans:
+
+    dense_active = (
+        config.dense_weight > 0.0
+        and embed is not None
+        and getattr(embed, "available", False)
+        and _dense_gate_open(state, config, track)
+    )
+    if not spans and not (dense_active and config.rescore_without_spans):
         return candidates
+
+    sims: dict[str, float] = {}
+    dense_lo, dense_span = 0.0, 1.0
+    if dense_active:
+        try:
+            sims = _dense_similarities(
+                embed, state, spans, qvec, config.dense_query,
+                [asin for asin, _ in head],
+            )
+        except Exception:
+            sims = {}
+        if sims:
+            # Min-max over the head so the term spans [0, 1] like span coverage -
+            # raw catalog cosines sit in a narrow ~[0.55, 0.8] band (every pool
+            # member is already the right category), so dividing by the max would
+            # leave almost no spread for dense_weight to act on.
+            values = sims.values()
+            dense_lo = min(values)
+            dense_span = (max(values) - dense_lo) or 1.0
+
     pairs = state.query_pair_spans() if config.pair_weight else []
 
     # Normalise retrieval scores so the two signals combine on one scale.
@@ -305,6 +526,33 @@ def rerank(
     # focused_text() happens to do here - is the best of the three.
     # docs/team/rerank_signals.md records all four variants.
     authoritative_facets = extract_query_facets(state.focused_text())
+
+    # Dual-track hard filter: on the buying track, a candidate that positively
+    # contradicts an authoritative stated facet is banished to the very bottom of
+    # the list rather than merely penalised by facet_conflict_weight. Guarded
+    # exactly like the soft penalty (_facet_conflicts): needs the stated value
+    # AND the attribute resolved on the candidate AND the value absent from its
+    # text - silence is never a contradiction. Banished candidates are appended
+    # after the tail, not removed, so retrieval recall is never lost; in practice
+    # a shown slate is <= 10, so this makes the contradiction decisive without a
+    # recall cliff. Browsing keeps every candidate rankable on its other signals.
+    banished: list[tuple[str, float]] = []
+    if track == "buying" and config.hard_filter and authoritative_facets:
+        survivors: list[tuple[str, float]] = []
+        for asin, score in head:
+            product = index.products.get(asin)
+            if product is not None and _facet_conflicts(
+                authoritative_facets, extract(product), product["text"]
+            ) > 0.0:
+                banished.append((asin, score))
+            else:
+                survivors.append((asin, score))
+        if survivors:
+            head = survivors
+        else:
+            # Every candidate contradicts - the extraction is almost certainly
+            # wrong. Rank them all normally rather than banish the whole pool.
+            banished = []
 
     scored: list[tuple[str, float]] = []
     for parent_asin, retrieval_score in head:
@@ -352,8 +600,19 @@ def rerank(
             + config.category_weight * category_score
             + config.tail_weight * tail_score
             - config.facet_conflict_weight * conflict_score
+            + config.dense_weight * ((sims.get(parent_asin, dense_lo) - dense_lo) / dense_span)
         )
         scored.append((parent_asin, total))
 
     scored.sort(key=lambda item: (-item[1], item[0]))
-    return scored + tail
+
+    if (
+        config.llm_weight > 0.0
+        and llm is not None
+        and getattr(llm, "available", False)
+        and scored
+        and _llm_gate_open(state, config)
+    ):
+        scored = _llm_rerank(scored, state, index, config, llm)
+
+    return scored + tail + banished

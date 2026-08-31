@@ -1,308 +1,447 @@
-# Conversational Shopping Agent — TechJam 2026 Track 4
+# Conversational Shopping Agent
 
-A multi-turn shopping agent for the TechJam Conversational E-Commerce Search
-Challenge. It finds a hidden target product in a frozen 50,000-item Amazon
-Clothing/Shoes/Jewelry catalog by asking the customer questions and narrowing a
-candidate pool across turns.
+An offline-first, multi-turn product-search agent built for **TikTok TechJam
+2026 Track 4: Conversational E-Commerce Search**. The agent asks useful
+follow-up questions, remembers the customer's constraints, adapts when the
+customer changes their mind, and recommends the hidden target product from a
+frozen 50,000-item Amazon catalog.
 
-**Public-set score: `0.8592`** against the supplied BM25 baseline's `0.1067` — an
-8x improvement, with no model API, no network, and no dependencies beyond the
-Python standard library.
+The committed default configuration keeps LLM reranking **off**. It makes no
+model API calls, requires no credentials, and reports zero token usage. On the
+repository's bundled frozen local evaluator, this offline configuration
+achieves a **0.923487 TechnicalScore** and **1.000 Hit Rate@10**.
 
-| Split | Sessions | Hit@10 | MRR | MTTC | Efficiency | TechnicalScore |
-|---|---|---|---|---|---|---|
-| Public (all) | 200 | 0.940 | 0.791 | 3.40 | 0.759 | **0.8592** |
-| Dev (tuning) | 120 | 0.950 | 0.814 | 3.27 | 0.772 | 0.8738 |
-| Holdout (untouched) | 80 | 0.925 | 0.756 | 3.60 | 0.740 | 0.8374 |
-| *Supplied baseline* | 200 | 0.125 | 0.068 | 9.81 | 0.119 | *0.1067* |
+| System | Hit@10 | MRR | MTTC | Efficiency | TechnicalScore |
+|---|---:|---:|---:|---:|---:|
+| Supplied BM25 baseline | 0.125 | 0.068 | 9.81 | 0.119 | 0.1067 |
+| This project (offline default, frozen local evaluator) | **1.000** | **0.881** | **3.04** | **0.796** | **0.923487** |
 
-Every number above is reproducible with the commands in
-[Reproducing the results](#reproducing-the-results).
+The result above is recorded in [`results.json`](results.json) and can be
+reproduced with the commands in [Reproducing the results](#reproducing-the-results).
 
-## The core insight
+## Latest customer evaluation results
 
-The supplied baseline is stateless. It answers each turn from that turn's message
-alone, and it never sets `ask_attribute`.
+The following are the team's latest 200-session comparisons. “Official” uses
+the official customer behavior. The stress customer paraphrases constraints and
+uses **gated browsing**: a browsing customer discloses information only when the
+agent asks for a specific `ask_attribute` rather than a broad `other` question.
 
-That second part is what costs it the challenge. The simulated customer only
-discloses a constraint when the agent asks for one, and each session holds exactly
-four constraints drawn verbatim from the target product's own metadata. An agent
-that never asks a question never receives more than the opening sentence, and an
-agent that asks but forgets throws away each answer as it arrives.
+| Customer | LLM reranking | Sessions | Hit@10 | MRR | MTTC | TechnicalScore |
+|---|---|---:|---:|---:|---:|---:|
+| Official customer | Off — default | 200 | 1.000 | 0.8810 | 3.040 | 0.923487 |
+| Official customer | **On — gated** | 200 | **1.000** | **0.8930** | **3.045** | **0.927012** |
+| Stress: paraphrase + gated browsing | Off — default | 200 | 0.880 | 0.6628 | 4.410 | 0.770651 |
+| Stress: paraphrase + gated browsing | **On — gated** | 200 | 0.880 | **0.6734** | **4.405** | **0.773924** |
 
-So the largest win is not in retrieval. It is *asking a question and remembering
-the answer*. That change alone — accumulate every turn, always ask something, hold
-the shortlist until something has been disclosed — moved the score from `0.1067`
-to `0.7811` before a single retrieval parameter was touched. Everything after that
-is comparatively small.
+On the official customer, gated LLM reranking keeps Hit@10 at `1.000`, raises
+MRR by `0.0120`, and improves the score by **0.003525**. MTTC changes only
+slightly, from `3.040` to `3.045`. On the harder stress customer, it keeps
+Hit@10 at `0.880`, raises MRR by `0.0106`, reduces MTTC by `0.005`, and improves
+the score by **0.003273**. In both conditions, the measured gain comes mainly
+from better ordering of retrieved candidates. Under paraphrase and gated
+browsing, reranking alone does not recover the remaining retrieval and
+clarification misses.
 
-The second insight follows from the first: because disclosed constraints are
-*verbatim* product copy, a candidate whose text literally contains
-`"stainless steel band"` is far more likely to be the target than one that merely
-shares those tokens. Matching those spans as a reranking signal took the score from
-`0.7799` to `0.8543`, and the remaining tuning to `0.8592`.
+## Project overview
+
+### Problem statement
+
+For each evaluation session, one product is selected as the customer's hidden
+target. The agent has at most ten conversational turns to place that product in
+a ranked Top 10 list. The customer may begin with a clear buying requirement,
+browse without a firm preference, reverse an earlier preference, or decline to
+answer a question. Performance combines:
+
+- **Hit Rate@10:** whether the target is found;
+- **MRR:** how highly the target is ranked; and
+- **MTTC:** how quickly the target is found.
+
+Only an exact `parent_asin` match counts as a hit.
+
+### How the solution addresses the problem
+
+The supplied baseline searches each message independently and does not request
+additional attributes. This project treats the task as a stateful conversation:
+
+1. **Intent routing** distinguishes buying from browsing and updates the route
+   as the conversation becomes more specific.
+2. **Conversation state** accumulates useful constraints, records their turn and
+   source, ignores “no preference” replies, and handles intent overrides without
+   losing all earlier context.
+3. **Adaptive clarification** asks broad or targeted questions according to the
+   current intent, candidate ambiguity, and conversation progress.
+4. **Multi-route retrieval** searches the full conversation, the opening anchor,
+   post-override text, and an adaptive structured-state view. SQLite FTS5/BM25
+   results are combined with Reciprocal Rank Fusion.
+5. **Evidence-based reranking** rewards verbatim constraint spans, preserved
+   attribute/value pairs, facet and category agreement, and appropriate
+   popularity evidence while penalising explicit facet conflicts.
+6. **Adaptive recommendation timing** avoids locking in a weak rank too early.
+   A narrow first slate and an elimination scan prevent the same failed products
+   from being shown repeatedly.
+7. **Failure-aware orchestration** detects convergence, stagnation, and override
+   recovery, then adjusts the retrieval route, question policy, and slate timing.
+
+The key insight is that asking and remembering is more valuable than treating
+every message as a new search. In this evaluator, a customer reveals further
+constraints only after the agent sets `ask_attribute`; those disclosures are
+then strong evidence for identifying the exact catalog item.
 
 ## Architecture
 
-```
-customer turn
-     |
-     v
- S2 router ......... buying vs browsing, from linguistic cues
-     |
-     v
- S3 state .......... accumulate turns, track provenance, handle intent override
-     |
-     v
- S5 retrieval ...... FTS5 bag-of-words + post-override focused route, fused by RRF
-     |
-     v
- S6 rerank ......... verbatim constraint-span coverage over the top 200
-     |
-     v
- S4 policy ......... which attribute to ask about next
-     |
-     v
- S7 timing ......... emit a shortlist, or hold and ask again
+```text
+Customer message
+      |
+      v
+Intent router -----> buying / browsing / override transition
+      |
+      v
+Dialog state ------> active constraints, declined slots, provenance, phase
+      |
+      v
+Adaptive orchestrator --> retrieval route, question policy, recommendation gate
+      |
+      v
+FTS5/BM25 routes --> Reciprocal Rank Fusion --> candidate pool (up to 300)
+      |
+      v
+Constraint/facet/category/popularity reranker
+      |
+      v
+Elimination scan + slate-size policy
+      |
+      v
+message + ask_attribute + ranked parent_asin recommendations
 ```
 
-| Module | Stage | Responsibility |
+| Component | Responsibility |
+|---|---|
+| `starter/agent.py` | Official `Agent` interface and end-to-end orchestration |
+| `src/index.py` | In-memory SQLite FTS5 catalog index and BM25 search |
+| `src/router.py` | Buying/browsing classification and turn-level intent changes |
+| `src/state.py` | Multi-turn state, constraints, declines, overrides, and phases |
+| `src/context_programming.py` | Context distillation and adaptive strategy selection |
+| `src/policy.py` | Fixed and information-gain clarification policies |
+| `src/retrieval.py` | Lexical, focused, anchor, structured, and optional dense routes |
+| `src/rerank.py` | Constraint, facet, category, conflict, and popularity scoring |
+| `src/phrasing.py` | Natural, pool-aware clarification wording |
+| `evaluator/local_evaluator.py` | Frozen local simulator and official metric calculation |
+
+For a more detailed data-flow description, see
+[`ARCHITECTURE.md`](ARCHITECTURE.md). The complete design rationale and measured
+experiments are in [`IMPLEMENTATION.md`](IMPLEMENTATION.md).
+
+## Technology used
+
+### Development tools
+
+- **Python 3.10+** for the agent, evaluator, experiments, and test suite;
+- **Git and GitHub** for source control and team collaboration;
+- **Terminal/command-line tooling** for evaluation, configuration sweeps,
+  adversarial-data generation, and session tracing;
+- **Python `unittest`** plus custom regression and stress harnesses for testing;
+- **Markdown** for architecture, experiment, attribution, and implementation
+  documentation.
+
+The project is editor-agnostic and does not require Colab, Jupyter, or a
+notebook workflow. It can be opened in VS Code or any Python editor.
+
+### APIs and models
+
+| API/model | Use | Required for default result? |
 |---|---|---|
-| `src/index.py` | S1 | Catalog → in-memory FTS5 index + trimmed product records |
-| `src/router.py` | S2 | Buying/browsing classification from cues, not templates |
-| `src/state.py` | S3 | Turn accumulation, slot provenance, override handling |
-| `src/policy.py` | S4 | Clarification policy (`FixedPolicy`, `InfoGainPolicy`) |
-| `src/retrieval.py` | S5 | Multi-route candidate generation with RRF fusion |
-| `src/rerank.py` | S6 | Verbatim span coverage, facet agreement, popularity tie-break |
-| `src/facets.py` | — | Typed attribute extraction shared by S4 and S6 |
-| `starter/agent.py` | — | The `Agent` the evaluator imports; owns the response contract |
-| `tools/sweep.py` | S0 | Experiment harness and the dev/holdout split |
-| `tools/observe.py` | — | Session tracer: annotated transcripts and failure diagnosis |
-| `tools/build_stoplist.py` | S1 | Learns `src/stoplist.py` (metadata boilerplate) from the catalog |
+| None | The submitted configuration is entirely local and deterministic. | — |
+| DeepSeek `deepseek-chat` API | Optional, ambiguity-gated listwise reranking experiment through an OpenAI-compatible chat-completions endpoint. | No; off by default |
+| `BAAI/bge-small-en-v1.5` | Optional ONNX sentence embeddings for dense retrieval or reranking experiments. | No; off by default |
 
-See [agent_changes.md](agent_changes.md) for the running log of every change by author,
-with before/after numbers. New entries are added with the `record-change` skill in
-`.claude/skills/`, which carries the measurement rules the numbers depend on.
+The optional DeepSeek layer is **off by default** and fails closed: if it is
+disabled, lacks a key, times out, or returns invalid output, the lexical ranking
+is retained. Adding a key does not silently enable it; `LLMConfig.enabled` and
+`RerankConfig.llm_weight` must also be set explicitly. Configuration details are
+in [`llm_config_readme.md`](llm_config_readme.md).
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the data flow, the boundaries between
-stages, and the failure behaviour at each one. See
-[IMPLEMENTATION.md](IMPLEMENTATION.md) for a full stage-by-stage account of what
-changed and why, written for readers new to search and recommender systems, with
-enhancement ideas at the end of each stage.
+### Libraries and frameworks
 
-## Setup
+The default pipeline uses only the Python standard library:
 
-Python 3.10 or newer. **No third-party packages are required.**
+- `sqlite3` with **FTS5/BM25** for full-text retrieval;
+- `dataclasses`, `json`, `re`, and standard collection utilities for state and
+  feature processing;
+- `urllib` for the disabled-by-default DeepSeek client; and
+- `unittest` for automated tests.
+
+Optional dense-search experiments use:
+
+- `numpy` for vector storage and cosine scoring;
+- `onnxruntime` for local encoder inference; and
+- `tokenizers` for BGE tokenisation.
+
+PyTorch, pandas, scikit-learn, and Hugging Face Transformers are not runtime
+dependencies. `huggingface_hub` is only an optional build-time route for
+obtaining a different embedding model.
+
+### Datasets and assets
+
+| Dataset/asset | Description | Size |
+|---|---|---:|
+| Amazon Reviews 2023 `Clothing_Shoes_and_Jewelry` catalog | Frozen text and structured product metadata; target key is `parent_asin`. | 50,000 products |
+| `data/public_set.jsonl` | Labelled local-development sessions: Buying, Browsing, Intent Override, and Boundary. | 200 sessions |
+| `data/generated_test_set.jsonl` | Deterministically generated supplemental evaluation sessions. | 200 sessions |
+| `data/generated_adversarial_set.jsonl` | Generated adversarial sessions for robustness checks. | 200 sessions |
+| `data/hard_set.jsonl` | Six difficult retrieval/ranking buckets generated from the catalog. | 96 sessions |
+| Optional BGE ONNX artifacts | Local encoder, tokenizer, and catalog-vector matrix used only by dense configurations. | Not committed |
+
+The source data is **Amazon Reviews 2023**, published by McAuley Lab at UCSD.
+The competition package contains product text and structured metadata, not real
+shopping conversations, raw user identifiers, images, or private evaluation
+labels. See [`DATA_ATTRIBUTION.md`](DATA_ATTRIBUTION.md) for attribution and use
+conditions.
+
+## Setup and installation
+
+### 1. Clone the repository
 
 ```bash
-# 1. Download catalog.jsonl.gz from the repository's GitHub Release, then:
-gzip -dk catalog.jsonl.gz
-mv catalog.jsonl data/catalog.jsonl
-
-# 2. Verify against the published SHA256SUMS file.
+git clone https://github.com/Elinengu/anything-conversational-search.git
+cd anything-conversational-search
 ```
 
-There is nothing else to install, no API key to set, and no environment variable
-to configure.
+### 2. Create a virtual environment
+
+Python 3.10 or newer is required.
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python3 --version
+```
+
+There is no package-install step for the default offline agent.
+
+### 3. Verify the included catalog
+
+`data/catalog.jsonl` is already included in the repository. No separate
+download or decompression step is required. Verify the expected row count:
+
+```bash
+wc -l data/catalog.jsonl
+```
+
+The command should print `50000`.
+
+### 4. Optional dense-search dependencies
+
+Skip this step when reproducing the submitted offline result. To run the
+`dense_*` experiment configurations:
+
+```bash
+python3 -m pip install -r requirements.txt
+```
+
+Dense configurations also require the corresponding model and embedding
+artifacts under `data/embeddings/`. They self-disable if either the artifacts or
+libraries are absent. See `tools/build_embeddings.py` for the one-time build.
+
+### 5. Enable the optional LLM reranker
+
+LLM reranking is disabled by default. The named `llm_rerank_gated`
+configuration already contains the measured settings, including
+`llm_weight=1.0` and `llm_gate_margin=0.05`; users do not need to edit Python or
+construct an `AgentConfig` themselves.
+
+1. Create a file named `.env` in the **repository root**—the same directory as
+   this README—and add your API key:
+
+   ```dotenv
+   DEEPSEEK_API_KEY=sk-your-key-here
+   ```
+
+   The repository-root `.env` file is loaded automatically by `src/llm.py` and
+   is ignored by Git. Never commit the file or paste a real key into source code.
+   An exported `DEEPSEEK_API_KEY` environment variable takes precedence if both
+   locations are present.
+
+2. Select the existing named configuration from the command line:
+
+   ```bash
+   python3 tools/observe.py --config llm_rerank_gated --tag llm_on
+   ```
+
+   `--config llm_rerank_gated` enables the transport and applies the measured
+   ambiguity gate. The model is called only when the lexical leaders are close.
+
+3. To compare the default and LLM configurations across customer harnesses, use
+   the plural `--configs` comparison option:
+
+   ```bash
+   # Official customer: default off versus gated LLM reranking
+   python3 tools/stress_harness.py \
+       --customer official \
+       --configs router_on,llm_rerank_gated
+
+   # Paraphrased, gated-browsing stress customer
+   python3 tools/stress_harness.py \
+       --customer paraphrase:heavy+browse-gated \
+       --configs router_on,llm_rerank_gated
+   ```
+
+   Live API results can vary slightly between runs even with temperature `0.0`.
+
+The named configuration already enables the required code-level switches. If it
+is not selected, or if the key or ambiguity gate is unavailable, the agent
+retains the local lexical ranking. See
+[`llm_config_readme.md`](llm_config_readme.md) for the full configuration guide.
 
 ## Reproducing the results
 
+Run all commands from the repository root.
+
+### Frozen local public-set reproduction
+
 ```bash
-# Official evaluator — writes results.json (~28s)
 python3 -m evaluator.local_evaluator
+```
 
-# The dev/holdout split the tuning decisions were made against
-python3 tools/sweep.py --split dev
-python3 tools/sweep.py --split holdout
+This evaluates all 200 public sessions and writes the detailed output to
+`results.json`. The committed default is expected to report approximately:
 
-# Test suite: contract, components, and the end-to-end scoring floor (~14s)
+```text
+Hit Rate@10:    1.000000
+MRR:            0.880956
+MTTC:           3.040000
+Efficiency:     0.796000
+TechnicalScore: 0.923487
+Token usage:    0
+```
+
+The score is calculated as:
+
+```text
+Efficiency = clip((11 - MTTC) / 10, 0, 1)
+TechnicalScore = 0.50 * HitRate@10 + 0.30 * MRR + 0.20 * Efficiency
+```
+
+### Automated tests
+
+```bash
 python3 -m unittest discover -s tests -t .
 ```
 
-`tools/sweep.py` compares several named configurations in one process, sharing a
-single catalog index. Add a row to `build_configs()` to test a change.
+Run the default test suite without `DEEPSEEK_API_KEY` or a DeepSeek key in the
+repository `.env`; API behavior is tested with mocks and no live call is needed.
 
-## Inspecting sessions
+### Dev/holdout experiment split
 
-Aggregate metrics say *how much* was lost, never *where*. `tools/observe.py`
-records what happened in every session — what the customer said, what it
-disclosed, how the agent ranked, and why the target was or was not found.
+The 200 public sessions are divided deterministically and by scenario into a
+120-session development set and an 80-session holdout set:
 
 ```bash
-python3 tools/observe.py --verify              # all 200 sessions -> runs/<tag>-<stamp>/
-python3 tools/observe.py --scenario intent_override
-python3 tools/observe.py --only public_0008
-python3 tools/observe.py --dataset data/hard_set.jsonl --tag hard
+python3 tools/sweep.py --split dev --configs router_on
+python3 tools/sweep.py --split holdout --configs router_on
 ```
 
-**The evaluator is not modified, copied, or forked.** `evaluate()` accepts the
-agent as a parameter, so the observer wraps the agent and lets the organizer's own
-evaluator drive every session — the reported score is the real one. `--verify`
-re-runs untraced and asserts the two agree (they do, to the last digit). The
-pipeline stages are probed by wrapping `classify` / `retrieve` / `rerank` in
-`starter/agent.py`'s namespace for the duration of the run, so no production code
-carries any tracing overhead.
+Use `--configs a,b` to compare named configurations in the same process while
+sharing one catalog index.
 
-| Flag | Default | Purpose |
-|---|---|---|
-| `--dataset` | `data/public_set.jsonl` | session file to run |
-| `--catalog` | `data/catalog.jsonl` | catalog to index |
-| `--scenario` | all | `buying` / `browsing` / `intent_override` / `boundary` |
-| `--only` | all | comma-separated `sample_id`s |
-| `--limit N` | all | first N sessions after filtering |
-| `--tag` | `public` | names the run folder |
-| `--out` | `runs` | run-folder root |
-| `--top` | 10 | candidates recorded per turn |
-| `--no-markdown` | off | skip the per-session files, keep `trace.jsonl` |
-| `--verify` | off | re-run untraced and assert an identical score (~2x runtime) |
+### Robustness evaluation
 
-Each run writes `index.md` (worst sessions first), `sessions/<id>.md` (one
-annotated transcript per session), `trace.jsonl`, `summary.json`, and a
-self-contained offline `viewer.html` that filters by scenario, outcome, and
-failure mode. `runs/` is git-ignored; regenerate rather than commit.
+```bash
+# Frozen evaluator on the hard set
+python3 -m evaluator.local_evaluator --dataset data/hard_set.jsonl
 
-Any session file works, not just the public set: one JSON object per line with
-`sample_id`, `scenario_type`, `ground_truth.parent_asin` and `user_profile`, with
-every target present in the catalog. A sample carrying its own `intent_card` **and**
-`behavior` bypasses derivation (`evaluator/local_evaluator.py:205`), and the
-observer renders whichever card was actually in play.
+# Customer-language and browsing-behavior stress tests
+python3 tools/stress_harness.py --all
 
-Every session is classified into one failure mode, which is the point of the tool —
-a miss caused by a target that was never retrieved is a different repair from one
-that sat at rank 14 for six turns:
+# Trace and diagnose individual sessions
+python3 tools/observe.py --only public_0008 --tag example
+```
 
-| Diagnosis | Meaning | Stage to repair |
-|---|---|---|
-| `hit` | found and scored | — |
-| `never_retrieved` | target never entered the candidate pool | S1 / S5 |
-| `ranked_out` | in the pool throughout, never reached the shown top 10 | S6 |
-| `withheld_only` | reached the top 10, but the list was held back every time | S7 |
-| `override_locked` | shown before the override fired, so the hit could not count | S3 |
-| `exhausted` | 10 turns elapsed with the target outside the top 10 | — |
+The observer writes an offline HTML viewer and per-session traces under
+`runs/`. A complete testing and evaluation reference is available in
+[`test_guide.md`](test_guide.md).
 
-The runs also count **turns left on the table**: hits where the target was already
-inside a convertible top 10 before the list was shown. Placements before an
-override are excluded, since `evaluator/local_evaluator.py:252` cannot convert them.
+## Results and evaluation discipline
 
-### What the first full run showed
+The evaluator was not modified. Changes were selected on the development split,
+checked on the untouched holdout split, and challenged on generated and hard
+sets. The repository records unsuccessful experiments as well as successful
+ones; for example, unconditional dense retrieval and neural reranking were not
+made defaults when they failed to improve consistently across splits.
 
-On the public set, all 12 misses are `ranked_out` and **none** are
-`never_retrieved` — the target entered the pool in 200 of 200 sessions, at best
-ranked positions of 13, 17, 19, 20, 20, 23, 28, 30, 32, 47, 53 and 117. Every
-remaining point on this set is a ranking problem, not a search problem.
+The latest measured customer results are summarised in
+[Latest customer evaluation results](#latest-customer-evaluation-results). The
+gated DeepSeek reranker remains off by default even though it substantially
+improves the official-customer run: it requires user-supplied credentials and
+network access, adds latency and API cost, and is less reproducible than the
+offline path. The stress result also shows that an LLM reranker cannot by itself
+repair every paraphrase-driven retrieval or clarification failure.
 
-The same run counts **98 turns left on the table** across 89 sessions. Perfect
-timing would move MTTC from `3.405` to `2.915`, worth `+0.0098` — more than any
-other measured opportunity. The cause is legible in the transcripts: at those
-turns the top-1/top-2 margin has a median of `0.017`, and every one of them falls
-under `confidence_margin = 0.20` (`starter/agent.py:59`). In `public_0008` the
-target held rank 1 on turn 2 with `4.8243` against `4.8053` — a 0.4% margin, so
-the gate held and a turn was spent. Span coverage saturates, which bunches the
-scores, and the gate is reading a scale it cannot discriminate on. That figure is
-the ceiling of perfect foresight, not what a re-tuned fixed threshold would reach.
+## Limitations and reflection
 
-The adversarial set (`tools/hard_cases.py`) is where retrieval is genuinely under
-stress: 96 sessions score `0.6842`, and 4 sessions are `never_retrieved`.
+The solution performs strongly on the supplied simulator, but the result should
+not be interpreted as a solved real-world shopping problem.
 
-## Design decisions worth defending
+- **Simulator wording is unusually favourable to lexical matching.** Disclosed
+  constraints are often copied from target-product metadata. Real customers
+  paraphrase, omit details, make spelling errors, and express subjective needs.
+- **The public set is small.** There are only 200 labelled sessions, so repeated
+  tuning can overfit even with a dev/holdout split. The private 800-session set
+  is the more meaningful generalisation test.
+- **The evaluation is simulated.** There has been no human usability study, and
+  natural question quality does not affect the deterministic customer's answer
+  in the local evaluator.
+- **Popularity is only a tie-break signal, but can still introduce bias.** New,
+  niche, or lightly reviewed products may be disadvantaged.
+- **Semantic search is not part of the default.** The robust fallback is lexical,
+  so heavy paraphrasing can still hurt retrieval and ranking. Dense and LLM
+  routes improve some stress cases but introduce new accuracy trade-offs.
+- **The system is text-only and catalog-specific.** It does not use product
+  images, availability, live pricing, or cross-category behavioral signals.
+- **The in-memory index targets this 50,000-item benchmark.** A production-scale
+  catalog would require persistent indexing, incremental updates, monitoring,
+  and stricter latency and memory controls.
 
-**Intent override down-weights rather than erases.** The brief describes override
-as slot erasure. We deliberately deviate. In this evaluator the discarded
-preference is *still derived from the target product*, so erasing it destroys
-usable signal; pre-override turns are weighted to `0.35` instead of dropped, and a
-separate retrieval route runs over post-override turns alone. If the private
-simulator uses genuine decoy values, the focused route already isolates them.
+Given more time, the team would run human conversation studies, evaluate on a
+larger untouched paraphrase set, calibrate a gated lexical/dense hybrid on truly
+unseen data, audit popularity and category bias, add grounded explanations for
+recommendations, and move the index to a persistent service suitable for live
+catalog updates.
 
-**Verbatim span matching lives in the reranker, not in retrieval.** As an FTS5
-phrase query it recalls the target in only 47 of 80 sampled sessions, so fusing it
-at retrieval time injects more noise than signal. Applied as a rescoring signal
-over a pool the bag-of-words route already fills — where it recalls the target
-80/80 at median rank 1 — the same evidence is pure gain.
+## Team member contributions
 
-**The clarification policy ships as the simpler of two implementations.**
-`InfoGainPolicy` selects the question that most reduces uncertainty over the live
-candidate pool, using a gain ratio (raw information gain is dominated by brand,
-which has thousands of distinct values and which shoppers can rarely answer) times
-an answerability prior. It is the more interesting design and it finds the target slightly *more* often on
-the dev split (hit rate `0.958` against `0.950`), but it ranks it worse — MRR
-`0.703` against `0.814` — and loses overall on both splits: `0.8369` against
-`0.8738` on dev, `0.8141` against `0.8374` on holdout. Specific questions surface
-fewer constraints per turn, and thinner evidence ranks worse even when it still
-retrieves. We ship the policy that wins on data we did not tune against, and keep
-the other selectable via `AgentConfig(policy=InfoGainPolicy(agent.facets))`.
+Contributions below are summarised from the Git history and the measured change
+log in [`docs/team/agent_changes.md`](docs/team/agent_changes.md).
 
-**Intent routing does not touch retrieval, because measurement said not to.**
-Widening the pool for browsing and narrowing it for buying changed the dev score
-not at all and cost `0.002` on the holdout. Rather than keep it as decoration, the
-router was scoped to what it genuinely does well: phrasing the agent's questions
-appropriately for an exploring versus a decided customer.
-
-**Span rarity weighting was measured and removed.** Weighting each disclosed span
-by pool-local rarity — so that "buckle closure" counts for less than "two row
-stitch" among belts — is principled and was implemented in full. It moved the dev
-score by `0.0002` and the holdout not at all, because a pool retrieved by those
-same terms has little rarity spread left to exploit. It was deleted rather than
-left in as an off-by-default flag.
-
-**Tuning constants sit mid-plateau, not at the argmax.** The confidence margin is
-`0.20` because every value from `0.15` to `0.50` beats `0.0` on both splits and the
-curve between them is flat. With 200 public sessions deciding nothing and 800
-private ones deciding everything, picking a split's argmax is how you buy noise.
-
-## Disclosure
-
-| | |
+| Team member | Main contributions |
 |---|---|
-| Model / API | **None.** No LLM, no network, no credentials. |
-| Dependencies | Python standard library only |
-| Estimated cost | $0.00 |
-| Token usage | 0 prompt, 0 completion — `usage` is reported honestly as zero |
-| Index build | 4.1s one-time, at `Agent.__init__` |
-| Per-turn latency | mean 16.6ms, p95 19.8ms, max 21.0ms |
-| Peak memory | ~282 MB resident |
-| Full public evaluation | ~28s for 200 sessions |
+| **Eline Ngu Xiang Ee (`Elinengu`)** | Project setup and integration; observer tooling; category-tail, stoplist, negative-facet, pair-span, slate-ramp, popularity, structured-state, adaptive orchestration, robustness fixes, and optional DeepSeek reranking work; experiment analysis and documentation. |
+| **Kwong Weng** | Elimination-scan recommendation strategy; retrieval-recall fixes; natural clarification phrasing; realism/stress harness; dual-track experiments; optional BGE embedding, dense retrieval, and dense reranking infrastructure; testing and technical documentation. |
+| **`corainexia`** | BM25 field-weight tuning; facet-agreement and category-agreement reranking; customer-query facet extraction. |
+| **`xiaotong0329`** | Intent-router logic; multi-route anchor retrieval; dynamic context programming and track-aware early-recommendation gating. |
 
-The agent runs identically with the network disabled; there is no fallback path
-because there is no online path. This was a deliberate choice: the submission rules
-reserve the right to score under network restrictions, and an agent that scores
-zero in that environment is worth less than one that scores `0.8592` everywhere.
+## Repository structure
 
-A neural cross-encoder reranking stage was built, measured and **removed from this
-branch**: it lost on every split (dev 0.9268 → 0.9211) at ~13× the latency. The
-code lives on the `semantic-rerank` branch and the full decision log is
-[`docs/team/rerank_signals.md`](docs/team/rerank_signals.md) §9.
+```text
+starter/       Agent entry point imported by the evaluator
+src/           State, routing, retrieval, reranking, policies, and context logic
+evaluator/     Frozen local customer simulator and scorer
+tests/         Contract, component, regression, state, LLM, and tooling tests
+tools/         Sweeps, tracing, stress tests, data generation, and weight fitting
+data/          Public, generated, adversarial, hard, and local catalog data
+docs/          Competition contract, evaluation configuration, and team notes
+```
 
-## Limitations and what we would do next
+## Cost and runtime disclosure
 
-- **Facet extraction is regex and keyword based.** It produces a usable partition
-  of the candidate pool, not a correct product taxonomy. A material like
-  "recycled polyester blend" resolves to `polyester`, and colour is taken from the
-  first match in the text rather than the item's actual colourway.
-- **`InfoGainPolicy` is not yet good enough to ship.** Its weakness is that it
-  cannot estimate *how many* constraints an answer will surface, only how much a
-  known answer would split the pool. That is visible in its results: it retrieves
-  the target as often as the shipped policy but ranks it worse, because it gathers
-  less evidence per turn. Modelling expected yield per attribute — from observed
-  disclosure sizes rather than a fixed prior — is the obvious next step, and is
-  what would let the more principled policy overtake the simpler one.
-- **Intent override is the weakest scenario**, at `0.867` hit rate against `0.94`
-  overall. Some of this is structural: those sessions cannot convert before the
-  override arrives on turn 3 or 4, which puts a floor under MTTC. The remaining
-  gap is genuine, and the focused route is a blunt instrument for it.
-- **No dense retrieval.** A local sentence-transformer route was planned and cut:
-  the lexical route recalls the target in **200 of 200** public sessions — measured
-  exhaustively by `tools/observe.py`, not sampled — so the headroom is in ranking,
-  not recall, and a model download would have compromised the no-network guarantee.
-  The adversarial set is the caveat: 4 of its 96 sessions are `never_retrieved`, so
-  the claim holds for the released distribution rather than universally.
-- **The dev/holdout split is 120/80.** Differences below roughly `0.02` on the
-  holdout are not distinguishable from noise at that size, and we have treated
-  them as such throughout.
+| Item | Offline default |
+|---|---|
+| Model/API | None |
+| Network required | No |
+| Credentials required | No |
+| Prompt/completion tokens | 0 / 0 |
+| Estimated API cost | $0.00 |
+| Required dependencies | Python 3.10+ standard library |
 
-## Data
-
-Catalog and sessions derive from Amazon Reviews 2023 by McAuley Lab, UCSD. See
-[DATA_ATTRIBUTION.md](DATA_ATTRIBUTION.md) before using or redistributing the data.
-The evaluator, `data/`, and the five frozen files at the root of `docs/` are
-organizer-owned and unmodified. Documents the team wrote live in
-[`docs/team/`](docs/team/); [`docs/README.md`](docs/README.md) explains the split.
+The optional DeepSeek and dense-embedding configurations are not requirements
+for the offline default. DeepSeek reranking must be explicitly enabled even when
+a valid key exists in the repository-root `.env` file.

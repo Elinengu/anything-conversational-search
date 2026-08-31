@@ -32,18 +32,25 @@ if str(_REPO_ROOT) not in sys.path:
 
 from src.index import load_index  # noqa: E402
 from src.facets import FacetStore  # noqa: E402
+from src.llm import LLMConfig, LLMReranker  # noqa: E402
 from src.phrasing import clarify  # noqa: E402
-from src.policy import ALLOWED_ATTRIBUTES, FixedPolicy  # noqa: E402
+from src.policy import ALLOWED_ATTRIBUTES, FixedPolicy, InfoGainPolicy  # noqa: E402
 from src.rerank import RerankConfig, rerank  # noqa: E402
 from src.retrieval import RetrievalConfig, retrieve  # noqa: E402
-from src.router import classify  # noqa: E402
+from src.router import BUYING, classify, detect_turn_intent  # noqa: E402
 from src.context_programming import (  # noqa: E402
     AdaptiveOrchestrator,
     ContextDistiller,
+    DialogPhase,
     LongTermProfileStore,
     UserProfile,
 )
-from src.state import DialogState  # noqa: E402
+from src.state import DialogState, SessionPhase  # noqa: E402
+
+try:  # optional dense sentence-embedding signal - needs onnxruntime + tokenizers
+    from src.embed import load_embedding_index  # noqa: E402
+except Exception:  # pragma: no cover
+    load_embedding_index = None  # type: ignore[assignment]
 
 
 @dataclass
@@ -92,6 +99,9 @@ class AgentConfig:
     earliest_recommend_turn: int = 2
     #: Route the customer-facing phrasing by detected intent.
     use_router: bool = True
+    # Consume the plan produced by AdaptiveOrchestrator. False disables plan
+    # effects for focused A/B measurements while retaining the new state ledger.
+    use_adaptive_orchestration: bool = True
     # Elimination scan: any product shown and not hit on is a confirmed
     # non-target (the session ends on a hit), so each turn we drop everything
     # already shown and return the top 10 of the re-ranked survivors. This walks
@@ -109,15 +119,19 @@ class AgentConfig:
     #   natural_off  dev 0.9418  holdout 0.9136   (per-scenario identical)
     #   natural_on   dev 0.9418  holdout 0.9136
     # (tools/sweep.py rows ``natural_off`` / ``natural_on``). The value is
-    # product realism for the demo / Innovation / Presentation criteria: instead
-    # of repeating "Is there anything else that matters for this one?", the agent
-    # names a facet the live pool is split on ("For the material, I'm seeing
-    # leather and canvas - do you have a preference?"), while still asking
-    # ``other`` so the extraction stays score-optimal. ``False`` restores the
-    # fixed question strings exactly.
+    # product realism for the demo / Innovation / Presentation criteria. It can
+    # name a useful live-pool split while keeping an ``other`` ask explicitly
+    # open-ended. Specific ``ask_attribute`` values only produce messages about
+    # that same attribute. ``False`` restores the fixed question strings exactly.
     natural_questions: bool = True
     #: Candidates inspected when choosing which facet to voice (see phrasing).
     phrasing_depth: int = 40
+    # Tier-2 opt-in LLM reranking layer (src/llm.py, RerankConfig.llm_weight).
+    # LLMConfig.enabled=False by default - the Agent still builds an
+    # LLMReranker either way, but .available is False and rerank() never
+    # calls out, so every existing config/test keeps the exact offline
+    # behaviour. See docs/team/ideas_to_integrate_llm.md #3.
+    llm: LLMConfig = field(default_factory=LLMConfig)
 
 
 class Agent:
@@ -136,6 +150,36 @@ class Agent:
             # (0.8349 vs 0.8119). InfoGainPolicy is the more interesting design and
             # ties on dev; see README "Clarification policy" for the measurements.
             self.config.policy = FixedPolicy()
+        # Used only after the live state detects over-generality or stagnation.
+        # Broad questions remain the measured default while they are productive.
+        self._targeted_policy = InfoGainPolicy(self.facets, allow_broad=False)
+        # Browsing-track policy (see _policy_for_state). Broad stays allowed here,
+        # unlike _targeted_policy: on turn 1 it still asks "other" once, and only
+        # a browse-gated customer's refusal of that ask (unproductive turn) tips
+        # scores() toward specific attributes via the decaying `remaining` term.
+        # allow_broad=False was tried first and picked a specific attribute from
+        # turn 1 by gain-ratio over the still catalog-wide pool a vague opening
+        # leaves behind - a near-blind guess, and it recovered almost none of the
+        # browse-gated loss (measured). expected_broad_answers=4.0 is what
+        # branch dual_tracking shipped for the same job (docs/team/agent_changes.md).
+        self._browsing_policy = InfoGainPolicy(self.facets, expected_broad_answers=4.0)
+        # Dense sentence-embedding index, shared by the S5 dense retrieval route
+        # and the S6 dense_weight term. Loaded only when some config asks for it
+        # (rerank.dense_weight > 0, or retrieval.use_dense); missing artifact /
+        # deps -> None and both stages run BM25-only exactly as before.
+        self.embed = None
+        needs_embed = (
+            self.config.rerank.dense_weight > 0.0
+            or self.config.retrieval.use_dense
+        )
+        if needs_embed and load_embedding_index is not None:
+            try:
+                candidate = load_embedding_index(catalog_path=catalog_path)
+                self.embed = candidate if candidate.available else None
+            except Exception:
+                self.embed = None
+        # Cheap to construct even when disabled - see AgentConfig.llm above.
+        self.llm = LLMReranker(self.config.llm)
         self._states: dict[str, DialogState] = {}
         # Long-term user profile store across sessions (Dynamic Context Programming)
         self.profile_store = LongTermProfileStore()
@@ -181,31 +225,162 @@ class Agent:
 
         state.observe(turn, user_message)
 
-        route = classify(state.opening) if self.config.use_router else None
+        route = self._route_for(state) if self.config.use_router else None
         is_buying = (route.name == "buying") if route else False
         track_name = route.name if route else "browsing"
 
-        # Runtime Adaptation: Personalized Context Distillation
+        # One query vector per turn, shared by every dense consumer: the S5
+        # dense retrieval route and the S6 dense_weight rerank term. None
+        # unless a config asked for embeddings (self.embed stays None then).
+        qvec = None
+        if self.embed is not None:
+            try:
+                qvec = self.embed.encode_query(state.full_text())
+            except Exception:
+                qvec = None
+
+        candidates = retrieve(
+            self.index, state, self.config.retrieval,
+            track=track_name, embed=self.embed, qvec=qvec,
+        )
+        candidates = rerank(
+            self.index, state, candidates, self.config.rerank,
+            track=track_name, embed=self.embed, qvec=qvec, llm=self.llm,
+        )
+        state.observe_pool(candidates)
+
+        # Runtime Adaptation: distil the latest slots, progress signals, and user
+        # context after observing the live pool, exactly once per customer turn.
         user_id = self._session_users.get(session_id, session_id)
         user_prof = self.profile_store.get_or_create(user_id)
         distilled_ctx = ContextDistiller.distill(state, user_prof, intent_track=track_name)
 
-        candidates = retrieve(self.index, state, self.config.retrieval)
-        candidates = rerank(self.index, state, candidates, self.config.rerank)
-
         # Adaptive Orchestration: Dynamic strategy alignment
         plan = AdaptiveOrchestrator.align_strategy(distilled_ctx, user_prof, candidates, self.config)
+        if self.config.use_adaptive_orchestration:
+            # ``terms`` is the standard fused pass already performed above. The
+            # other named routes are real strategy switches and receive one
+            # re-retrieval with the plan's weighting hint.
+            if plan.retrieval_route != "terms":
+                candidates = retrieve(
+                    self.index,
+                    state,
+                    self.config.retrieval,
+                    route_hint=plan.retrieval_route,
+                    track=track_name,
+                    embed=self.embed,
+                    qvec=qvec,
+                )
+                candidates = rerank(
+                    self.index, state, candidates, self.config.rerank,
+                    track=track_name, embed=self.embed, qvec=qvec, llm=self.llm,
+                )
+                state.observe_pool(candidates, advance=False)
+            self._apply_plan_to_state(state, plan)
+        else:
+            plan = None
 
-        attribute = self.config.policy.select(state, candidates)
+        policy = self._policy_for_state(state, plan)
+        attribute = policy.select(state, candidates)
         if attribute not in ALLOWED_ATTRIBUTES:
             attribute = "other"
         state.record_ask(attribute)
 
-        recommendations = self._shortlist(state, candidates, turn, top_k, is_buying=is_buying)
+        recommendations = self._shortlist(
+            state, candidates, turn, top_k, is_buying=is_buying, plan=plan
+        )
         # ``ask_attribute`` (above) is what the simulator reads and is unchanged;
         # ``clarify`` only builds the English ``message`` - see src/phrasing.py.
         message = clarify(attribute, state, candidates, self.facets, route, self.config)
         return self._envelope(message, attribute, recommendations)
+
+    def _route_for(self, state: DialogState):
+        """Evolve browsing intent into buying as concrete evidence accumulates."""
+        if not state.intent_history:
+            route = classify(state.opening)
+            reason = "opening classification"
+        elif state.override_turn is not None and state.turn_count >= state.override_turn:
+            route = BUYING
+            reason = "intent override makes the new request authoritative"
+        elif state.intent_track == "buying":
+            # Buying is sticky: a later polite or vague sentence must not undo
+            # explicit requirements already supplied.
+            route = BUYING
+            reason = "buying intent retained"
+        else:
+            route = detect_turn_intent(
+                state.full_text(),
+                state.turn_count,
+                state.intent_track,
+                state.productive_turns,
+            )
+            reason = (
+                "concrete constraints promoted browsing to buying"
+                if route.name == "buying"
+                else "session remains exploratory"
+            )
+        state.update_intent(route, reason)
+        return route
+
+    def _policy_for_state(self, state: DialogState, plan: object | None):
+        """Switch to a browsing-tuned info-gain policy on the browsing track, or
+        to a targeted one once progress has genuinely stalled.
+
+        A browsing customer needs a pointed question to draw out disclosure at
+        all: the broad "other" ask (``self.config.policy``'s default) only pays
+        off when the customer volunteers information unprompted, and a
+        non-cooperative browser never does (see ``docs/team/stress_harness.md``
+        and ``tools/stress_harness.py --customer browse-gated`` - this branch
+        measured 10/80 -> 24/80 browsing ``never_retrieved`` under
+        ``heavy+browse-gated`` before this switch was restored). This mirrors
+        the ``route_policies`` lever from the earlier ``dual_tracking`` branch,
+        wired through the state machine's own ``intent_track`` instead of a
+        parallel per-track config surface.
+
+        ``_browsing_policy`` (``expected_broad_answers=4.0``, broad allowed) is
+        used rather than ``_targeted_policy`` (``allow_broad=False``): the first
+        attempt at this switch used ``_targeted_policy`` and picked a specific
+        attribute from turn 1 by gain-ratio over the still catalog-wide pool a
+        vague opening leaves behind - a near-blind guess that recovered almost
+        none of the browse-gated loss (measured). Leaving broad allowed lets
+        turn 1 still ask "other"; it is the browse-gated customer's *refusal* of
+        that ask (an unproductive turn) that tips ``scores()`` toward specific
+        attributes from turn 2 on - the mechanism branch ``dual_tracking``
+        measured a 0.59 -> 0.95 browsing hit-rate recovery from.
+
+        ``not state.dead_attributes`` guards this exactly like the STAGNATING
+        branch below: once the customer has declined anything, this falls
+        through to the ordered FixedPolicy fallback rather than an
+        info-gain guess - dropping the guard regressed boundary-scenario
+        hit rate to 0.50 (measured; boundary sessions are declining
+        customers, so they hit dead_attributes almost immediately).
+        """
+        if state.intent_track == "browsing" and not state.dead_attributes:
+            return self._browsing_policy
+        if not self.config.use_adaptive_orchestration or plan is None:
+            return self.config.policy
+        phase = getattr(plan, "phase", None)
+        # A direct "no preference" is already handled by FixedPolicy's ordered
+        # fallback. Replacing that user-respecting fallback with a catalog-only
+        # information-gain guess regresses boundary conversations. Info gain is
+        # reserved for unexplained stagnation, where the user has not declined a
+        # dimension and the broad question genuinely yielded no information.
+        if phase == DialogPhase.STAGNATING and not state.dead_attributes:
+            return self._targeted_policy
+        return self.config.policy
+
+    @staticmethod
+    def _apply_plan_to_state(state: DialogState, plan: object) -> None:
+        mapping = {
+            DialogPhase.EXPLORING: SessionPhase.EXPLORING,
+            DialogPhase.NARROWING: SessionPhase.NARROWING,
+            DialogPhase.CONVERGING: SessionPhase.CONVERGING,
+            DialogPhase.OVERRIDE_REVERSAL: SessionPhase.OVERRIDE_RECOVERY,
+            DialogPhase.STAGNATING: SessionPhase.STAGNATING,
+        }
+        phase = mapping.get(getattr(plan, "phase", None), SessionPhase.EXPLORING)
+        reason = str(getattr(plan, "guidance_action", "standard pipeline"))
+        state.transition_to(phase, reason)
 
     def _shortlist(
         self,
@@ -214,12 +389,16 @@ class Agent:
         turn: int,
         top_k: int,
         is_buying: bool = False,
+        plan: object | None = None,
     ) -> list[dict]:
         top_limit = top_k if isinstance(top_k, int) and top_k > 0 else 10
         first_turn = self.config.first_recommend_turn
         sid = state.session_id
 
-        if turn < first_turn and not self._confident(candidates, turn, is_buying=is_buying):
+        if plan is not None:
+            if bool(getattr(plan, "recommendation_cutoff", False)):
+                return []
+        elif turn < first_turn and not self._confident(candidates, turn, is_buying=is_buying):
             return []
         if self.config.hold_until_stalled and turn < 10:
             # Hold every list until a turn adds no new real constraint (the "no
@@ -231,7 +410,10 @@ class Agent:
                 return []
 
         ramp = self.config.list_size_ramp
-        size = ramp[min(max(0, turn - first_turn), len(ramp) - 1)]
+        if plan is not None:
+            size = int(getattr(plan, "recommended_slate_size", ramp[-1]))
+        else:
+            size = ramp[min(max(0, turn - first_turn), len(ramp) - 1)]
         limit = min(size, top_limit)
 
         if not self.config.elimination_scan:

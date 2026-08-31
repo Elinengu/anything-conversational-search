@@ -26,6 +26,10 @@ public labels and API contract were **not** touched.
 | + popularity weight 0.02 → 0.4 | Elinengu | **0.9305** | **0.8020** | change 12; the tie-break regime fix — every split up, a hard-set miss converted; coordinate-ascent argmax measured and *not* shipped |
 | + pool-aware clarification wording | KW | 0.9305 | 0.8020 | change 13; **score-neutral by construction** — `ask_attribute` unchanged, simulator never reads `message`. Realism for Pillar II / Presentation |
 | + track-aware turn-2 gating | xiaotong0329 | **0.9313** | **0.8028** | change 14; PR #7 — one config knob (`buying_confidence_margin`); the accompanying `src/context_programming.py` module is built but not wired into any decision — verified by ablation |
+| + live structured state and orchestration | Elinengu | **0.9344** | — | change 15; active/superseded slots, rolling pool signals, plan-driven questions/gating/retrieval, intent transitions and observable snapshots |
+| + browsing-track clarification policy | Elinengu | 0.9235 | — | branch `state-encoder-eval`; restores a targeted question policy for browsing sessions after the `stress_harness`/`dense_rerank` merge dropped it. Costs −0.0109 cooperative, buys `heavy+browse-gated` 0.703 → 0.761. Full detail in `branch_state_encoder_eval_changes.md` §1 |
+| + three bugs ported from a sibling branch | Elinengu | 0.9235 | — | change 16; **score-neutral on every cooperative split by construction** — all three only fire on free-form customer wording. Worth +0.0098 on `heavy+browse-gated`, and collapses the branch's own embedding result from +0.0257 to +0.0042 |
+| + opt-in LLM semantic rerank (DeepSeek), gated | Elinengu | 0.9235 → **0.9254** | not measured | change 17; **off by default** (`llm_weight=0.0`) — measured on the fixed codebase (change 16's three bug fixes); see the change 17 section below for the full split table |
 
 Net: **public 0.859 -> 0.9313, adversarial 0.684 -> 0.8028.** 77/77 tests pass.
 The fourteen core-agent changes are detailed below; supporting tooling and docs follow.
@@ -37,6 +41,21 @@ Note: subsequent, unrelated work on this branch (dynamic context programming,
 clarification-wording naturalisation) has since moved the measured public score
 past 0.9305 — see those commits' own messages and `IMPLEMENTATION.md` for the
 current figure. The net above is the total through change 14 only.
+
+> Aside: branch `dual_tracking` (never merged to `main`) tried a different
+> mechanism for the same idea - widening `use_router` from phrasing into
+> behaviour via per-track `AgentConfig` knobs (`buying_rerank`,
+> `route_policies`, per-track timing/ramp). Measured there: 0.9177/0.7994 on
+> the cooperative sets (-0.013 vs the change-13 baseline, gains nothing
+> cooperative) but +0.147 overall / +0.43 browsing MRR on
+> `tools/stress_harness.py --customer browse-gated`. Superseded here by the
+> state machine's own `intent_track` / `_route_for` (changes 14-15 above),
+> which reaches the same browsing/buying behaviour split through live
+> session state rather than a parallel per-track config surface - so the
+> per-track config knobs were dropped on merge rather than kept unwired.
+> The stress harness itself (`tools/stress_harness.py`, paraphrase and
+> browse-gated customer stressors) is kept and used against the state
+> machine agent; see `docs/team/stress_harness.md`.
 Change 9 moved the score by exactly zero and is recorded in full anyway — a
 measured no-change is the evidence that keeps the shipped design chosen rather
 than assumed. Change 10 is the same lesson from the other side: the proposal that
@@ -967,12 +986,70 @@ public before this change; the commit message's "100% Hit Rate@10" describes the
 post-change state, not something this change produced.
 
 
+## Not merged — track-aware routing layer (Kwong Weng, branch `dual_tracking`)
+
+**Files:** `starter/agent.py` (`AgentConfig` fields, `_track` / `_policy_for` /
+`_rerank_config` / `_first_recommend_turn` / `_list_size_ramp`, `_shortlist`
+threading), `src/rerank.py` (`track` kwarg, `RerankConfig.hard_filter`, banish
+branch), `tools/sweep.py` (`router_off` / `router_on` / `router_on_hardfilter`),
+`tests/test_components.py` (+10). `src/router.py` unchanged. The browsing-gated
+customer that scores this shipped as `tools/dual_track_harness.py` and is now a
+composable stressor in `tools/stress_harness.py` (branch `stress_harness`).
+
+### Problem
+
+Pillar I asks for Buying/Browsing routing. `classify()` produced a `Route` that
+only ever reached `src/phrasing.py` (a lead-in phrase), and the public simulator
+discards `message`, so routing was score-neutral by construction
+(`docs/team/future_steps.md:18`). It also *cannot* be scored by that simulator:
+after turn 1, `evaluator/local_evaluator.py:customer_reply` is scenario-agnostic
+and hands over every undisclosed constraint on `ask_attribute="other"` (`:180`),
+so `FixedPolicy("other")` is unbeatable and a browser and a buyer are drained
+identically.
+
+### What changed
+
+1. **Harness** (`tools/stress_harness.py --customer browse-gated`): a faithful
+   copy of `evaluate()`'s loop (`evaluator/` and `data/` untouched) where the
+   **browsing** customer discloses a constraint only when asked a *pointed*
+   question whose `classify_constraint` bucket matches — never on the broad
+   "anything else?". `--verify` asserts parity with the official evaluator
+   (delta `0.00e+00`). `--misroute-matrix` forces each track and tabulates
+   true × routed.
+2. **`AgentConfig.use_router` widened**: the track (re-checked each turn by
+   `detect_turn_intent`, promoted one-way to buying) drives the clarification
+   policy (buying `FixedPolicy` / browsing `InfoGainPolicy`), per-track rerank
+   configs, an optional buying-track `hard_filter` (banishes a candidate that
+   contradicts an authoritative facet), and per-track timing. The policy keys off
+   the *opening* classification and stays put (InfoGain self-adapts); the other
+   levers follow the promotable track. `use_router=False` bypasses everything.
+
+### Effect
+
+| set | `use_router=False` | `use_router=True` | note |
+|---|---|---|---|
+| Public set | 0.930502 | 0.917680 | Hit@10 200/200 held; cost is concentrated in the boundary scenario (opens like a browser, routed to InfoGain, then declines) |
+| Adversarial set | 0.801978 | 0.799380 | noise overall; `boilerplate_soft` bucket 0.893 → 0.880 is a real −0.013 regression |
+| dev / holdout | 0.9418 / 0.9136 | 0.9268 / 0.9041 | `router_off` reproduces the left column bit-for-bit |
+| **Harness — overall** | **0.7308** | **0.8775** | the realistic browsing customer |
+| **Harness — browsing** | 0.59 / 0.24 (hit/mrr) | **0.95 / 0.67** | MTTC 7.4 → 4.2 |
+| Harness — buying | 1.00 / 0.90 | 1.00 / 0.90 | identical — buyers unaffected |
+| Misroute (harness) | — | — | browser-as-buyer −0.66 MRR vs buyer-as-browser −0.07: ~10× asymmetric |
+
+On the cooperative public simulator behaviour-routing is a net cost (~0.013) with
+no measurable upside — that simulator rewards nothing but broad-question spam. The
+value is entirely on the harness, where a less cooperative browser makes routing
+load-bearing. It stays on the branch; `main` is unchanged. Full analysis and the
+"what is not claimed" list: `docs/team/dual_track_routing.md`.
+
+## Supporting work (Kwong Weng)
 
 | file | what |
 |---|---|
 | `tools/hard_cases.py` | Adversarial session generator + per-bucket scorer. Scans the frozen catalog, buckets every product by an adversarial property, samples 16 each. `--run` scores the agent grouped by bucket. |
 | `data/hard_set.jsonl` | 96 generated sessions (6 buckets: homogeneous_cluster, budget_only_signal, boilerplate_soft, degenerate_card, generic_override, cross_category_collision). Public-set schema; scored by the unmodified evaluator. |
-| `tools/sweep.py` | `build_configs()` — added `plain`, `elim1/2/3`, `elim_hold1/2` for the start-turn sweep. |
+| `tools/sweep.py` | `build_configs()` — added `plain`, `elim1/2/3`, `elim_hold1/2` for the start-turn sweep; `router_off` / `router_on` from the not-merged track-routing work above (`router_on_hardfilter` dropped on merge into `state-encoder-eval` - it referenced `AgentConfig.buying_rerank`, a field that branch's routing needed and this one's state-machine `_route_for` does not). |
+| `tools/stress_harness.py` | (branch `stress_harness`) Merges the paraphrase / decoy stressors (`kwongweng_realism_harness`) with the browsing-disclosure gating (`dual_tracking`) into one composable `Customer`. Adds a retrieval-vs-ranking diagnostic and a `--targets generic` hard-to-retrieve subset. `--verify` / `--all` / `--configs` / `--misroute-matrix`. Supersedes `tools/sim_harness.py` and `tools/dual_track_harness.py`. See `docs/team/stress_harness.md`. |
 | `docs/team/ideas.md` / `ideas.pdf` | Reranking & recommendation-strategy ideas, each with the measured result: elimination scan (1a/1b), decline filter (1c), facet / category / MMR / learned-weights (2-6). |
 | `docs/team/hard_cases.md` / `.pdf` | Failure analysis of the adversarial set and the prioritised fix plan. |
 | `agent_summary.pdf` | Rewritten (`c7757af`) for the current elimination-scan workflow: the loop, one turn stage-by-stage, recommendation timing, and a round-by-round table per scenario. |
@@ -1092,3 +1169,453 @@ five frozen files at the root of `docs/`: `agent_api_contract.json`,
 `submission_rules.md`.
 
 Everything under `docs/team/` is ours — see `docs/README.md` for the split.
+
+---
+
+## Change 15 — Live conversational state and adaptive execution (Elinengu)
+
+**Files:** `src/state.py`, `src/context_programming.py`, `src/retrieval.py`,
+`src/phrasing.py`, `starter/agent.py`, `tools/observe.py`,
+`tests/test_state_management.py`, `tests/test_components.py`,
+`tests/test_context_programming.py`, `IMPLEMENTATION.md`
+
+**Organizer-owned evaluator changes:** none.
+
+### The recommendation-system idea, in plain language
+
+A recommendation system starts with many possible products. Retrieval finds a
+large **candidate pool** that might fit. Reranking then sorts that pool so the
+best-looking products rise to the top. In a conversation, both steps need a
+reliable memory of what the shopper currently wants.
+
+Before this change, the agent remembered messages, declined attributes and one
+override turn, but its richer orchestration plan was advisory only: it was
+computed and then discarded. The agent now maintains explicit state, derives
+one plan from it each turn, and applies that plan to the real question,
+retrieval and recommendation decisions.
+
+The implementation followed the requested order below.
+
+### 1. Structured active/superseded slot ledger
+
+A **slot** is one usable fact about the request, such as `material=leather` or
+`color=black`. Each `SlotValue` records:
+
+| field | beginner meaning |
+|---|---|
+| `attribute` / `value` | what kind of preference it is and what the shopper said |
+| `source_turn` / `raw_text` | where the fact came from |
+| `confidence` | how directly the system extracted it |
+| `status` | whether it still controls retrieval |
+| `superseded_turn` | when an override retired it |
+
+New information accumulates in `active_slots`. On “Actually, ignore that…”, the
+old active objects move to `superseded_slots`; they are not silently deleted.
+The new facts become the only authoritative structured view. This gives both
+correct current behavior and an audit trail explaining the rewrite.
+
+```mermaid
+flowchart LR
+    A[New user fact] --> B[active slot]
+    B -->|more information| B
+    B -->|intent override| C[superseded archive]
+    D[replacement fact] --> E[new active slot]
+    C -. audit only .-> F[observable snapshot]
+    E --> G[structured retrieval view]
+```
+
+Declines such as “no preference for color” do not become product constraints.
+They instead mark `color` as a dead attribute so it is not asked again.
+
+### 2. Rolling stagnation and pool-state signals
+
+The old lifetime count `productive_turns` cannot tell recent momentum from a
+current dead end. The state now also records:
+
+- `unproductive_streak` and `max_unproductive_streak`;
+- pool size and normalized score entropy (how flat the ranking is);
+- leader margin (how far the first product leads the second);
+- top-pool overlap and consecutive stable-pool turns;
+- `over_general`, for a large, flat candidate pool with no clear leader.
+
+This explains the difference between the two sequences raised during review:
+
+| turn history | total productive | current failure streak | interpretation |
+|---|---:|---:|---|
+| one productive, then five failures | 1 | **5** | the conversation is stuck now |
+| five productive, then one failure | 5 | **1** | one weak turn after good progress |
+
+The transition model is not a trained neural model. It is a deterministic set
+of readable state rules. A stagnation transition requires at least two recent
+unproductive turns plus either a stable pool or an over-general pool. Any new
+slot resets the current streak to zero.
+
+### 3. The orchestration plan now controls execution
+
+`AdaptiveOrchestrator.align_strategy()` already returned a plan, but no
+downstream component read it. The plan is now applied in three places:
+
+| decision | plan field used | behavior |
+|---|---|---|
+| question | `phase` / `guidance_action` | unexplained stagnation switches to a specific information-gain question |
+| recommendation gate | `recommendation_cutoff` / `recommended_slate_size` | withhold an uncertain early list or choose the planned list size |
+| retrieval | `retrieval_route` | use the focused override view or compact structured recovery view |
+
+Two safety rules came from regression testing. A direct “no preference” keeps
+the existing ordered fallback (`feature`, then `use_case`, and so on), rather
+than replacing the user's answer with a catalog-only guess. Also, reretrieving
+within one customer turn updates that turn's pool snapshot without counting it
+as another stable turn.
+
+### 4. Per-turn intent evolution
+
+The router no longer treats the opening sentence as the session's permanent
+intent. It classifies each accumulated turn and records changes in
+`intent_history` with turn, confidence and reason.
+
+- A vague opening stays on the diverse **browsing** track.
+- Enough concrete constraints promote it to the precise **buying** track.
+- Buying stays sticky so a later polite or vague sentence does not erase hard
+  requirements.
+- An explicit override immediately becomes buying and rewrites the active slots.
+
+Long-term profile precedence was deliberately left as it was, per the review
+decision; this change does not let inferred profile preferences override an
+explicit current-session request.
+
+### 5. Distilled structured retrieval view
+
+`authoritative_text()` turns only the active slot ledger into a short search
+query. For example, after replacing “black leather” with “grey canvas”, the
+structured query contains `grey canvas` and not `black leather`.
+
+This view is a real reciprocal-rank-fusion retrieval route. It is intentionally
+adaptive rather than permanently enabled: normal turns keep the higher-recall
+full conversation route, while a `structured` orchestration hint activates the
+slot-only route when progress has stalled. The focused post-override route is
+forced on the reversal turn.
+
+### 6. Observable snapshots and transition diagrams
+
+`DialogState.snapshot()` now returns a JSON-serializable record containing the
+active ledger with provenance, superseded archive, structured query, intent
+history, phase history, productivity streak, pool signals, asked attributes and
+declined attributes. `tools/observe.py` captures the plan and retrieval route and
+renders these fields into its Markdown transcript and HTML viewer.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Exploring
+    Exploring --> Narrowing: a new slot arrives
+    Exploring --> Stagnating: 2+ failures and stable/flat pool
+    Narrowing --> Converging: clear candidate leader
+    Narrowing --> Stagnating: recent progress stops
+    Stagnating --> Narrowing: new information resets streak
+    Stagnating --> Converging: reroute produces clear leader
+    Exploring --> OverrideRecovery: explicit reversal
+    Narrowing --> OverrideRecovery: explicit reversal
+    Converging --> OverrideRecovery: explicit reversal
+    Stagnating --> OverrideRecovery: explicit reversal
+    OverrideRecovery --> Narrowing: replacement evidence accumulates
+    OverrideRecovery --> Converging: replacement request has clear leader
+```
+
+The live turn order is:
+
+```mermaid
+flowchart TD
+    U[User message] --> S[Update slots, decline and streak]
+    S --> I[Update per-turn intent]
+    I --> R[Retrieve and rerank candidate pool]
+    R --> P[Measure entropy, margin and stability]
+    P --> D[Distill structured context]
+    D --> O[Create orchestration plan]
+    O --> RR[Optional focused or structured reroute]
+    RR --> Q[Choose matching ask_attribute and message]
+    Q --> G[Apply recommendation cutoff and slate size]
+    G --> X[Write observable state snapshot]
+```
+
+Example artifact from the verification run:
+`runs/state_observability/state-ledger-20260830-221500/viewer.html`. It was
+generated in a separate output directory so observing a run does not edit the
+observer implementation or create merge-conflict noise there.
+
+### Message and `ask_attribute` consistency
+
+The customer-facing `message` now follows the machine-readable
+`ask_attribute`. A `material` ask only talks about material, a `color` ask only
+talks about color, and `other` stays genuinely open-ended. Candidate-aware
+examples may be voiced only for the same requested attribute. Tests pin this
+contract so the text cannot suggest one question while the evaluator receives
+another.
+
+### Verification and measured effect
+
+| check | result |
+|---|---|
+| full unit/regression suite | **91/91 passed** |
+| observer control comparison | traced and untraced score identical (`0.960000`, one boundary session) |
+| committed-main holdout before | `0.914119`, Hit@10 `1.000` |
+| after this change, holdout | **`0.918010`**, Hit@10 **`1.000`** |
+| public set before | `0.931302`, Hit@10 `1.000` |
+| after this change, public set | **`0.934371`**, Hit@10 **`1.000`** |
+
+The score is not the only purpose of this work—the main result is that state can
+now be inspected and the plan changes real behavior—but the measurements show
+that wiring it in did not buy the architecture by sacrificing retrieval quality.
+
+---
+
+## Change 16 — Three bugs ported from `integration/gemini-stress-harness` (Elinengu)
+
+**Files:** `src/text.py`, `src/state.py`, `tools/observe.py`, `tools/stress_observe/runner.py`
+— commits `e484cbe`, `b6a334f`, `0462f4d` (branch `state-encoder-eval`)
+
+### Problem
+
+`state-encoder-eval` and `integration/gemini-stress-harness` both branch from `9921650` and
+both independently merged `stress_harness`, so both carry the same tooling. Neither is an
+ancestor of the other. The gemini branch subsequently found four bugs; **three were in code
+this branch also had, and all three were still present here** — confirmed by executing them,
+not by reading code. (`dynamic-state-slot` has no unique commits at all — it is a strict
+ancestor of this branch, so there was nothing to port from it.)
+
+**A. Carrier framing glued onto the disclosed value** (`src/text.py`). `constraint_spans()`
+kept every ≥2-word punctuation-split chunk with no stopword stripping — correct for the
+evaluator's template, where a colon isolates the framing, wrong for free-form wording:
+
+```
+"One more thing - a breathable net weave."   ->  ['one more thing', 'a breathable net weave']
+"I'd also want it to be synthetic sole."     ->  ['i d also want it to be synthetic sole']
+```
+
+The clean value was destroyed, not merely accompanied by noise. `query_spans()` feeds the
+reranker's span-coverage term, and a glued fragment almost never appears literally in a
+product's text, so this was diluting the primary ranking signal.
+
+**B. A refusal recorded as a disclosure** (`src/state.py`). A browse-gated customer's stall
+("I'm still just browsing - ask me about one particular thing") split into two invented
+`feature` slots *and* counted as a productive turn, resetting `unproductive_streak`. That
+streak is the only input to `DialogPhase.STAGNATING`, so a session stuck in exactly the loop
+stagnation recovery exists for could never trigger it.
+
+**C. Trace probes rejecting the agent's kwargs** (`tools/observe.py`,
+`tools/stress_observe/runner.py`). Both probe copies had signatures predating this branch's
+`track=`/`embed=`/`qvec=`, so every call raised `TypeError` inside `Agent.respond()`'s
+catch-all and the turn returned an empty envelope. On 5 `paraphrase:heavy+browse-gated`
+sessions: `hit 0.000 / score 0.000000` → `hit 1.000 / score 0.858500`. Worse than a zero
+score — the empty envelope made the diagnostic report all 5 as `never_retrieved`, "a recall
+problem (S1/S5)", which is the exact signal used to reason about where a dense route helps.
+**Any `never_retrieved` figure from these two tools on this branch before `e484cbe` is an
+artifact.** `tools/stress_harness.py` does not install these probes, so aggregate scores are
+unaffected.
+
+Gemini's fourth fix (`2224245`, LLM rerank temperature and a reroute discarding `llm_scores`)
+is **n/a** here: there is no `src/llm.py` on this branch, and its reroute already threads
+`embed=`/`qvec=` through both calls — verified, not assumed. (It is no longer n/a as of
+change 17 below, which adds `src/llm.py` to this branch on its own, independent design.)
+
+### What changed
+
+A strips a stopword run off *both* ends of each chunk, generalising the leading-only strip
+`pair_spans()` already used, plus 27 carrier words added to `STOPWORDS` (checked against
+`BOILERPLATE` first — `tests/test_stoplist.py`'s disjointness invariant is what caught a bad
+addition in gemini's own attempt). B adds a `STALL_CUES` pattern feeding a new
+`excluded = declined or stalled`, gated to `turn > 1` because the evaluator opens *every*
+browsing session with "I'm still exploring." — ungated it would discard the most informative
+message of every browsing session. `dead_attributes` still keys off `declined` alone: a stall
+is not "no preference for X". C makes both probes take and forward `**kwargs`.
+
+`src/state.py` and `src/text.py` are now code-identical to gemini's.
+
+### Effect
+
+All three are **score-neutral on every cooperative split, by construction** — they only fire
+on wording the official simulator never produces:
+
+| | before | after |
+|---|---|---|
+| Public set (200) | 0.923487 | **0.923487** (bit-identical) |
+| Hit@10 / MRR / efficiency | 1.000 / 0.880956 / 0.796 | unchanged |
+| holdout (80) | 0.9149 | **0.9149** |
+| harness `--verify` delta | — | `9.52e-08` |
+| tests | 127 | **134** |
+
+Under the stressed customer they are worth a real gain, and they materially change the
+branch's own embedding conclusion. `paraphrase:heavy+browse-gated`, 200 sessions:
+
+| | baseline `router_on` | `dense_route_nobrowse` | dense gain |
+|---|---|---|---|
+| before these fixes | 0.76086 | 0.78652 | **+0.0257** |
+| after these fixes | **0.77065** (+0.0098) | 0.77480 | **+0.0042** |
+
+The fixes buy **+0.0098** deterministically, with no model. The dense retrieval route's
+headline gain — the one result on that branch that had cleared the noise floor — **collapses
+to 16% of its former size**, because it was in large part compensating for bug A: once
+`constraint_spans()` returns clean values, the lexical span signal recovers and the embedding
+has much less left to add. Official (−0.0002) and holdout (+0.0031) are unchanged by the
+fixes and were always inside the ~0.02 noise floor, so after this the dense route no longer
+clears noise on **any** of the three checks. Recorded in full, including the downgrade, in
+`docs/team/branch_state_encoder_eval_changes.md` §3f–§3g.
+
+What did *not* move: the public set, the holdout split, and browsing `never_retrieved` under
+stress (10/80 for both configs — the dense route still recovers none of them, as originally
+found).
+
+---
+
+## Change 17 — Opt-in LLM semantic reranking, gated on pool ambiguity (Elinengu)
+
+**Files:** `src/llm.py` (new), `src/rerank.py`, `starter/agent.py`,
+`tools/sweep.py`, `tools/observe.py`, `tests/test_llm.py` (new),
+`tests/test_components.py` — commits `10ab28f`, `d8d6718`, `0c1f9bc`
+
+### Problem
+
+`docs/team/ideas_to_integrate_llm.md` §Tier 2 #3 named "LLM semantic
+reranking (opt-in layer over the top ~15-20)" as a Pillar I checkbox the
+agent had no code for — a cross-encoder attempt existed and was measured and
+removed (change 11: `semantic-rerank` branch, lost on every split at 13x
+latency), but nothing using an actual instruction-following model had been
+tried. The open question, stated exactly by the user: does a real LLM call
+help enough to justify the network dependency, on both the cooperative
+public set and the realistic `paraphrase:heavy+browse-gated` stress harness
+— without regressing the offline score floor the submission rules protect.
+
+### What changed
+
+`src/llm.py` adds `LLMConfig` + `LLMReranker`, a stdlib-only (`urllib`)
+client for DeepSeek's chat-completions endpoint. `rank()` sends the
+conversation's `state.authoritative_text()` plus a batch of candidate
+`{asin, text}` pairs and asks for a best-first JSON ordering; it returns
+`None` on *any* failure at all — no key, network error, timeout, a
+non-JSON reply, an id the model invented — and the caller treats `None`
+identically to "no opinion this turn."
+
+`src/rerank.py` fuses that ordering into the existing lexical score exactly
+the way `dense_weight` fuses the embedding cosine — never a replacement:
+
+```
+RerankConfig.llm_weight      = 0.0   # off unless a config sets it
+RerankConfig.llm_gate_margin = 0.05  # only ask when the pool has no clear leader
+RerankConfig.llm_depth       = 8     # only the lexically-sorted head is reorderable
+```
+
+`_llm_gate_open()` mirrors `_dense_gate_open()` (Step 3.2, this same
+branch): it reads `state.leader_margin` from the *previous* turn's observed
+pool. A pool with a confident lexical leader has nothing to gain from a
+nondeterministic network call and everything to lose; an ambiguous one
+(`leader_margin < 0.05`) is exactly where a semantic read of the candidates
+can break a tie that exact-token matching cannot see. `llm_weight` stays
+`0.0` in every existing config and the shipped default — the offline
+BM25 + span pipeline runs identically with the network disabled, per
+`README.md`'s "Disclosure": *"the submission rules reserve the right to
+score under network restrictions, and an agent that scores zero in that
+environment is worth less than one that scores 0.8592 everywhere."*
+
+Two named configs (`tools/sweep.py`) exercise it: `llm_rerank_always`
+(`llm_gate_margin=0.0`, fires every turn) and `llm_rerank_gated` (the
+measured row below).
+
+**Side fix, found while building this:** `tools/observe.py`'s tracing
+probes (`install_probes()`) predated the `track=`/`embed=`/`qvec=` keywords
+`retrieve()`/`rerank()` now accept. Every traced call raised `TypeError`
+inside `Agent.respond()`'s broad `except Exception`, so **every**
+`tools/observe.py` run — not just this change's — silently degraded every
+turn to the empty fallback response and reported 100% `never_retrieved`.
+Fixed with `**kwargs` forwarding on both probes (commit `10ab28f`); verified
+`tools/observe.py --limit 5` now reports `hit 1.000, score 0.9107` instead
+of `0/5`. `--config <name>` was also added so a named `tools/sweep.py`
+config (not just the default `AgentConfig()`) can be traced into its own
+`viewer.html` (commit `0c1f9bc`) — used to produce the two viewer files
+below.
+
+### Effect
+
+**Measured on the merged codebase — change 16's three bug fixes are in place.**
+An earlier measurement of this same layer, taken before those fixes were merged
+into this branch, is superseded below rather than kept alongside: the fixes move
+`constraint_spans()` and hence `query_spans()` (the reranker's primary lexical
+signal), which changes both the baseline and how much room the LLM layer has left
+to add, exactly the way change 16 documents for the branch's dense embedding
+route. Baseline is the branch's current measured state (public `0.923487`,
+holdout `0.9149` — see the score-progression table above; `Change 15`'s `0.9344`
+predates later, unrelated branch commits). All rows below are **live DeepSeek
+calls**, not a simulation.
+
+| split (sessions) | baseline score | `llm_rerank_gated` score | Δ score | baseline MRR | `llm_rerank_gated` MRR | Δ MRR |
+|---|---|---|---|---|---|---|
+| dev (120, cooperative) | 0.9292 | 0.9280 | −0.0012 (noise) | 0.893 | 0.889 | −0.004 |
+| holdout (80, cooperative) | 0.9149 | **0.9218** | **+0.0069** | 0.862 | **0.886** | **+0.024** |
+| public set (200, official `evaluator.local_evaluator` config) | 0.923487 | **0.9254** | **+0.0019** | 0.8810 | **0.887** | **+0.006** |
+| stress: `paraphrase:heavy+browse-gated` (200) | 0.77065 | **0.77432** | **+0.0037** | 0.6628 | **0.6751** | **+0.0123** |
+
+Dev, holdout and public are byte-identical to the pre-merge measurement (as
+expected — change 16's fixes only fire on free-form wording the official
+template never produces); only the stress-harness row moved.
+
+`hit@10` never regresses on any split (stays `1.000` on holdout/public, flat
+`0.880` under stress) — every score movement above is pure ranking, never
+recall. Per-scenario under stress, the gain is spread across **boundary**
+(MRR `0.7843 → 0.8125`, +0.028), **browsing** (`0.4563 → 0.4865`, +0.030 — the
+hardest bucket, where a vague opening leaves the lexical pool least
+discriminating) and **buying** (`0.8017 → 0.8090`, +0.007); the one cost is
+**intent_override** (`0.8028 → 0.7750`, −0.028) — a reversed preference is
+exactly the case where the model's own judgment of "what the customer wants"
+can disagree with the state machine's `focused_text()` about which turns still
+count, and the same scenario regressed (more sharply, at −0.086) before the
+bug fixes too. This mirrors change 16's finding for the dense embedding route
+almost exactly: that route's stress gain fell to 16% of its pre-fix size once
+the lexical signal was repaired (`+0.0257 → +0.0042`); this layer's fell to
+about half (`+0.0071 → +0.0037`) — smaller because an LLM reading full product
+text is less dependent on the exact-token `query_spans()` signal than a cosine
+route encoding the same spans would be, but the direction and mechanism are
+identical: both were partly substituting for a broken lexical signal.
+
+The public-set number was measured twice, independently: `tools/sweep.py
+--split all` (0.9254) and `tools/observe.py --config llm_rerank_gated`
+(0.925362 pre-merge, 0.9254 post-merge — see below) agree to within 0.0002 in
+both cases — the small residual is expected call-to-call nondeterminism in the
+live model (`temperature=0.0` reduces but does not eliminate it;
+`ideas_to_integrate_llm.md` names this risk explicitly), not a measurement
+error. `runs/baseline-*/viewer.html` and `runs/llm_rerank_gated-*/viewer.html`
+(regenerated on the merged codebase) hold the full 200-session traces this
+table is built from.
+
+### Why this stays off by default
+
+Every split moved flat-to-positive and none regressed hit@10, so the layer
+is a genuine, measured win where the network is available — but the case for
+it is weaker post-merge than the first measurement suggested, for the same
+reason the dense route's case weakened: three things keep `llm_weight=0.0`
+the shipped default rather than flipping it on. The offline score floor is a
+hard guarantee this project has kept since change 11 (a network-restricted
+scoring run must still get `0.923487`, not degrade unpredictably); the gain
+size (`+0.002` to `+0.004` on the sets that matter, down from the pre-fix
+`+0.002` to `+0.007`) sits inside or just outside this project's own noise
+band, the same territory change 9's "measured no-change" and change 13's
+"score-neutral by construction" occupy; and the one real regression
+(`intent_override` under stress) is a genuine trade-off in both measurements,
+not settled by either run. The layer is built, tested (`tests/test_llm.py`,
+`LLMRerankTests` in `tests/test_components.py` — 162/162 total post-merge),
+wired through `tools/sweep.py` and `tools/observe.py` for anyone who wants to
+re-run it with `DEEPSEEK_API_KEY` set, and available as
+`AgentConfig(llm=LLMConfig(enabled=True), rerank=RerankConfig(llm_weight=1.0))`
+for a network-enabled demo — exactly the "opt-in layer with a deterministic
+fallback" `ideas_to_integrate_llm.md` called for.
+
+**Follow-up (tooling, no score change):** `LLMReranker` now also falls back to
+a `.env` file at the repo root (`.env` is `.gitignore`d) when
+`DEEPSEEK_API_KEY` isn't already in the process environment — an exported
+variable still always takes precedence when both are present. This exists
+purely to remove a class of "I definitely exported it" debugging session:
+`export` only lasts for the shell it was typed into, and a new terminal tab, a
+different IDE run configuration, or a subprocess that doesn't inherit the
+parent shell's environment all silently miss it, which looks identical to
+"the layer just isn't helping" from the outside (see `llm_config_readme.md`).
+Stdlib-only (`_read_dotenv` in `src/llm.py`, ~25 lines, no `python-dotenv`
+dependency added), 170/170 tests (`DotenvFallbackTests` in
+`tests/test_llm.py`), public set unchanged at `0.923487` — this changes only
+where the credential can come from, not the reranking behaviour once it's
+resolved.

@@ -219,3 +219,12 @@ __marimo__/
 
 # Session observation runs (regenerate with: python3 tools/observe.py)
 runs/
+
+# Dense embedding artifact (tools/build_embeddings.py) - large binary (ONNX model +
+# catalog vectors), git-ignored and distributed as a GitHub Release asset the same way
+# data/catalog.jsonl.gz is (see data/README.md, tools/build_embeddings.py docstring).
+data/embeddings/
+
+# OS cruft
+.DS_Store
+**/.DS_Store
