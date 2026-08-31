@@ -316,6 +316,25 @@ class TracingAgent:
                 "ask_attribute": response.get("ask_attribute"),
                 "shown_count": len(shown),
                 "shown": shown,
+                # The list the customer actually saw, which is NOT ``rerank.top``:
+                # _shortlist()'s elimination scan drops every product shown on an
+                # earlier turn, so each elimination shifts everything below it up
+                # and ``shown`` can begin deep in the reranked list. ``rerank_rank``
+                # carries that offset so the two tables can be read against each
+                # other - e.g. public_0083 turn 5, target shown 5th but reranked
+                # 19th, with 14 already-shown products eliminated above it.
+                # ``target_shown_rank`` indexes THIS list, and it is the rank the
+                # evaluator scores (best_rank comes from response["recommendations"]).
+                "shown_detail": [
+                    {
+                        "position": position + 1,
+                        "parent_asin": parent_asin,
+                        "rerank_rank": _rank_of(parent_asin, ranked),
+                        "title": _title(self.products, parent_asin),
+                        "is_target": parent_asin == target,
+                    }
+                    for position, parent_asin in enumerate(shown)
+                ],
                 "target_shown_rank": _rank_of(target, [(a, 0.0) for a in shown]),
                 "withheld": len(shown) == 0,
             },
@@ -569,6 +588,14 @@ def render_session_markdown(record: dict) -> str:
                 f"  - showed {out['shown_count']} products; "
                 + (f"**target at position {position}**" if position else "target not among them")
             )
+            # The shown list, not the reranked table above it: the elimination scan
+            # drops already-shown products, so the two orderings differ.
+            for entry in out.get("shown_detail") or []:
+                marker = " **<- target**" if entry["is_target"] else ""
+                lines.append(
+                    f"    {entry['position']}. `{entry['parent_asin']}` "
+                    f"(rerank #{entry['rerank_rank'] or '-'}) {entry['title']}{marker}"
+                )
         lines.append(f"  - latency {turn['latency_ms']} ms")
         if turn["error"]:
             lines.append(f"  - **EXCEPTION** {turn['error']}")
@@ -775,6 +802,7 @@ function renderDetail(id) {
       <p>pool ${t.retrieval.pool_size} via ${esc(t.retrieval.route || "terms")} &middot; target at pool rank
          <b>${t.retrieval.target_pool_rank ?? "not in pool"}</b> &rarr; after rerank
          <b>${rr.target_rank ?? "not in pool"}</b></p>
+      <p class="mono">reranked candidates (diagnostic - <i>not</i> what was shown)</p>
       <table><tr><th>#</th><th>asin</th><th>score</th><th>product</th></tr>
         ${rr.top.map(e => `<tr class="${e.is_target ? "tgt" : ""}"><td>${e.rank}</td>
           <td class="mono">${esc(e.parent_asin)}</td><td>${e.score}</td><td>${esc(e.title)}</td></tr>`).join("")}
@@ -784,7 +812,14 @@ function renderDetail(id) {
       ${out.withheld
         ? `<p class="withheld">list withheld this turn</p>`
         : `<p>showed ${out.shown_count} &middot; ${out.target_shown_rank
-            ? "<b>target at position " + out.target_shown_rank + "</b>" : "target not among them"}</p>`}
+            ? "<b>target at position " + out.target_shown_rank + "</b>" : "target not among them"}</p>
+           <p class="mono">shown to the customer - positions differ from the table above
+             because already-shown products are eliminated</p>
+           <table><tr><th>#</th><th>asin</th><th>rerank #</th><th>product</th></tr>
+             ${(out.shown_detail || []).map(e => `<tr class="${e.is_target ? "tgt" : ""}">
+               <td>${e.position}</td><td class="mono">${esc(e.parent_asin)}</td>
+               <td>${e.rerank_rank ?? "-"}</td><td>${esc(e.title)}</td></tr>`).join("")}
+           </table>`}
       <p class="mono">${t.latency_ms} ms${t.error ? " &middot; EXCEPTION " + esc(t.error) : ""}</p></div>`;
   }
   document.getElementById("detail").innerHTML = h;
