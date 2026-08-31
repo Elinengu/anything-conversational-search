@@ -118,6 +118,7 @@ def _pair_coverage(text_padded: str, pairs: list[str]) -> float:
 
 
 _PROD_CACHE: dict[str, dict] = {}
+_PADDED_CACHE: dict[str, str] = {}
 
 
 def _prod(asin: str, index_products: dict) -> dict | None:
@@ -179,14 +180,19 @@ def featurize_query(snap: dict, index_products: dict) -> list[dict] | None:
         subset.append((tgt_rank, head[tgt_rank - 1]))
 
     # span coverage over the FULL depth-300 head so span-gap-to-pool-max is the
-    # true pool max, not the subset max (cheap substring tests only).
+    # true pool max, not the subset max. Only a padded-text lookup - no facet
+    # extraction for the rank 151-300 tail we never featurize.
     pool_max_cov = 0.0
     for asin, _sc in head:
-        rec = _prod(asin, index_products)
-        if rec is not None:
-            c = _coverage(rec["padded"], spans)
-            if c > pool_max_cov:
-                pool_max_cov = c
+        pad = _PADDED_CACHE.get(asin)
+        if pad is None:
+            p = index_products.get(asin)
+            if p is None:
+                continue
+            pad = _PADDED_CACHE[asin] = f" {p.get('text') or ''} "
+        c = _coverage(pad, spans)
+        if c > pool_max_cov:
+            pool_max_cov = c
 
     rows: list[dict] = []
     for rank, (asin, sc) in subset:
