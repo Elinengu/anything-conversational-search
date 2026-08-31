@@ -11,6 +11,33 @@ negative overall, on a small sample.**
 
 ---
 
+## Status at a glance
+
+### ✅ Done
+
+| | status |
+|---|---|
+| Model fetch working (GCS fallback, `huggingface.co` is blocked here) | done — commit `b6ff10c` |
+| Embedding artifact built — all 50,000 catalog products encoded | done — checksummed, verified `available=True` |
+| Per-turn latency measured directly (not estimated) | done — ~9 ms/turn, not a concern |
+| **One** embedding-signal measurement (21-session generic-tail subset, S6 rerank term only) | done — **net −0.016, does not replicate the historical +0.021** |
+
+### ⬜ Not done
+
+| | status |
+|---|---|
+| Full 200-session version of the same comparison | **not run** |
+| Step 3.2 — state-gated conditional `dense_weight` | **not designed, not coded** |
+| Step 3.3 — cleaner query text (`dense_query="slots"`) | **not run** |
+| Step 3.4 — S5 dense *retrieval* route (`use_dense`, recall not ranking) | **not run** |
+| Cross-encoder (Part 4 of the plan) | **blocked — no reachable model source found**, not attempted |
+
+**In short: the plumbing works end to end; the actual question — does the embedding
+help — has one small, inconclusive, net-negative data point and four unrun next steps.**
+Nothing below Section 2 has been decided; it's all still open.
+
+---
+
 ## 1. What is *not* embedding work (context, not the ask)
 
 Most of this branch's history is unrelated groundwork that had to happen first:
