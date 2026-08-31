@@ -27,8 +27,9 @@ public labels and API contract were **not** touched.
 | + pool-aware clarification wording | KW | 0.9305 | 0.8020 | change 13; **score-neutral by construction** — `ask_attribute` unchanged, simulator never reads `message`. Realism for Pillar II / Presentation |
 | + track-aware turn-2 gating | xiaotong0329 | **0.9313** | **0.8028** | change 14; PR #7 — one config knob (`buying_confidence_margin`); the accompanying `src/context_programming.py` module is built but not wired into any decision — verified by ablation |
 | + live structured state and orchestration | Elinengu | **0.9344** | — | change 15; active/superseded slots, rolling pool signals, plan-driven questions/gating/retrieval, intent transitions and observable snapshots |
-| *(subsequent, unrelated branch work — dense retrieval/rerank gating, browsing-policy retune — moves the measured baseline to public 0.923487 / holdout 0.9149; see `docs/team/branch_state_encoder_eval_changes.md` line 138. Change 16 below measures against that baseline, not 0.9344.)* | | | | |
-| + opt-in LLM semantic rerank (DeepSeek), gated | Elinengu | 0.9235 → **0.9252** | not measured | change 16; **off by default** (`llm_weight=0.0`) — see below for the full split table |
+| + browsing-track clarification policy | Elinengu | 0.9235 | — | branch `state-encoder-eval`; restores a targeted question policy for browsing sessions after the `stress_harness`/`dense_rerank` merge dropped it. Costs −0.0109 cooperative, buys `heavy+browse-gated` 0.703 → 0.761. Full detail in `branch_state_encoder_eval_changes.md` §1 |
+| + three bugs ported from a sibling branch | Elinengu | 0.9235 | — | change 16; **score-neutral on every cooperative split by construction** — all three only fire on free-form customer wording. Worth +0.0098 on `heavy+browse-gated`, and collapses the branch's own embedding result from +0.0257 to +0.0042 |
+| + opt-in LLM semantic rerank (DeepSeek), gated | Elinengu | 0.9235 → **0.9252** | not measured | change 17; **off by default** (`llm_weight=0.0`) — re-measured on the fixed codebase above (change 16's three bug fixes were not yet in place for this row's original stress-harness numbers; see the change 17 section below for the corrected comparison) |
 
 Net: **public 0.859 -> 0.9313, adversarial 0.684 -> 0.8028.** 77/77 tests pass.
 The fourteen core-agent changes are detailed below; supporting tooling and docs follow.
@@ -1364,7 +1365,107 @@ The score is not the only purpose of this work—the main result is that state c
 now be inspected and the plan changes real behavior—but the measurements show
 that wiring it in did not buy the architecture by sacrificing retrieval quality.
 
-## Change 16 — Opt-in LLM semantic reranking, gated on pool ambiguity (Elinengu)
+---
+
+## Change 16 — Three bugs ported from `integration/gemini-stress-harness` (Elinengu)
+
+**Files:** `src/text.py`, `src/state.py`, `tools/observe.py`, `tools/stress_observe/runner.py`
+— commits `e484cbe`, `b6a334f`, `0462f4d` (branch `state-encoder-eval`)
+
+### Problem
+
+`state-encoder-eval` and `integration/gemini-stress-harness` both branch from `9921650` and
+both independently merged `stress_harness`, so both carry the same tooling. Neither is an
+ancestor of the other. The gemini branch subsequently found four bugs; **three were in code
+this branch also had, and all three were still present here** — confirmed by executing them,
+not by reading code. (`dynamic-state-slot` has no unique commits at all — it is a strict
+ancestor of this branch, so there was nothing to port from it.)
+
+**A. Carrier framing glued onto the disclosed value** (`src/text.py`). `constraint_spans()`
+kept every ≥2-word punctuation-split chunk with no stopword stripping — correct for the
+evaluator's template, where a colon isolates the framing, wrong for free-form wording:
+
+```
+"One more thing - a breathable net weave."   ->  ['one more thing', 'a breathable net weave']
+"I'd also want it to be synthetic sole."     ->  ['i d also want it to be synthetic sole']
+```
+
+The clean value was destroyed, not merely accompanied by noise. `query_spans()` feeds the
+reranker's span-coverage term, and a glued fragment almost never appears literally in a
+product's text, so this was diluting the primary ranking signal.
+
+**B. A refusal recorded as a disclosure** (`src/state.py`). A browse-gated customer's stall
+("I'm still just browsing - ask me about one particular thing") split into two invented
+`feature` slots *and* counted as a productive turn, resetting `unproductive_streak`. That
+streak is the only input to `DialogPhase.STAGNATING`, so a session stuck in exactly the loop
+stagnation recovery exists for could never trigger it.
+
+**C. Trace probes rejecting the agent's kwargs** (`tools/observe.py`,
+`tools/stress_observe/runner.py`). Both probe copies had signatures predating this branch's
+`track=`/`embed=`/`qvec=`, so every call raised `TypeError` inside `Agent.respond()`'s
+catch-all and the turn returned an empty envelope. On 5 `paraphrase:heavy+browse-gated`
+sessions: `hit 0.000 / score 0.000000` → `hit 1.000 / score 0.858500`. Worse than a zero
+score — the empty envelope made the diagnostic report all 5 as `never_retrieved`, "a recall
+problem (S1/S5)", which is the exact signal used to reason about where a dense route helps.
+**Any `never_retrieved` figure from these two tools on this branch before `e484cbe` is an
+artifact.** `tools/stress_harness.py` does not install these probes, so aggregate scores are
+unaffected.
+
+Gemini's fourth fix (`2224245`, LLM rerank temperature and a reroute discarding `llm_scores`)
+is **n/a** here: there is no `src/llm.py` on this branch, and its reroute already threads
+`embed=`/`qvec=` through both calls — verified, not assumed. (It is no longer n/a as of
+change 17 below, which adds `src/llm.py` to this branch on its own, independent design.)
+
+### What changed
+
+A strips a stopword run off *both* ends of each chunk, generalising the leading-only strip
+`pair_spans()` already used, plus 27 carrier words added to `STOPWORDS` (checked against
+`BOILERPLATE` first — `tests/test_stoplist.py`'s disjointness invariant is what caught a bad
+addition in gemini's own attempt). B adds a `STALL_CUES` pattern feeding a new
+`excluded = declined or stalled`, gated to `turn > 1` because the evaluator opens *every*
+browsing session with "I'm still exploring." — ungated it would discard the most informative
+message of every browsing session. `dead_attributes` still keys off `declined` alone: a stall
+is not "no preference for X". C makes both probes take and forward `**kwargs`.
+
+`src/state.py` and `src/text.py` are now code-identical to gemini's.
+
+### Effect
+
+All three are **score-neutral on every cooperative split, by construction** — they only fire
+on wording the official simulator never produces:
+
+| | before | after |
+|---|---|---|
+| Public set (200) | 0.923487 | **0.923487** (bit-identical) |
+| Hit@10 / MRR / efficiency | 1.000 / 0.880956 / 0.796 | unchanged |
+| holdout (80) | 0.9149 | **0.9149** |
+| harness `--verify` delta | — | `9.52e-08` |
+| tests | 127 | **134** |
+
+Under the stressed customer they are worth a real gain, and they materially change the
+branch's own embedding conclusion. `paraphrase:heavy+browse-gated`, 200 sessions:
+
+| | baseline `router_on` | `dense_route_nobrowse` | dense gain |
+|---|---|---|---|
+| before these fixes | 0.76086 | 0.78652 | **+0.0257** |
+| after these fixes | **0.77065** (+0.0098) | 0.77480 | **+0.0042** |
+
+The fixes buy **+0.0098** deterministically, with no model. The dense retrieval route's
+headline gain — the one result on that branch that had cleared the noise floor — **collapses
+to 16% of its former size**, because it was in large part compensating for bug A: once
+`constraint_spans()` returns clean values, the lexical span signal recovers and the embedding
+has much less left to add. Official (−0.0002) and holdout (+0.0031) are unchanged by the
+fixes and were always inside the ~0.02 noise floor, so after this the dense route no longer
+clears noise on **any** of the three checks. Recorded in full, including the downgrade, in
+`docs/team/branch_state_encoder_eval_changes.md` §3f–§3g.
+
+What did *not* move: the public set, the holdout split, and browsing `never_retrieved` under
+stress (10/80 for both configs — the dense route still recovers none of them, as originally
+found).
+
+---
+
+## Change 17 — Opt-in LLM semantic reranking, gated on pool ambiguity (Elinengu)
 
 **Files:** `src/llm.py` (new), `src/rerank.py`, `starter/agent.py`,
 `tools/sweep.py`, `tools/observe.py`, `tests/test_llm.py` (new),
@@ -1484,3 +1585,11 @@ and `tools/observe.py` for anyone who wants to re-run it with
 rerank=RerankConfig(llm_weight=1.0))` for a network-enabled demo — exactly
 the "opt-in layer with a deterministic fallback" `ideas_to_integrate_llm.md`
 called for.
+
+**Update — re-measured against change 16's fixed baseline.** The stress-harness numbers
+above were measured *before* change 16's three bug fixes (`e484cbe`, `b6a334f`, `0462f4d`)
+landed on this branch, against the old `router_on` baseline of `0.76086`. Change 16 itself
+shows that baseline moves to `0.77065` on the fixed codebase, and that the branch's dense
+embedding route's stress gain collapsed to 16% of its former size for the same reason — both
+were compensating for the same lexical bug (glued carrier framing polluting
+`query_spans()`). The corrected re-measurement is below.

@@ -46,6 +46,44 @@ class SlotLedgerTests(unittest.TestCase):
         self.assertEqual(state.active_slot_values(), {})
         self.assertIn("color", state.dead_attributes)
 
+    def test_browse_gated_stall_discloses_nothing_and_is_not_a_decline(self) -> None:
+        """The browse-gated customer's stall must not become a product constraint.
+
+        tools/stress_harness.py's browse-gated customer answers a broad question
+        with free-form text rather than the official simulator's template.
+        constraint_spans() chunks it on " - " into two fragments, so without the
+        STALL_CUES guard both were recorded as "feature" slots and the turn
+        counted as productive - resetting the unproductive streak that is the
+        sole input to DialogPhase.STAGNATING.
+        """
+        state = DialogState("s")
+        state.observe(1, "I am looking for socks")
+        state.record_ask("color")
+        state.observe(
+            2,
+            "I'm still just browsing - ask me about one particular thing "
+            "and I'll tell you.",
+        )
+        self.assertEqual(state.active_slot_values(), {})
+        self.assertTrue(state.utterances[-1].declined)
+        self.assertFalse(state.last_turn_productive)
+        self.assertEqual(state.unproductive_streak, 1)
+        # A stall is not "no preference for color" - the attribute stays live.
+        self.assertNotIn("color", state.dead_attributes)
+
+    def test_browsing_opening_is_never_treated_as_a_stall(self) -> None:
+        """turn 1 is exempt from STALL_CUES, and that exemption is load-bearing.
+
+        evaluator/local_evaluator.py opens every browsing session with
+        "I'm looking for {category}, but I'm still exploring." - which matches
+        STALL_CUES. Gating on turn > 1 keeps the single most important
+        utterance for retrieval in the query view for every browsing session.
+        """
+        state = DialogState("s")
+        state.observe(1, "I'm looking for socks, but I'm still exploring.")
+        self.assertFalse(state.utterances[0].declined)
+        self.assertIn("socks", state.full_text())
+
 
 class ProgressSignalTests(unittest.TestCase):
     def test_recent_failure_streak_resets_after_new_information(self) -> None:

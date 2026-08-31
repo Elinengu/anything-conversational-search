@@ -345,6 +345,21 @@ python3 tools/sweep.py --split holdout
 python3 tools/sweep.py --split all --configs floor,rerank,infogain
 ```
 
+**A probe must accept whatever the agent passes it.** `tools/observe.py` and
+`tools/stress_observe/` trace a session by temporarily replacing `retrieve()` and `rerank()`
+with wrappers that record timings and candidate pools. Those wrappers had fixed signatures
+written before the agent grew extra keyword arguments, so every call raised `TypeError` — which
+the agent's own catch-all handler swallowed, returning an empty answer for the turn. The traced
+session then scored `0.000` while looking like a legitimate result. Worse, the empty answer made
+the diagnostic report the target as `never_retrieved` — "never entered the candidate pool, a
+recall problem" — which is a conclusion about the *retrieval stage*, drawn entirely from a
+broken tracing tool. Both wrappers now accept and forward arbitrary keyword arguments, so they
+cannot drift out of step with the agent again. Aggregate scores from `tools/stress_harness.py`
+were never affected: it does not install these wrappers.
+
+The general lesson is the one this stage exists to enforce — **a measurement tool that fails
+silently is worse than no tool**, because it produces numbers that look real.
+
 #### Measured effect
 
 No direct score. Every measurement in this document exists because of it.
@@ -633,6 +648,36 @@ comparing the code to the brief will otherwise think it is a bug.
 - **`productive_turns`** — whether an answer actually disclosed something new. This is how the
   policy tells the difference between "the customer is still telling me things" and "I have
   exhausted this line of questioning".
+
+**Reading a message that was not written to a template.** Both signals above are computed from
+`constraint_spans()` (`src/text.py`), which splits a customer message on punctuation and keeps
+each resulting fragment as a stated constraint. That is exactly right for the evaluator's own
+wording, where a colon always separates the framing from the value — "For that, what matters
+is: Stainless Steel Band." splits cleanly into the value alone. It is wrong for any customer
+who phrases things freely, and two such cases were found and fixed:
+
+- **Carrier framing was being glued onto the value.** "I'd also want it to be synthetic sole."
+  has no separator between the framing and the value, so the whole sentence was recorded as one
+  constraint — `i d also want it to be synthetic sole` — and the real value, `synthetic sole`,
+  was lost. "One more thing - a breathable net weave." recorded a bogus `one more thing`
+  alongside the real value. The fix strips a run of stopwords off *both ends* of each fragment,
+  generalising the leading-only strip `pair_spans()` in the same file already did. This matters
+  well beyond this stage: `query_spans()` feeds S6's span-coverage signal, and a glued fragment
+  almost never appears literally in a product's text, so the pollution was quietly weakening the
+  main ranking signal rather than merely making the ledger untidy.
+- **A refusal was being recorded as a disclosure.** A customer who is only browsing may answer a
+  broad question with a stall — "I'm still just browsing, ask me about one particular thing" —
+  which split into two invented constraints *and* counted as a productive turn, resetting the
+  unproductive streak. Since that streak is the only input to stagnation detection, a
+  conversation stuck in exactly the loop stagnation recovery exists for could never trigger it.
+  A `STALL_CUES` pattern now treats a stall like a decline for recording purposes, but **not**
+  for `dead_attributes` — a stall is not "no preference for X", so the attribute stays live.
+  The check is deliberately skipped on turn 1, because the evaluator opens every browsing
+  session with "I'm looking for {category}, but I'm still exploring." — matching the pattern.
+  Applying it there would discard the single most informative message of every browsing session.
+
+Both were found by auditing this branch against a sibling branch that had already fixed them,
+and both were confirmed present here by running them, not by reading the code.
 
 #### Measured effect
 

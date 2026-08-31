@@ -83,16 +83,19 @@ under that harder customer without hurting the easy one.
 
 ---
 
-**Headline: the S5 dense retrieval route, gated to withhold on the browsing track
-(`dense_route_nobrowse`), resolves its own trade-off and then some - official −0.0002
-(noise-zero, down from −0.0042 ungated), holdout +0.0031 (actually above baseline, not
-just recovered), and 98% of the gain preserved under the realistic worst case this branch
-exists to defend against (+0.0257 of +0.0263, `heavy+browse-gated`). All three
-independent checks agree. This is the strongest, most complete result of the
-investigation: a documented, flag-gated option
-(`RetrievalConfig(use_dense=True, dense_gate_exclude_browsing=True)`), not shipped as a
-new default. All four S6-rerank variants (ungated, two gated, a cleaner query-text
-version) measured net-zero or worse at full scale. The cross-encoder is still blocked.**
+**Headline (revised after §3f/§3g - the earlier version of this line is superseded):
+the embedding line closes. The S5 dense retrieval route gated to the buying track
+(`dense_route_nobrowse`) was this investigation's one result that cleared the noise floor,
+at +0.0257 on `heavy+browse-gated`. Three bugs ported in from a sibling branch (§3f) then
+showed that gain was largely compensating for a broken lexical signal: with
+`constraint_spans()` fixed, the same comparison re-run at 200 sessions gives
+**+0.0042** - 16% of what it was - while the deterministic baseline it is measured against
+rose +0.0098 for free. Official (−0.0002) and holdout (+0.0031) are unchanged by the fixes
+and were always inside the ~0.02 noise floor. **No embedding configuration now clears
+noise on any of the three checks**, and all four S6-rerank variants were already
+net-zero-or-worse at full scale. The recommendation in §3e is withdrawn (§3g). The
+cross-encoder remains blocked. The durable win from this work is the three bug fixes and
+the tooling repair, not the model.**
 
 ---
 
@@ -110,7 +113,7 @@ each stage.
 | S6 rerank | same `dense_weight` term | **state-gated** — withheld on `intent_track=="browsing"` | ✅ measured, 21 sessions — small overall gain, but structurally limited: browsing only lasts 2-3 turns before promoting to buying, so the gate has almost no turns left to act on (§3b, traced directly) |
 | S6 rerank | `dense_query="slots"` — feed it `state.authoritative_text()` instead of the raw conversation | none (unconditional) | ✅ **measured at both 21 and 200 sessions** — 21: **+0.044**; 200: **+0.0023 (noise)**. The small-sample result did not hold (§3c) |
 | **S5 retrieval** — searches the full 50,000-product catalog by meaning, builds the candidate pool | `RetrievalConfig.use_dense` — a 5th RRF-fused route alongside the BM25 ones | **none** — fires unconditionally | ✅ measured, 200 sessions, three ways (§3d): stressed **+0.0263** (clears noise), official **−0.0042**, holdout **−0.0065**. A confirmed trade-off, not shipped unconditionally |
-| S5 retrieval | same `use_dense` route | **state-gated** — withheld on `intent_track=="browsing"` | ✅ **measured, all three checks** (§3e): official **−0.0002**, holdout **+0.0031**, stressed **+0.0257** (98% of the gain kept). Resolves the trade-off - recommended as a documented flag-gated option |
+| S5 retrieval | same `use_dense` route | **state-gated** — withheld on `intent_track=="browsing"` | ⚠️ **re-measured after the §3f bug fixes (§3g)**: official **−0.0002**, holdout **+0.0031**, stressed **+0.0042** (was +0.0257). Nothing clears the noise floor any more - **recommendation withdrawn** |
 | S5 retrieval | same `use_dense` route | **state-gated** on `state.over_general` | ✅ measured, 200 sessions, both customers (§3e) — **no-op again**, matches ungated almost exactly on both, same pattern as the S6 pool-shape gate |
 | Cross-encoder rerank (S6, different model) | scores `(query, candidate)` pairs jointly | top-20 only, fired on state ambiguity signals (Plan Part 4) | ⬜ **blocked** — no reachable model source found, not attempted |
 
@@ -379,6 +382,11 @@ and is measured.
 
 ## 3e. Gating the S5 route - `dense_route_nobrowse` resolves the trade-off
 
+> **Superseded by §3g.** The numbers below are correct as measured, but the baseline they
+> were measured against carried the two bugs fixed in §3f. Re-run on the fixed codebase,
+> the stressed gain falls from +0.0257 to +0.0042 and the recommendation at the end of this
+> section is withdrawn. The mechanism discussion still holds; the conclusion does not.
+
 `RetrievalConfig` gains `dense_gate_over_general` / `dense_gate_exclude_browsing`,
 identically named and worded to `RerankConfig`'s (§3b), and `retrieve()` reuses
 `src.rerank._dense_gate_open` directly rather than duplicating the logic - no circular
@@ -441,6 +449,131 @@ documented, flag-gated option** - `RetrievalConfig(use_dense=True,
 dense_gate_exclude_browsing=True)`. Not shipped as a new default; `use_dense` stays
 `False` by default, unchanged. `dense_route_gate` and the redundant
 `dense_route_gate_nobrowse` combination are not worth carrying forward as separate rows.
+
+---
+
+## 3f. Cross-branch audit vs `integration/gemini-stress-harness` - three bugs ported in
+
+This branch and `integration/gemini-stress-harness` both branch from the same commit
+(`9921650`, the `dynamic-state-slot` tip) and both independently merged `stress_harness`,
+so both carry `tools/stress_harness.py` and `tools/stress_observe/`. Neither is an
+ancestor of the other: 23 commits here, 16 there. `dynamic-state-slot` itself has **no**
+unique commits - it is a strict ancestor of this branch, so there is nothing to port from
+it.
+
+The gemini branch went on to find four bugs. **Three were in code this branch also has,
+and all three were still present here** - confirmed by running them, not by reading code.
+Two of them corrupt exactly the paraphrase and browse-gated paths §3d/§3e were measured
+on, which is why they are recorded here and not just in `agent_changes.md`.
+
+| bug | file | gemini fix | status here |
+|---|---|---|---|
+| A. carrier framing glued onto real disclosures | `src/text.py` | `5b7c76f` | **was present** → ported (`0462f4d`) |
+| B. browse-gated stall text pollutes the slot ledger and fakes a productive turn | `src/state.py` | `df080db` | **was present** → ported (`b6a334f`) |
+| C. observe probes reject the kwargs the agent passes | `tools/stress_observe/runner.py`, `tools/observe.py` | `ec470db` | **was present, in both files** → ported (`e484cbe`) |
+| D. LLM rerank temperature + reroute discards `llm_scores` | `src/llm.py`, `starter/agent.py` | `2224245` | **n/a** - no `src/llm.py` here, and this branch's reroute already threads `embed=`/`qvec=` through both calls |
+
+**Bug A** was the significant one for ranking. `constraint_spans()` kept every ≥2-word
+punctuation-split chunk with no stopword stripping - correct for the official evaluator's
+templated wording, where a colon isolates the carrier, but wrong for the harness's
+paraphrased carriers, which have no separator:
+
+```
+"One more thing - a breathable net weave."   was ['one more thing', 'a breathable net weave']
+"I'd also want it to be synthetic sole."     was ['i d also want it to be synthetic sole']
+```
+
+The clean value was being destroyed, not merely accompanied by noise. `query_spans()`
+feeds the reranker's span-coverage term - the primary deterministic ranking signal - and
+a glued blob is far less likely to appear literally in a product's text than the clean
+value, so this was diluting ranking under exactly the paraphrase stress this branch
+exists to measure.
+
+**Bug C** was the most misleading. Both probe copies had signatures predating this
+branch's `track=`/`embed=`/`qvec=` kwargs, so every call raised `TypeError` inside
+`Agent.respond()`'s catch-all and the turn returned an empty envelope. Measured on 5
+`paraphrase:heavy+browse-gated` sessions, before → after the fix:
+
+```
+hit 0.000 / MRR 0.0000 / score 0.000000  ->  hit 1.000 / MRR 0.6750 / score 0.858500
+```
+
+Worse than a zero score: the empty envelope made the diagnostic classify all 5 as
+`never_retrieved` - "target never entered the retrieval pool, a recall problem (S1/S5)".
+That is the exact signal used to reason about where a dense route could help, so **any
+`never_retrieved` figure taken from `tools/stress_observe` or `tools/observe.py` on this
+branch before `e484cbe` is an artifact, not a measurement.** Aggregate numbers from
+`tools/stress_harness.py` are unaffected - it does not install these probes, which is why
+§3d/§3e's headline scores stand independently of this bug.
+
+All three fixes are score-neutral on the official set: **0.923487 bit-identical**
+(hit@10 1.000, MRR 0.880956, efficiency 0.796) after each, and harness `--verify` delta
+`9.52e-08`. Tests went 127 → 134.
+
+### Other differences (design divergence, not bugs)
+
+| | `state-encoder-eval` | `integration/gemini-stress-harness` |
+|---|---|---|
+| official score | 0.923487 | 0.921497 |
+| unique work | bi-encoder embeddings (`src/embed.py`, S5 route + S6 term) | DeepSeek LLM listwise rerank (`src/llm.py`, `src/router.py`) |
+| dense/embedding code | yes | **none** |
+| browsing-policy mechanism | live per-turn `state.intent_track` (§1) | kept `dual_tracking`'s `route_policies`, fixed at session open |
+| `src/phrasing.py`, `policy.py`, `context_programming.py`, `router.py` | unchanged from base | all four changed |
+
+The two branches solved the browsing-policy problem differently - live per-turn here,
+fixed-at-opening there. Neither is ported; they are alternative designs, not a fix and a
+bug.
+
+---
+
+## 3g. Re-measurement after the §3f fixes - the S5 result does not survive
+
+Two of the three bugs in §3f corrupt exactly the paraphrase and browse-gated paths §3d/§3e
+were measured on, so the headline comparison was re-run on the fixed codebase. Same
+configs, same 200-session scale, same three checks:
+
+| check | baseline `router_on` | `dense_route_nobrowse` | gain |
+|---|---|---|---|
+| official (200) — **before** fixes | 0.92349 | 0.92329 | −0.0002 |
+| official (200) — **after** fixes | 0.92349 | 0.92329 | −0.0002 *(unchanged)* |
+| holdout (80) — **before** | 0.9149 | 0.9180 | +0.0031 |
+| holdout (80) — **after** | 0.9149 | 0.9180 | +0.0031 *(unchanged)* |
+| `heavy+browse-gated` (200) — **before** | 0.76086 | 0.78652 | **+0.0257** |
+| `heavy+browse-gated` (200) — **after** | **0.77065** | 0.77480 | **+0.0042** |
+
+Two things happened at once on the stressed customer, and they point the same way:
+
+1. **The baseline rose +0.0098** (0.76086 → 0.77065) with no model involved. That is the
+   §3f fixes paying off directly: `constraint_spans()` now returns `synthetic sole` where
+   it used to return `i d also want it to be synthetic sole`, and `query_spans()` feeds
+   that straight into the reranker's span-coverage term.
+2. **The dense gain fell to 16% of its former size** (+0.0257 → +0.0042). The route was in
+   large part *substituting for the broken lexical signal*. Once the exact-match signal
+   works on paraphrased wording again, there is much less left for the embedding to add.
+
+Official and holdout are bit-identical before and after, which is the expected result and a
+useful control: the fixes only fire on free-form customer wording, which the official
+simulator never produces. It also means the two checks that were already inside the noise
+floor stay there.
+
+**Conclusion: the recommendation in §3e is withdrawn.** `dense_route_nobrowse`'s case rested
+entirely on the stressed +0.0257 being the one number that cleared noise; at +0.0042 it no
+longer does, and neither do official (−0.0002) or holdout (+0.0031). Combined with the four
+S6-rerank variants already measured net-zero-or-worse at full scale (§3, §3b, §3c), **no
+embedding configuration tested on this branch now clears the noise floor on any check.** The
+code stays (flag-gated, `use_dense=False` by default, byte-identical off-path) so the result
+is reproducible and the next person does not repeat it — but it should not be turned on.
+
+This is also the clearest vindication of the project's own measurement discipline: the
++0.0257 was a real, correctly-run, full-scale measurement. It was just measured against a
+baseline that was quietly broken, and only a cross-branch audit surfaced that. Per §3f, no
+`never_retrieved` figure from `tools/observe.py` or `tools/stress_observe` predating
+`e484cbe` should be trusted either.
+
+Not re-run after the fixes: the four S6-rerank variants (§3, §3b, §3c). They were
+net-zero-or-worse beforehand and the fixes raise the baseline they lost to, so re-running
+them could only make their case worse, not better - but the specific post-fix numbers are
+genuinely unmeasured rather than assumed.
 
 ---
 

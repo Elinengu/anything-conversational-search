@@ -62,16 +62,25 @@ def install_stress_probes():
         observe_module._PROBE["route"] = route
         return route
 
-    def retrieve_probe(index, state, config=None):
+    # **kwargs rather than a fixed signature: Agent._respond() passes track=,
+    # embed= and qvec= on every retrieve()/rerank() call (the dual-track routing
+    # and the dense sentence-embedding signal), plus route_hint= on the
+    # orchestrator's retrieval reroute. A probe that cannot accept them raises
+    # TypeError inside Agent.respond()'s catch-all handler, so the turn returns
+    # an empty envelope and every traced session silently scores 0.000 - the
+    # same bug docs/team/agent_changes.md change 15 fixed once in
+    # tools/observe.py, which this sibling tool's separate copy never picked up.
+    def retrieve_probe(index, state, config=None, **kwargs):
         started = time.perf_counter()
-        pool = original["retrieve"](index, state, config)
+        pool = original["retrieve"](index, state, config, **kwargs)
         observe_module._PROBE["retrieve_ms"] = (time.perf_counter() - started) * 1000.0
         observe_module._PROBE["pool"] = pool
+        observe_module._PROBE["retrieval_route"] = kwargs.get("route_hint") or "terms"
         return pool
 
-    def rerank_probe(index, state, candidates, config=None, track=None):
+    def rerank_probe(index, state, candidates, config=None, **kwargs):
         started = time.perf_counter()
-        ranked = original["rerank"](index, state, candidates, config, track=track)
+        ranked = original["rerank"](index, state, candidates, config, **kwargs)
         observe_module._PROBE["rerank_ms"] = (time.perf_counter() - started) * 1000.0
         observe_module._PROBE["ranked"] = ranked
         return ranked
