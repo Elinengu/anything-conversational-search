@@ -29,6 +29,18 @@ STOPWORDS = {
     "key", "requirement", "actually", "ignore", "earlier", "need", "what",
     "quite", "right", "yet", "ask", "about", "one", "specific", "attribute",
     "options", "those", "still", "exploring", "there",
+    # tools/stress_harness.py's paraphrase carrier vocabulary ("One more
+    # thing - X.", "X matters to me as well.", "I'd also want it to be X.",
+    # "honestly I just want X.", ...). The official evaluator's fixed
+    # template ("For that, what matters is: X") never needs these - the
+    # colon already isolates its carrier framing - so this addition is a
+    # no-op there. See constraint_spans()'s bidirectional strip and
+    # docs/team/agent_changes.md (the change after "browse-gated stall text
+    # corrupting the active-slot ledger").
+    "d", "also", "important", "should", "more", "thing", "well", "ideally",
+    "s", "honestly", "just", "main", "oh", "if", "possible", "gotta",
+    "leaning", "towards", "something", "great", "m", "after",
+    "really", "gist", "plus", "bit", "kind",
 }
 
 # The remainder of the boilerplate, kept by hand on purpose.
@@ -87,19 +99,29 @@ def constraint_spans(text: str, min_words: int = 2) -> list[str]:
     exact catalog text. These are matched as substrings against product text in
     the reranker rather than as FTS5 phrases: stripping stopwords for an FTS
     phrase query breaks token adjacency and the phrase then matches nothing.
+
+    Fragment separators (colon/comma/etc.) cleanly isolate carrier framing from
+    the value on the official evaluator's fixed template ("For that, what
+    matters is: X"), but tools/stress_harness.py's paraphrased carrier
+    sentences ("One more thing - X.", "X matters to me as well.") have no such
+    separator between the framing and the value. Stripping a stopword run off
+    *both* ends of each chunk (mirroring pair_spans' leading-only strip) drops
+    the carrier and keeps the value; a chunk that is nothing but filler strips
+    down to empty and is dropped by the blank-span check below.
     """
     out: list[str] = []
     seen: set[str] = set()
     # Fragment separators mirror how constraints are joined in a single message.
     for chunk in re.split(r"[.;:,\n]| - ", text):
-        span = " ".join(TOKEN_RE.findall(chunk)).lower().strip()
+        tokens = [token.lower() for token in TOKEN_RE.findall(chunk)]
+        while tokens and tokens[0] in STOPWORDS:
+            tokens.pop(0)
+        while tokens and tokens[-1] in STOPWORDS:
+            tokens.pop()
+        span = " ".join(tokens)
         if not span or span in seen:
             continue
-        words = span.split()
-        if len(words) < min_words or len(words) > 25:
-            continue
-        # A fragment made only of filler carries no signal.
-        if all(word in STOPWORDS for word in words):
+        if len(tokens) < min_words or len(tokens) > 25:
             continue
         seen.add(span)
         out.append(span)

@@ -34,6 +34,7 @@ public labels and API contract were **not** touched.
 | + rewire the trigger-gate onto `DialogState.leader_margin` (merge `dynamic-state-slot`) | Elinengu | 0.921497 | — | change 19; same gating *idea* as change 18, now reading the live pool-uncertainty signal `dynamic-state-slot` computes once per turn (`observe_pool`, post-orchestration-reroute) instead of a bespoke second rerank call. **Real gain under stress**: dev −0.0035 (0.9275→0.9240), holdout −0.0070 (0.9125→0.9055) — both inside the team's own "<0.02 is noise" band — vs. **+0.0471 score / hit@10 0.917→0.950 / MRR 0.6342→0.7157** on `paraphrase:heavy+browse-gated`, the practical/realistic stressor. `llm_weight` stays `0.0` (off) per the house rule (must not regress the public score); this is the measured case *for* turning it on as an opt-in Innovation/Presentation/Impact layer, not a default-on change. **These numbers are superseded by change 20** — see below |
 | + fix: browse-gated stall text corrupting the active-slot ledger | Elinengu | 0.921497 | — | change 20; found by inspecting change 19's own viewer.html transcripts. `dynamic-state-slot`'s `_record_slots` recorded *every* punctuation-split chunk of *every* customer message as a "feature" slot, unconditionally — including the stress harness's stall sentence ("I'm still just browsing - ask me about one particular thing and I'll tell you"), which also falsely marked those turns "productive," silently disabling the stagnation-detection/recovery machinery `dynamic-state-slot` was built around. Public/dev/holdout **unaffected** (0.921497, unchanged — the official cooperative customer never sends this wording). Re-measuring change 19's own comparison on the same stress condition: **llm_off 0.78794→0.78485, llm_rerank 0.83506→0.81025 — still a real gain (+0.0254), for the intended reason this time** rather than partly riding a broken signal. See its section for a concrete before/after session |
 | + fix: LLM rerank temperature (0.2→0.0) and a reroute that discarded llm_scores | Elinengu | 0.921497 | — | change 21; found chasing a user report that a session's `viewer.html` rank didn't match a fresh re-run. `DeepSeekClient` never read `LLMConfig.temperature` (dead field, hardcoded 0.2) — confirmed live, the same rerank prompt returned a different order minutes apart. `AdaptiveOrchestrator`'s stagnation reroute reran `rerank()` without `llm_scores=`, discarding a real, already-paid-for DeepSeek ranking whenever it fired the same turn as the trigger-gate. Both on the `llm_weight>0` path only — public/dev/holdout unaffected (0.921497). Every LLM-rerank `viewer.html` captured before this fix is a single non-deterministic sample, not a reproducible one |
+| + fix: carrier-phrase framing glued onto real disclosures | Elinengu | 0.9275 (dev) | — | change 22; `constraint_spans()` couldn't separate carrier framing from the value once there's no colon to lean on — `"One more thing - a breathable net weave."` recorded both `"one more thing"` (bogus) and the real value as separate `active_slots["feature"]` entries, and `"I'd also want it to be synthetic sole."` recorded one glued blob instead of the clean value. Planned via `/plan` before implementing. Public/dev **bit-for-bit unchanged** (0.9275) — the fix is a true no-op on the official template. **First fix in this chain to move the deterministic score**: `paraphrase:heavy+browse-gated` baseline 0.78485→**0.80676** (+0.0219), gated LLM rerank 0.81025→**0.82060** (+0.0104) — direct confirmation the polluted spans were diluting the primary span-coverage signal, not just the observable ledger. 130/130 tests pass |
 
 Net: **public 0.859 -> 0.9313, adversarial 0.684 -> 0.8028.** 77/77 tests pass.
 Change 15 is branch `dual_tracking` work (89/89 tests) and does not move the `main` number.
@@ -1720,6 +1721,84 @@ before/after session shown in a `viewer.html` snapshot up to this point
 should be treated as illustrative of the pattern, not as a byte-reproducible
 example - regenerating it may now show a different (and more stable) number
 at `temperature=0.0` than the ones captured in change 19/20's write-ups.
+
+## Change 22 — Fix: carrier-phrase framing glued onto real disclosures (Elinengu)
+
+**Files:** `src/text.py` (`STOPWORDS`, `constraint_spans`), `tests/test_components.py`,
+`tests/test_stress_harness.py` (new `ConstraintSpanCarrierTests`) — planned via
+`/plan` before implementation (see the approved plan for the full pros/cons
+table); found while investigating change 20's own fix (same session, same
+user question about `active_slots` pollution).
+
+### Problem
+
+Change 20 fixed the case where the customer's whole message was non-disclosure
+filler (the browse-gated stall sentence). This is the harder sibling case: the
+message **does** contain a real disclosure, but `constraint_spans()`
+(`src/text.py`) has no way to separate carrier framing from the value once
+there's no colon to lean on. The official evaluator's template ("For that,
+what matters is: X") always has one; `tools/stress_harness.py`'s paraphrased
+carrier sentences ("One more thing - X.", "X matters to me as well.", "I'd
+also want it to be X.") mostly don't. Result: `"One more thing - a breathable
+net weave."` recorded **two** `active_slots["feature"]` entries — the bogus
+`"one more thing"` alongside the real `"breathable net weave"` — and `"I'd
+also want it to be synthetic sole."` recorded one blob,
+`"i d also want it to be synthetic sole"`, instead of the clean value.
+
+Same three consumers as change 20 (`_record_slots`, `observe`'s "was this turn
+productive" check, and - new to this one - `query_spans()`, the actual
+span-coverage signal the deterministic reranker uses). A polluted span like
+the glued blob above is far less likely to literally appear as a substring in
+a real product's listing than the clean `"synthetic sole"` would be, so this
+bug was quietly weakening the primary ranking signal under paraphrase stress,
+not just the observable ledger.
+
+### What changed
+
+`pair_spans()` (the sibling function) already strips a **leading** run of
+stopword tokens per chunk. `constraint_spans()` had no stripping at all - a
+chunk survived unless *every* word in it was a stopword, so `"one more
+thing"` sailed through untouched (`thing` wasn't a stopword). Fix: strip
+stopwords from **both ends** of each chunk (not just check "all-stopwords"),
+and extend `STOPWORDS` with the harness's carrier vocabulary (`d, also,
+important, should, more, thing, well, ideally, s, honestly, just, main, oh,
+if, possible, gotta, leaning, towards, something, great, m, after, really,
+gist, plus, bit, kind` - verified word-by-word against every `_LEADINS` /
+`_LEADINS_HEAVY` / fused-joiner template `tools/stress_harness.py` can
+produce). `min_words=2` is unchanged - a message like `"imported matters to
+me as well."` correctly strips to the single token `imported` and is dropped,
+same as a single-word official-template constraint already is today; this is
+a pre-existing floor, not new behaviour.
+
+One planned STOPWORDS addition (`care`, for `"What I care about: {}."`)
+turned out unnecessary and was dropped after `tests/test_stoplist.py`'s
+disjointness invariant caught it colliding with the existing `BOILERPLATE`
+set - the colon in that template already isolates `"What I care about"` into
+its own chunk, which strips to the single token `care` and is dropped by
+`min_words=2` regardless, so no STOPWORDS entry was needed for it at all.
+
+Two alternatives considered and rejected: a whitelist-of-content-words model
+(no infrastructure in this repo separates "real attribute" from "filler"
+other than hand curation - disproportionate for this bug); and fixing
+`tools/stress_harness.py`'s templates to always colon-separate instead
+(**rejected as an anti-pattern** - the harness exists to simulate realistic,
+non-templated paraphrase, and making its output easier to parse would hide
+the fragility this bug is about rather than close it).
+
+### Effect
+
+| | before | after |
+|---|---|---|
+| Public/dev (`tools/sweep.py --split dev --configs router_on`) | 0.9275 | **0.9275 (bit-for-bit identical)** - confirms the fix is a true no-op on the official template |
+| `paraphrase:heavy+browse-gated`, `llm_off` (the deterministic baseline) | 0.78485 | **0.80676 (+0.0219)** |
+| `paraphrase:heavy+browse-gated`, `llm_rerank` (change 19/21's gated LLM) | 0.81025 | **0.82060 (+0.0104)** |
+
+This is the first fix in the change-19/20/21/22 chain that moves the
+**deterministic** score, not only the LLM-rerank path - direct confirmation
+that the polluted spans were diluting the primary span-coverage signal, not
+just cluttering the observable ledger. 130/130 tests pass, including a new
+data-driven `ConstraintSpanCarrierTests` class asserting every carrier
+template the harness can produce isolates its value correctly.
 
 ## Not touched (organizer-owned)
 

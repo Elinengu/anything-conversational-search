@@ -8,11 +8,14 @@ from __future__ import annotations
 import random
 import unittest
 
+from src.text import constraint_spans
 from tools.stress_harness import (
     StressCustomer,
     parse_spec,
     paraphrase_disclosure,
     _synonym_sub,
+    _LEADINS,
+    _LEADINS_HEAVY,
 )
 
 CARD = {
@@ -129,6 +132,62 @@ class DecoyTests(unittest.TestCase):
         # No index_products -> nothing to derive a decoy from; must not crash.
         c = _customer("intent_override", decoy=True)
         self.assertIsInstance(c, StressCustomer)
+
+
+class ConstraintSpanCarrierTests(unittest.TestCase):
+    """constraint_spans() must isolate the value from every paraphrased carrier
+    sentence this harness can produce - not just the official template's
+    colon-delimited wording. See docs/team/agent_changes.md (the change
+    fixing "one more thing" / "i d also want it to be X" active-slot
+    pollution)."""
+
+    #: A fixed 2-word value satisfies constraint_spans' min_words=2 default.
+    VALUE = "synthetic sole"
+
+    def test_every_carrier_template_isolates_the_value(self) -> None:
+        for template in _LEADINS_HEAVY:
+            with self.subTest(template=template):
+                spans = constraint_spans(template.format(self.VALUE))
+                self.assertIn(self.VALUE, spans, f"value lost for template: {template!r}")
+                self.assertEqual(len(spans), 1, f"carrier leaked into a span for: {template!r}")
+
+    def test_heavy_fused_joiners_isolate_each_value(self) -> None:
+        joiners = [", and ", ", plus ", " - also ", ", and honestly "]
+        wrappers = [
+            "I'm after something {}.", "Ideally {}.", "What I care about: {}.",
+            "Looking for {} really.", "So, {} - that's the gist.",
+        ]
+        for joiner in joiners:
+            body = joiner.join(["synthetic sole", "breathable mesh"])
+            for wrapper in wrappers:
+                text = wrapper.format(body)
+                spans = constraint_spans(text)
+                with self.subTest(joiner=joiner, wrapper=wrapper):
+                    self.assertIn("synthetic sole", spans)
+                    self.assertIn("breathable mesh", spans)
+
+    def test_bug_report_examples(self) -> None:
+        self.assertEqual(
+            constraint_spans("One more thing - a breathable net weave."),
+            ["breathable net weave"],
+        )
+        # "imported" alone strips to a 1-word span, dropped by min_words=2 -
+        # the same fate a single-word official-template constraint already
+        # has today; not a new behaviour introduced by this fix.
+        self.assertEqual(constraint_spans("imported matters to me as well."), [])
+        self.assertEqual(
+            constraint_spans("I'd also want it to be synthetic sole."),
+            ["synthetic sole"],
+        )
+
+    def test_reword_heavy_filler_prefixes_still_isolate_the_value(self) -> None:
+        # _FILLERS in tools/stress_harness.py can prepend "a bit "/"kind of "
+        # directly onto the disclosed value before it ever reaches a leadin
+        # template - a related edge case surfaced while auditing _LEADINS.
+        for prefix in ("a bit ", "kind of ", "something ", "ideally ", "really "):
+            with self.subTest(prefix=prefix):
+                spans = constraint_spans(f"One more thing - {prefix}synthetic sole.")
+                self.assertIn("synthetic sole", spans)
 
 
 if __name__ == "__main__":

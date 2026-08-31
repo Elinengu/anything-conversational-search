@@ -24,6 +24,13 @@ class TextTests(unittest.TestCase):
         # text, or the reranker's substring match silently never fires.
         self.assertIn("100 leather", constraint_spans("what matters is: 100% Leather."))
 
+    def test_constraint_spans_official_template_unchanged(self) -> None:
+        # Anchor: the bidirectional stopword-strip added for paraphrased
+        # carrier sentences must be a no-op here - the colon already isolates
+        # carrier framing from the value on the official template.
+        spans = constraint_spans("For that, what matters is: Day / Date Indicator; Stainless Steel Band.")
+        self.assertEqual(spans, ["day date indicator", "stainless steel band"])
+
     def test_pair_spans_keep_key_value_associations(self) -> None:
         msg = ("For that, what matters is: color: grey; Heather Grey: 90% Cotton, "
                "10% Polyester; All Other Heathers: 50% Cotton, 50% Polyester.")
