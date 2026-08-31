@@ -252,7 +252,7 @@ class AdaptiveOrchestrator:
                 gating_margin=config.confidence_margin,
                 retrieval_route="structured",
                 recommendation_cutoff=(turn < config.first_recommend_turn),
-                recommended_slate_size=10,
+                recommended_slate_size=config.stagnation_slate_size,
                 guidance_action="diversify_and_fallback_probe",
             )
 
