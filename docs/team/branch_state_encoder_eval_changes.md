@@ -13,28 +13,26 @@ negative overall, on a small sample.**
 
 ## Status at a glance
 
-### ✅ Done
+**Infrastructure** (model fetch, the built artifact, per-turn latency) is done and
+verified — detail in §2, not repeated here. This section is about the actual embedding
+*signal*: there are two pipeline stages it can plug into, and two ways it can fire at
+each stage. Only **one cell** below has an actual measurement:
 
-| | status |
-|---|---|
-| Model fetch working (GCS fallback, `huggingface.co` is blocked here) | done — commit `b6ff10c` |
-| Embedding artifact built — all 50,000 catalog products encoded | done — checksummed, verified `available=True` |
-| Per-turn latency measured directly (not estimated) | done — ~9 ms/turn, not a concern |
-| **One** embedding-signal measurement (21-session generic-tail subset, S6 rerank term only) | done — **net −0.016, does not replicate the historical +0.021** |
+| stage | mechanism | gating | status |
+|---|---|---|---|
+| **S6 rerank** — reorders the 300 candidates retrieval already found | `RerankConfig.dense_weight` — a cosine term added to the existing score | **none — fixed weight (`1.0`), fires every turn unconditionally, no state check of any kind** | ✅ **measured once** (21 sessions) — net **−0.016** |
+| S6 rerank | same `dense_weight` term | **state-gated** — fire only when `state.over_general` / high `pool_entropy` / low `leader_margin` say lexical matching has stopped discriminating (Plan Step 3.2; "only when stagnating" is one candidate signal for this, not yet chosen) | ⬜ **not designed, not coded, not run** |
+| S6 rerank | `dense_query="slots"` — feed it `state.authoritative_text()` instead of the raw conversation | none (a query-text variant of the same unconditional term) | ⬜ **not run** (Plan Step 3.3) |
+| **S5 retrieval** — searches the full 50,000-product catalog by meaning, builds the candidate pool | `RetrievalConfig.use_dense` — a 5th RRF-fused route alongside the BM25 ones | none planned yet | ⬜ **not run at all** (Plan Step 3.4) — recall, not ranking; historically recovered 0/10 missing targets pre-state-machine |
+| Cross-encoder rerank (S6, different model) | scores `(query, candidate)` pairs jointly | top-20 only, fired on state ambiguity signals (Plan Part 4) | ⬜ **blocked** — no reachable model source found, not attempted |
 
-### ⬜ Not done
-
-| | status |
-|---|---|
-| Full 200-session version of the same comparison | **not run** |
-| Step 3.2 — state-gated conditional `dense_weight` | **not designed, not coded** |
-| Step 3.3 — cleaner query text (`dense_query="slots"`) | **not run** |
-| Step 3.4 — S5 dense *retrieval* route (`use_dense`, recall not ranking) | **not run** |
-| Cross-encoder (Part 4 of the plan) | **blocked — no reachable model source found**, not attempted |
+**So: the one measurement that exists is S6 rerank, static weight, unconditional — not
+gated on stagnation or anything else, and not the retrieval stage.** Every gated variant,
+and the entire retrieval-stage question, is still open.
 
 **In short: the plumbing works end to end; the actual question — does the embedding
-help — has one small, inconclusive, net-negative data point and four unrun next steps.**
-Nothing below Section 2 has been decided; it's all still open.
+help — has one small, inconclusive, net-negative data point (S6, ungated) and every
+other stage/gating combination still unrun.**
 
 ---
 
@@ -115,9 +113,13 @@ because it scores every candidate individually rather than encoding the query on
 --targets generic --configs router_on,dense_rr_10` - the 21-session "generic tail"
 subset (all disclosed constraints are catalog-common words, so exact-match reranking has
 the least to work with), comparing `router_on` (dense off) against `dense_rr_10`
-(`RerankConfig(dense_weight=1.0)`, the S6 rerank-signal path only). This subset and
-config are the closest reproduction of `docs/team/dense_rerank.md`'s original +0.021
-finding, run against the current state-machine agent for the first time.
+(`RerankConfig(dense_weight=1.0)`). **Stage: S6 rerank only** - reorders the pool S5
+retrieval already built; the S5 dense *retrieval* route (`use_dense`) was not exercised
+in this run. **Gating: none** - `dense_weight` is a fixed constant, applied on every
+turn regardless of session state; no stagnation check, no pool-shape check, nothing
+state-conditional. This subset and config are the closest reproduction of
+`docs/team/dense_rerank.md`'s original +0.021 finding, run against the current
+state-machine agent for the first time.
 
 | | router_on | dense_rr_10 | Δ |
 |---|---|---|---|
