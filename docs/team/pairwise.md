@@ -183,13 +183,15 @@ iteration 2.** `w_final` = `pop 1.366, retrieval 0.000, facet 0.253, category
   and would subtract it. `retrieval_weight` can't go negative in `RerankConfig`
   interpretation, so it clamps to 0 — the fit's way of saying "ignore retrieval".
   Change 12's coordinate-ascent argmax reached the milder `retrieval 0.1`.
-- **`facet_conflict`** — `w[7]` sits near zero and flips sign with C (+0.05 at
-  C=0.1, meaning the fit wants conflict to *raise* the score — incoherent; −0.09
-  and −0.17 at higher C). Rescaled and clamped, `facet_conflict_weight` lands at
-  0.00–0.04. The pairwise signal does not support a conflict penalty. Change 12's
-  argmax also zeroed it.
-- **`facet_weight`** — wanted slightly negative at C=1.0/10.0 (−0.04, −0.17); at
-  the chosen C=0.1 it is positive (0.18–0.25).
+- **`facet_conflict`** — `w[7]` sits within ±0.05 of zero and is sign-unstable:
+  at iteration 0 the fit wants it *positive* (`w[7]` = +0.049), i.e. conflict
+  should *raise* the score — incoherent for a term that is subtracted; by
+  iterations 1–2 it is a healthy but tiny negative (−0.09, −0.04). Rescaled and
+  clamped, `facet_conflict_weight` lands at 0.00–0.04. The pairwise signal does
+  not support a conflict penalty; change 12's argmax also zeroed it.
+- **`facet_weight`** — wanted slightly negative at the higher `C` values
+  (−0.04 at C=1.0, −0.17 at C=10.0 for `plain`); at the chosen C=0.1 it is a
+  small positive (0.18–0.26).
 
 **The offline↔online disagreement, visible already in the trajectory:** the
 pairwise (offline) loss converges monotonically, but the **real-evaluator dev
@@ -408,8 +410,13 @@ python3 tools/stress_harness.py --customer paraphrase:heavy+browse-gated \
   --configs pop040,fit_pairwise_plain,fit_pairwise_default
 ```
 
-All numbers in this doc are from logged runs on commit `<this branch HEAD>`
-against `data/catalog.jsonl` / `data/public_set.jsonl` / `data/hard_set.jsonl`.
-The fit's raw JSON (`w_final`, per-iteration coefficients, plateau grid) is what
-`--out` writes; the tables above are transcribed from it and from the sweep /
-gate / stress logs.
+All numbers in this doc are from logged runs on branch `kwongweng_fit_pairwise`
+(based on `origin/main` `72b021f`) against `data/catalog.jsonl` /
+`data/public_set.jsonl` / `data/hard_set.jsonl`. The fit's raw JSON (`w_final`,
+per-iteration coefficients, plateau grid) is what `--out` writes; the tables
+above are transcribed from it and from the sweep / gate / stress logs.
+
+Verification: `python3 -m unittest discover -s tests -t .` → 94/94;
+`tools/stress_harness.py --verify` → PASS (|Δ| 2.1e-7);
+`tools/fit_weights_pairwise.py --verify` → PASS both variants (0 session-record
+mismatches, scalar Δ 0).
