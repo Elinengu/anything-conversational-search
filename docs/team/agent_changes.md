@@ -33,6 +33,7 @@ public labels and API contract were **not** touched.
 | + trigger-gate the LLM rerank on deterministic uncertainty | Elinengu | — | — | change 18; **measured worse than always-on, not better** — 0.78622 vs 0.79269 (both below the 0.80010 baseline) on `paraphrase:heavy+browse-gated`. A 7-session diagnostic (5 regressions demoting a correct #1, 2 rescues including one miss→#1) didn't generalize to the full 60-session set at `llm_trigger_margin=0.20`. Superseded by change 19, not reverted — see its section |
 | + rewire the trigger-gate onto `DialogState.leader_margin` (merge `dynamic-state-slot`) | Elinengu | 0.921497 | — | change 19; same gating *idea* as change 18, now reading the live pool-uncertainty signal `dynamic-state-slot` computes once per turn (`observe_pool`, post-orchestration-reroute) instead of a bespoke second rerank call. **Real gain under stress**: dev −0.0035 (0.9275→0.9240), holdout −0.0070 (0.9125→0.9055) — both inside the team's own "<0.02 is noise" band — vs. **+0.0471 score / hit@10 0.917→0.950 / MRR 0.6342→0.7157** on `paraphrase:heavy+browse-gated`, the practical/realistic stressor. `llm_weight` stays `0.0` (off) per the house rule (must not regress the public score); this is the measured case *for* turning it on as an opt-in Innovation/Presentation/Impact layer, not a default-on change. **These numbers are superseded by change 20** — see below |
 | + fix: browse-gated stall text corrupting the active-slot ledger | Elinengu | 0.921497 | — | change 20; found by inspecting change 19's own viewer.html transcripts. `dynamic-state-slot`'s `_record_slots` recorded *every* punctuation-split chunk of *every* customer message as a "feature" slot, unconditionally — including the stress harness's stall sentence ("I'm still just browsing - ask me about one particular thing and I'll tell you"), which also falsely marked those turns "productive," silently disabling the stagnation-detection/recovery machinery `dynamic-state-slot` was built around. Public/dev/holdout **unaffected** (0.921497, unchanged — the official cooperative customer never sends this wording). Re-measuring change 19's own comparison on the same stress condition: **llm_off 0.78794→0.78485, llm_rerank 0.83506→0.81025 — still a real gain (+0.0254), for the intended reason this time** rather than partly riding a broken signal. See its section for a concrete before/after session |
+| + fix: LLM rerank temperature (0.2→0.0) and a reroute that discarded llm_scores | Elinengu | 0.921497 | — | change 21; found chasing a user report that a session's `viewer.html` rank didn't match a fresh re-run. `DeepSeekClient` never read `LLMConfig.temperature` (dead field, hardcoded 0.2) — confirmed live, the same rerank prompt returned a different order minutes apart. `AdaptiveOrchestrator`'s stagnation reroute reran `rerank()` without `llm_scores=`, discarding a real, already-paid-for DeepSeek ranking whenever it fired the same turn as the trigger-gate. Both on the `llm_weight>0` path only — public/dev/holdout unaffected (0.921497). Every LLM-rerank `viewer.html` captured before this fix is a single non-deterministic sample, not a reproducible one |
 
 Net: **public 0.859 -> 0.9313, adversarial 0.684 -> 0.8028.** 77/77 tests pass.
 Change 15 is branch `dual_tracking` work (89/89 tests) and does not move the `main` number.
@@ -1668,6 +1669,57 @@ on `ask_attribute` - never produces. This bug was invisible to every number
 this project reports as "the score" and only surfaces on the realism/stress
 harness, which is exactly why it survived a full merge and 125 passing tests
 undetected until someone read the transcripts.
+
+## Change 21 — Fix: LLM rerank temperature and a reroute that discarded it (Elinengu)
+
+**Files:** `src/llm.py` (`DeepSeekClient.temperature`, `LLMConfig.temperature`),
+`starter/agent.py` (`_respond`'s orchestration reroute) — found chasing a
+user report that a session's rank in `viewer.html` didn't match a fresh
+re-run of the identical session and config.
+
+### Problem 1 — the rerank call was never actually deterministic
+
+`DeepSeekClient.generate()` hardcoded `temperature: 0.2` in every request and
+never read `LLMConfig.temperature` at all - a dead config field since change
+17. Confirmed live: the identical 15-candidate rerank prompt, sent minutes
+apart, returned a different candidate ordering the second time. `rerank_candidates()`
+asks DeepSeek for a *ranking*, not creative prose - of all three LLM call
+sites, this is the one where determinism is worth more than sampling
+variety, and it's also the one silently costing the most reproducibility:
+every `viewer.html` snapshot of an LLM-rerank session was a single random
+draw, not a stable example.
+
+### Problem 2 — a reroute silently threw the LLM's answer away
+
+`starter/agent.py`'s `AdaptiveOrchestrator` retrieval reroute
+(`plan.retrieval_route != "terms"`, fires on stagnation among other phases)
+reran `rerank()` without `llm_scores=`, discarding any real DeepSeek ranking
+already computed - and paid for in real tokens - earlier that same turn.
+Stagnation is plausibly exactly when the LLM trigger-gate (change 19, gated
+on `state.leader_margin`) is also most likely to have just fired, so this
+wasn't a rare edge case.
+
+### What changed
+
+`DeepSeekClient` gained a real `temperature` parameter (default `0.0`);
+`LLMClient` now actually passes `self.config.temperature` through instead of
+constructing `DeepSeekClient` with only `model`/`timeout`. The reroute's
+`rerank()` call now passes the same `llm_scores` dict computed earlier in the
+turn - safe to reuse, since it's keyed by `parent_asin` and any candidate
+absent from it (because retrieval rerouted to a different pool) simply
+contributes `0.0`, identical to how it was already treated before the
+reroute.
+
+### Effect
+
+Public/dev/holdout: **unaffected** (0.921497, unchanged) - both bugs live
+entirely on the `llm_weight > 0` path, off by default. 125/125 tests pass.
+Neither bug changes the *direction* of change 19/20's measured stress-harness
+result (the gate still helps on aggregate), but both mean any single
+before/after session shown in a `viewer.html` snapshot up to this point
+should be treated as illustrative of the pattern, not as a byte-reproducible
+example - regenerating it may now show a different (and more stable) number
+at `temperature=0.0` than the ones captured in change 19/20's write-ups.
 
 ## Not touched (organizer-owned)
 
