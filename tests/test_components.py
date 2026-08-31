@@ -338,6 +338,79 @@ class RerankTests(unittest.TestCase):
                         RerankConfig(dense_weight=2.0), embed=embed, qvec=[1.0])
         self.assertEqual(ranked[0][0], "b")
 
+    # -- Step 3.2: dense_gate_over_general / dense_gate_exclude_browsing -------
+
+    def _dense_setup(self):
+        index = _StubIndex({"a": {"text": "cotton shirt classic"}, "b": {"text": "cotton shirt classic"}})
+        state = DialogState("s")
+        state.observe(1, "I'm looking for shirts")
+        state.observe(2, "For that, what matters is: cotton shirt.")
+        embed = _StubEmbed({"a": 0.5, "b": 0.9})
+        pool = [("a", 1.0), ("b", 0.9)]
+        return index, state, embed, pool
+
+    def test_over_general_gate_closed_is_byte_identical_to_dense_off(self) -> None:
+        index, state, embed, pool = self._dense_setup()
+        self.assertFalse(state.over_general)  # default - the gate under test starts closed
+        base = rerank(index, state, list(pool), RerankConfig())
+        gated = rerank(index, state, list(pool),
+                       RerankConfig(dense_weight=2.0, dense_gate_over_general=True),
+                       embed=embed, qvec=[1.0])
+        self.assertEqual(base, gated)
+
+    def test_over_general_gate_open_reorders(self) -> None:
+        index, state, embed, pool = self._dense_setup()
+        state.over_general = True
+        ranked = rerank(index, state, list(pool),
+                        RerankConfig(dense_weight=2.0, dense_gate_over_general=True),
+                        embed=embed, qvec=[1.0])
+        self.assertEqual(ranked[0][0], "b")
+
+    def test_exclude_browsing_gate_withholds_on_the_browsing_track(self) -> None:
+        index, state, embed, pool = self._dense_setup()
+        base = rerank(index, state, list(pool), RerankConfig())
+        gated = rerank(index, state, list(pool),
+                       RerankConfig(dense_weight=2.0, dense_gate_exclude_browsing=True),
+                       track="browsing", embed=embed, qvec=[1.0])
+        self.assertEqual(base, gated)
+
+    def test_exclude_browsing_gate_falls_back_to_state_intent_track(self) -> None:
+        """No `track` kwarg passed - the gate must still read state.intent_track."""
+        index, state, embed, pool = self._dense_setup()
+        state.intent_track = "browsing"
+        base = rerank(index, state, list(pool), RerankConfig())
+        gated = rerank(index, state, list(pool),
+                       RerankConfig(dense_weight=2.0, dense_gate_exclude_browsing=True),
+                       embed=embed, qvec=[1.0])
+        self.assertEqual(base, gated)
+
+    def test_exclude_browsing_gate_allows_buying(self) -> None:
+        index, state, embed, pool = self._dense_setup()
+        ranked = rerank(index, state, list(pool),
+                        RerankConfig(dense_weight=2.0, dense_gate_exclude_browsing=True),
+                        track="buying", embed=embed, qvec=[1.0])
+        self.assertEqual(ranked[0][0], "b")
+
+    # -- Step 3.3: dense_query="slots" ------------------------------------------
+
+    def test_dense_query_slots_encodes_authoritative_text(self) -> None:
+        class _RecordingEmbed(_StubEmbed):
+            def __init__(self) -> None:
+                super().__init__()
+                self.queries: list[str] = []
+
+            def encode_query(self, text: str):
+                self.queries.append(text)
+                return [1.0]
+
+        index, state, _unused_embed, pool = self._dense_setup()
+        embed = _RecordingEmbed()
+        # qvec is the full_text() vector the agent would have cached - "slots"
+        # must ignore it and encode authoritative_text() fresh instead.
+        rerank(index, state, list(pool), RerankConfig(dense_weight=1.0, dense_query="slots"),
+              embed=embed, qvec=[0.0, 0.0])
+        self.assertEqual(embed.queries, [state.authoritative_text()])
+
     def test_hard_filter_keeps_the_slate_when_every_candidate_contradicts(self) -> None:
         index = _StubIndex({
             "a": {"text": "cotton shirt black only"},

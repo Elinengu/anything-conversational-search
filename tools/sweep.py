@@ -174,6 +174,34 @@ def build_configs(catalog: str) -> dict[str, AgentConfig]:
         "dense_rr_05_rns": AgentConfig(   # also rescore when no verbatim span exists
             use_router=True,
             rerank=RerankConfig(dense_weight=0.5, rescore_without_spans=True)),
+        # Step 3.2/3.3 (branch state-encoder-eval): the 21-session generic-tail
+        # sanity check on dense_rr_10 came back net -0.016, scenario-split -
+        # buying/override up, browsing down hard - see
+        # docs/team/branch_state_encoder_eval_changes.md. These gate/query-text
+        # variants test whether that split is fixable rather than intrinsic.
+        # dense_rr_gate: fire only when state.over_general (pool has stopped
+        # discriminating) - the pool-shape hypothesis alone.
+        "dense_rr_gate": AgentConfig(
+            use_router=True,
+            rerank=RerankConfig(dense_weight=1.0, dense_gate_over_general=True)),
+        # dense_rr_nobrowse: withhold on the browsing track only, no pool-shape
+        # gate - isolates whether avoiding the track that collapsed is
+        # sufficient on its own.
+        "dense_rr_nobrowse": AgentConfig(
+            use_router=True,
+            rerank=RerankConfig(dense_weight=1.0, dense_gate_exclude_browsing=True)),
+        # dense_rr_gate_nobrowse: both gates together - fire only on a stalled
+        # pool, and never on browsing even then.
+        "dense_rr_gate_nobrowse": AgentConfig(
+            use_router=True,
+            rerank=RerankConfig(dense_weight=1.0, dense_gate_over_general=True,
+                                dense_gate_exclude_browsing=True)),
+        # dense_rr_slots: same unconditional dense_weight as dense_rr_10, but
+        # query state.authoritative_text() (the state machine's compact
+        # active-slot text) instead of full_text() - no simulator boilerplate.
+        "dense_rr_slots": AgentConfig(
+            use_router=True,
+            rerank=RerankConfig(dense_weight=1.0, dense_query="slots")),
         # Dense sentence-embedding cosine as an S5 retrieval route (branch
         # dense_rerank). Originally trialled per-track (browsing only, since the
         # paraphrase recall tail concentrates there - docs/team/dense_route.md);

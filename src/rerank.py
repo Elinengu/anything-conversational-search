@@ -145,12 +145,29 @@ class RerankConfig:
     dense_weight: float = 0.0
     #: Which text is encoded as the query vector: "full" reuses the agent's
     #: full_text() vector (free - encoded once per turn), "spans" encodes the
-    #: disclosed constraint spans only, "blend" averages the two.
+    #: disclosed constraint spans only, "blend" averages the two, "slots" encodes
+    #: state.authoritative_text() - the state machine's compact active-slot
+    #: query, no simulator boilerplate. Step 3.3: untested before this config -
+    #: shorter and cleaner, but shorter can also mean less to go on.
     dense_query: str = "full"
     #: Rescore the head even when no verbatim span was disclosed. Only meaningful
     #: with dense_weight > 0 - the degenerate-card / paraphrased-opening lever
     #: where span coverage is a frozen no-op.
     rescore_without_spans: bool = False
+    #: Step 3.2: fire dense_weight only when state.over_general (pool_size>=100,
+    #: pool_entropy>=0.97, leader_margin<0.05 - src/state.py) says lexical
+    #: matching has stopped discriminating the live pool. False (default) is
+    #: today's behaviour: dense_weight applies unconditionally every turn - the
+    #: one measurement on record for that (branch_state_encoder_eval_changes.md)
+    #: is net -0.016 on the 21-session generic tail. See _dense_gate_open().
+    dense_gate_over_general: bool = False
+    #: Step 3.2, informed by that same measurement: buying (+0.0103) and
+    #: intent_override (+0.0396) improved, browsing collapsed (-0.0900) - the
+    #: embedding may be diluting an already-strong lexical signal specifically on
+    #: the track state-encoder-eval's policy fix made richest. True withholds
+    #: dense_weight on intent_track=="browsing" regardless of dense_gate_over_general.
+    #: A no-op alone if dense_weight would not otherwise fire.
+    dense_gate_exclude_browsing: bool = False
 
 
 def _dense_similarities(
@@ -178,6 +195,14 @@ def _dense_similarities(
         stacked = np.mean(np.stack(parts), axis=0)
         norm = float(np.linalg.norm(stacked))
         query_vec = stacked / norm if norm > 0.0 else stacked
+    elif mode == "slots":
+        # The state machine's compact active-slot query - no simulator
+        # boilerplate, unlike full_text(). Encoded fresh (not the cached qvec,
+        # which is always full_text()); falls back to qvec if there is nothing
+        # active yet (authoritative_text() itself falls back to focused_text(),
+        # so this is only reached pre-turn-1).
+        text = state.authoritative_text()
+        query_vec = embed.encode_query(text) if text else qvec
     else:
         query_vec = qvec
     if query_vec is None:
@@ -329,6 +354,26 @@ def _category_match(
     return score
 
 
+def _dense_gate_open(state: DialogState, config: RerankConfig, track: str | None) -> bool:
+    """True -> dense_weight applies this turn (RerankConfig.dense_gate_*, Step 3.2).
+
+    Both gates default False, and default-False -> always True (today's
+    unconditional behaviour, byte-identical). ``track`` (the router's live
+    per-turn track, e.g. from ``_route_for`` in starter/agent.py) takes
+    precedence when a caller passes it explicitly; ``state.intent_track``
+    (DialogState's own default is "browsing" - src/state.py) is only consulted
+    as a fallback when ``track is None``, never as an additional veto - an
+    explicit track="buying" must not be overridden by that default.
+    """
+    if config.dense_gate_exclude_browsing:
+        effective_track = track if track is not None else state.intent_track
+        if effective_track == "browsing":
+            return False
+    if config.dense_gate_over_general and not state.over_general:
+        return False
+    return True
+
+
 def rerank(
     index: CatalogIndex,
     state: DialogState,
@@ -350,6 +395,7 @@ def rerank(
         config.dense_weight > 0.0
         and embed is not None
         and getattr(embed, "available", False)
+        and _dense_gate_open(state, config, track)
     )
     if not spans and not (dense_active and config.rescore_without_spans):
         return candidates

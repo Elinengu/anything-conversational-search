@@ -235,7 +235,7 @@ class Agent:
         )
         candidates = rerank(
             self.index, state, candidates, self.config.rerank,
-            embed=self.embed, qvec=qvec,
+            track=track_name, embed=self.embed, qvec=qvec,
         )
         state.observe_pool(candidates)
 
@@ -262,7 +262,7 @@ class Agent:
                 )
                 candidates = rerank(
                     self.index, state, candidates, self.config.rerank,
-                    embed=self.embed, qvec=qvec,
+                    track=track_name, embed=self.embed, qvec=qvec,
                 )
                 state.observe_pool(candidates, advance=False)
             self._apply_plan_to_state(state, plan)
