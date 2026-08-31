@@ -20,12 +20,22 @@ catalog via ONNX Runtime - no ``torch`` - and writes two things into ``--out``
 Both are git-ignored and distributed as a GitHub Release asset the same way
 ``catalog.jsonl.gz`` is (see ``data/README.md``).
 
+Fetch source: ``huggingface.co`` is blocked on some networks (this project's own dev
+environment among them - see docs/team/dense_route.md / dense_rerank.md). ``GCS_SOURCES``
+below is a fallback for known models, pointing at Qdrant's public fastembed mirror on GCS
+(verified reachable: a tar.gz of exactly the files ``_Encoder`` needs -
+``model_optimized.onnx`` + ``tokenizer.json`` - no huggingface_hub import required). It is
+used automatically when the model is a known GCS source; pass ``--use-hf`` to force the
+original ``huggingface_hub`` path instead, or ``--source-url`` to point at a different
+tarball.
+
 Usage::
 
-    pip install onnxruntime tokenizers huggingface_hub
+    pip install onnxruntime tokenizers numpy        # GCS path - no huggingface_hub needed
     python3 tools/build_embeddings.py --recipe v1cat
     python3 tools/build_embeddings.py --recipe v1
-    python3 tools/build_embeddings.py --model BAAI/bge-base-en-v1.5 --recipe v1cat
+    pip install huggingface_hub                     # only for --use-hf / an unknown model
+    python3 tools/build_embeddings.py --model BAAI/bge-base-en-v1.5 --recipe v1cat --use-hf
 """
 
 from __future__ import annotations
@@ -35,7 +45,9 @@ import hashlib
 import json
 import shutil
 import sys
+import tarfile
 import time
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -57,6 +69,17 @@ KNOWN = {
     "BAAI/bge-base-en-v1.5": ("onnx/model.onnx", "cls",
                               "Represent this sentence for searching relevant passages: "),
     "intfloat/e5-small-v2": ("onnx/model.onnx", "mean", "query: "),
+}
+
+# Known models: HF repo -> a tarball containing (some *.onnx, tokenizer.json), fetchable
+# without huggingface_hub. Verified against BAAI/bge-small-en-v1.5: the tarball holds
+# model_optimized.onnx (input/output names identical to the HF onnx/model.onnx export -
+# input_ids/attention_mask/token_type_ids -> last_hidden_state) and tokenizer.json. This
+# is Qdrant's public fastembed packaging (github.com/qdrant/fastembed), reachable on
+# networks that block huggingface.co directly.
+GCS_SOURCES = {
+    "BAAI/bge-small-en-v1.5":
+        "https://storage.googleapis.com/qdrant-fastembed/fast-bge-small-en-v1.5.tar.gz",
 }
 
 
@@ -131,6 +154,50 @@ class _Encoder:
         return (vec / norms).astype(np.float32)
 
 
+def _fetch_from_tarball(url: str, cache_dir: Path) -> tuple[str, str]:
+    """Download and extract a model tarball; return (onnx_path, tokenizer_path).
+
+    Cached under ``cache_dir`` by URL basename so re-running for a second recipe
+    (``--recipe v1`` after ``v1cat``) does not redownload the ~75 MB archive.
+    stdlib only (``urllib.request`` + ``tarfile``) - no ``huggingface_hub``, no
+    network beyond the one GET.
+    """
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    archive_name = url.rsplit("/", 1)[-1]
+    archive_path = cache_dir / archive_name
+    extract_dir = cache_dir / archive_name.removesuffix(".tar.gz").removesuffix(".tgz")
+
+    if not archive_path.exists():
+        print(f"  downloading {url} ...", flush=True)
+        with urllib.request.urlopen(url) as response:
+            data = response.read()
+        archive_path.write_bytes(data)
+        print(f"  fetched {len(data) / 1e6:.1f} MB", flush=True)
+
+    if not extract_dir.exists() or not any(extract_dir.rglob("*.onnx")):
+        with tarfile.open(archive_path, "r:gz") as tar:
+            # Guard against path traversal in a third-party archive.
+            for member in tar.getmembers():
+                target = (extract_dir.parent / member.name).resolve()
+                if not str(target).startswith(str(extract_dir.parent.resolve())):
+                    raise ValueError(f"unsafe path in archive: {member.name}")
+            tar.extractall(extract_dir.parent)
+
+    onnx_candidates = sorted(extract_dir.rglob("*.onnx"))
+    tokenizer_candidates = sorted(extract_dir.rglob("tokenizer.json"))
+    if not onnx_candidates or not tokenizer_candidates:
+        raise FileNotFoundError(
+            f"expected an *.onnx and a tokenizer.json under {extract_dir}, found "
+            f"{len(onnx_candidates)} onnx file(s), {len(tokenizer_candidates)} tokenizer(s)"
+        )
+    if len(onnx_candidates) > 1:
+        # Prefer a quantized/optimized export if the archive ships more than one -
+        # smaller and what fastembed's own packaging actually ships as the default.
+        preferred = [p for p in onnx_candidates if "optim" in p.name or "quant" in p.name]
+        onnx_candidates = preferred or onnx_candidates
+    return str(onnx_candidates[0]), str(tokenizer_candidates[0])
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--catalog", default=str(_REPO_ROOT / "data" / "catalog.jsonl"))
@@ -142,6 +209,14 @@ def main() -> None:
     parser.add_argument("--pooling", choices=("cls", "mean"), default=None)
     parser.add_argument("--query-instruction", default=None,
                         help="prepended to queries only (not catalog text)")
+    parser.add_argument("--source-url", default=None,
+                        help="tar.gz containing an *.onnx + tokenizer.json, fetched "
+                             "without huggingface_hub - overrides GCS_SOURCES")
+    parser.add_argument("--use-hf", action="store_true",
+                        help="force huggingface_hub even for a model in GCS_SOURCES "
+                             "(needs `pip install huggingface_hub` and HF network access)")
+    parser.add_argument("--cache-dir", default=None,
+                        help="where --source-url downloads are cached (default: <out>/_dl_cache)")
     args = parser.parse_args()
 
     catalog_path = Path(args.catalog)
@@ -156,12 +231,18 @@ def main() -> None:
     pooling = args.pooling or known_pooling
     query_instruction = args.query_instruction if args.query_instruction is not None else known_instruction
 
-    from huggingface_hub import hf_hub_download
-
     started = time.time()
-    print(f"fetching {args.model} ({onnx_rel}) ...", flush=True)
-    onnx_path = hf_hub_download(args.model, onnx_rel)
-    tokenizer_path = hf_hub_download(args.model, "tokenizer.json")
+    source_url = args.source_url or (None if args.use_hf else GCS_SOURCES.get(args.model))
+    if source_url:
+        print(f"fetching {args.model} via {source_url} ...", flush=True)
+        cache_dir = Path(args.cache_dir) if args.cache_dir else out_root / "_dl_cache"
+        onnx_path, tokenizer_path = _fetch_from_tarball(source_url, cache_dir)
+    else:
+        from huggingface_hub import hf_hub_download
+
+        print(f"fetching {args.model} ({onnx_rel}) via huggingface_hub ...", flush=True)
+        onnx_path = hf_hub_download(args.model, onnx_rel)
+        tokenizer_path = hf_hub_download(args.model, "tokenizer.json")
 
     encoder = _Encoder(onnx_path, tokenizer_path, pooling, args.max_tokens)
     dim = encoder.encode(["probe"]).shape[1]
