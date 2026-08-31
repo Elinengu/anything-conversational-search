@@ -104,17 +104,24 @@ def install_probes():
         _PROBE["route"] = route
         return route
 
-    def retrieve_probe(index, state, config=None, route_hint=None):
+    def retrieve_probe(index, state, config=None, route_hint=None, **kwargs):
+        # **kwargs forwards whatever the live call site passes beyond the
+        # positional/route_hint signature (track=, embed=, qvec=, ...) - without
+        # it, a stage that grew a new keyword after this probe was written
+        # raises inside Agent.respond()'s try/except and every turn silently
+        # degrades to the empty fallback response, which reads as a mass
+        # never_retrieved regression instead of the real cause. Bit for bit the
+        # same call the unwrapped function would have received.
         started = time.perf_counter()
-        pool = original["retrieve"](index, state, config, route_hint=route_hint)
+        pool = original["retrieve"](index, state, config, route_hint=route_hint, **kwargs)
         _PROBE["retrieve_ms"] = (time.perf_counter() - started) * 1000.0
         _PROBE["pool"] = pool
         _PROBE["retrieval_route"] = route_hint or "terms"
         return pool
 
-    def rerank_probe(index, state, candidates, config=None):
+    def rerank_probe(index, state, candidates, config=None, **kwargs):
         started = time.perf_counter()
-        ranked = original["rerank"](index, state, candidates, config)
+        ranked = original["rerank"](index, state, candidates, config, **kwargs)
         _PROBE["rerank_ms"] = (time.perf_counter() - started) * 1000.0
         _PROBE["ranked"] = ranked
         return ranked
