@@ -210,6 +210,21 @@ def build_configs(catalog: str) -> dict[str, AgentConfig]:
         # (see router_on's comment above), so this row is the both-tracks form.
         "dense_route_all": AgentConfig(
             use_router=True, retrieval=RetrievalConfig(use_dense=True)),
+        # dense_route_all is a confirmed trade-off (branch state-encoder-eval):
+        # +0.0263 under paraphrase:heavy+browse-gated stress, -0.0042/-0.0065 on
+        # the cooperative official/holdout sets - see
+        # docs/team/branch_state_encoder_eval_changes.md §3d. These gate it the
+        # same way dense_rr_gate/dense_rr_nobrowse gate the S6 rerank term.
+        "dense_route_gate": AgentConfig(
+            use_router=True,
+            retrieval=RetrievalConfig(use_dense=True, dense_gate_over_general=True)),
+        "dense_route_nobrowse": AgentConfig(
+            use_router=True,
+            retrieval=RetrievalConfig(use_dense=True, dense_gate_exclude_browsing=True)),
+        "dense_route_gate_nobrowse": AgentConfig(
+            use_router=True,
+            retrieval=RetrievalConfig(use_dense=True, dense_gate_over_general=True,
+                                      dense_gate_exclude_browsing=True)),
     }
 
 

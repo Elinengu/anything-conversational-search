@@ -231,7 +231,8 @@ class Agent:
                 qvec = None
 
         candidates = retrieve(
-            self.index, state, self.config.retrieval, embed=self.embed, qvec=qvec,
+            self.index, state, self.config.retrieval,
+            track=track_name, embed=self.embed, qvec=qvec,
         )
         candidates = rerank(
             self.index, state, candidates, self.config.rerank,
@@ -257,6 +258,7 @@ class Agent:
                     state,
                     self.config.retrieval,
                     route_hint=plan.retrieval_route,
+                    track=track_name,
                     embed=self.embed,
                     qvec=qvec,
                 )

@@ -526,6 +526,45 @@ class DenseRouteTests(unittest.TestCase):
             base,
         )
 
+    # -- gating: RetrievalConfig.dense_gate_* (mirrors RerankConfig's, reuses
+    #    the same _dense_gate_open - see docs/team/branch_state_encoder_eval_changes.md §3d) --
+
+    def test_over_general_gate_closed_is_byte_identical_to_dense_off(self) -> None:
+        index = _StubTermsIndex([("a", 3.0), ("b", 2.0), ("c", 1.0)])
+        state = self._state()
+        self.assertFalse(state.over_general)
+        base = retrieve(index, state, RetrievalConfig())
+        embed = _StubEmbed({"z": 0.99, "a": 0.2})
+        gated = retrieve(index, state, RetrievalConfig(use_dense=True, dense_gate_over_general=True),
+                         embed=embed, qvec=[1.0])
+        self.assertEqual(gated, base)
+
+    def test_over_general_gate_open_changes_the_pool(self) -> None:
+        index = _StubTermsIndex([("a", 3.0), ("b", 2.0), ("c", 1.0)])
+        state = self._state()
+        state.over_general = True
+        embed = _StubEmbed({"z": 0.99, "a": 0.2})
+        fused = retrieve(index, state, RetrievalConfig(use_dense=True, dense_gate_over_general=True),
+                         embed=embed, qvec=[1.0])
+        self.assertIn("z", [asin for asin, _ in fused])
+
+    def test_exclude_browsing_gate_withholds_on_the_browsing_track(self) -> None:
+        index = _StubTermsIndex([("a", 3.0), ("b", 2.0), ("c", 1.0)])
+        state = self._state()
+        base = retrieve(index, state, RetrievalConfig())
+        embed = _StubEmbed({"z": 0.99, "a": 0.2})
+        gated = retrieve(index, state, RetrievalConfig(use_dense=True, dense_gate_exclude_browsing=True),
+                         track="browsing", embed=embed, qvec=[1.0])
+        self.assertEqual(gated, base)
+
+    def test_exclude_browsing_gate_allows_buying(self) -> None:
+        index = _StubTermsIndex([("a", 3.0), ("b", 2.0), ("c", 1.0)])
+        state = self._state()
+        embed = _StubEmbed({"z": 0.99, "a": 0.2})
+        fused = retrieve(index, state, RetrievalConfig(use_dense=True, dense_gate_exclude_browsing=True),
+                         track="buying", embed=embed, qvec=[1.0])
+        self.assertIn("z", [asin for asin, _ in fused])
+
 
 class _StubShortlistState:
     """The only state ``Agent._shortlist`` reads once the first turn has passed."""
