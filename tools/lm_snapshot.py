@@ -364,7 +364,7 @@ def cmd_run(args) -> int:
 
     def writer_cb(rows):
         buf.extend(rows)
-        if len(buf) >= 400_000:
+        if len(buf) >= 120_000:
             flush()
 
     meta = {"variants": {}}
