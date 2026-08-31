@@ -5,6 +5,84 @@ and cross-encoder work from branches `dense_rerank` / `semantic-rerank-experimen
 the live state machine and the paraphrase/browse-gated stress harness, neither of which
 existed when those branches were originally measured.
 
+---
+
+## 0. Plain-English: what is actually different from `main`, and why
+
+This section assumes no prior recommendation-systems background. It answers one question:
+if you diffed `main` against this branch, what would you actually be looking at?
+
+`main` is the true starting point — it predates the state machine, the stress-testing
+harness, and every line of embedding work. Everything in this branch is one of four
+layers stacked on top of it, in the order they were built:
+
+**Layer 1 — the state machine.** `main`'s agent treats every turn the same way: ask a
+question, look at the answer, ask another question. This branch adds a small tracker
+(`src/state.py`) that watches the conversation and classifies where it is — is the
+customer's request still broad ("exploring"), narrowing down, converging on one answer, or
+stuck ("stagnating")? It also tracks two other things per turn: `intent_track` — is this
+customer actually trying to *buy* something, or just *browsing*? — and `over_general` —
+have the last few answers stopped actually narrowing down the candidate list (the scores
+for the top few products are all bunched together, i.e. word-matching has run out of
+signal)? Nothing about search itself changes here; what changes is that the agent can now
+*behave differently* depending on which of those states it's in — e.g. asking a more
+pointed question once it detects it's stuck, or (see Layer 4) turning extra machinery on
+only when a specific state fires. This is what makes items 3 and 4 below "conditional"
+instead of "always on".
+
+**Layer 2 — the stress-testing harness (`tools/stress_harness.py`).** `main` is evaluated
+by a simulated customer who talks the way the product catalog is worded — they'll say
+"leather" if the product listing says "leather". That's why `main` finds the right product
+100% of the time: the words genuinely match. This branch adds a harness that simulates
+*harder*, more realistic customers on top of the same 200 sessions:
+  - **paraphrasing** (light/medium/heavy) — the simulated customer says "cowhide" instead
+    of "leather", so a system that only matches exact words starts missing things;
+  - **browse-gated** — a customer who is just browsing and won't proactively describe what
+    they want; they only answer if you ask them a specific, on-target question. If you ask
+    something broad ("tell me more"), they deflect.
+
+  This harness is a *test*, not a feature — it doesn't run during scoring, it's how this
+  branch measures whether a change actually holds up when the customer isn't perfectly
+  cooperative. Running it against the state machine for the first time (Layer 1 had never
+  been tested against it before this branch) surfaced a real bug: browsing-track customers
+  had lost their targeted-questioning behavior in an earlier merge and were defaulting to
+  a generic broad question the `browse-gated` customer refuses to answer. That's Layer 3.
+
+**Layer 3 — a policy fix for browsing customers (`starter/agent.py`,
+`_policy_for_state`).** Small, not embedding-related, but necessary before the embedding
+question could be measured honestly: browsing-track sessions now get a policy tuned to ask
+pointed questions early (`InfoGainPolicy(expected_broad_answers=4.0)`) instead of the
+generic fallback. This recovered most of what the merge had broken (`heavy+browse-gated`
+0.703 → 0.761) at a small, documented cost to the cooperative-customer score (§1 above has
+the exact numbers). Everything the embedding work (Layer 4) is measured against uses this
+already-fixed baseline, not the broken one.
+
+**Layer 4 — embeddings (the actual ask of this investigation).** `main`'s search is
+two stages: **retrieval** narrows the 50,000-product catalog down to ~300 candidates using
+BM25 (word/keyword matching, with no notion of *meaning* — "leather" and "cowhide" are
+unrelated strings to it); **rerank** then puts the most likely candidate on top, mostly via
+exact-phrase matching. This branch adds a second way to search: a bi-encoder embedding
+model (`bge-small-en-v1.5`) that converts text into a list of 384 numbers such that texts
+with *similar meaning* land at nearby points, regardless of exact wording — so "leather"
+and "cowhide" score as close. That gives it a way to survive paraphrasing that pure word
+matching doesn't have. It can plug into either stage (`src/retrieval.py`,
+`src/rerank.py`), and either unconditionally or gated behind Layer 1's state signals
+(`over_general`, `intent_track`) so it only turns on when word-matching looks like it's
+struggling. Every combination that was actually built and measured is in the table below
+(§ "Status at a glance"); the short version is: turning it on inside rerank never clearly
+helped, but turning it on inside retrieval — specifically gated to skip browsing-track
+turns — produced a real, repeatable gain under the harder stress-tested customer while
+costing nothing on the easy, cooperative one. It's implemented as an off-by-default flag,
+not a new default behavior.
+
+**In one sentence:** `main` is a two-stage word-matching search agent tested only against
+a cooperative customer; this branch adds a state-tracking layer on top of it, a much
+harder simulated customer to test against, a bug-fix the harder customer exposed, and an
+optional (flag-gated, off by default) meaning-based search route that measurably helps
+under that harder customer without hurting the easy one.
+
+---
+
 **Headline: the S5 dense retrieval route, gated to withhold on the browsing track
 (`dense_route_nobrowse`), resolves its own trade-off and then some - official −0.0002
 (noise-zero, down from −0.0042 ungated), holdout +0.0031 (actually above baseline, not
