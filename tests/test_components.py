@@ -424,6 +424,104 @@ class RerankTests(unittest.TestCase):
         self.assertEqual(sorted(a for a, _ in ranked), ["a", "b"])  # no drop, no duplicate
 
 
+class LLMRerankTests(unittest.TestCase):
+    """Tier-2 opt-in layer (src/llm.py) - RerankConfig.llm_weight / llm_gate_margin.
+
+    _StubLLM never touches the network; src/llm.py's own transport/parsing is
+    covered by tests/test_llm.py.
+    """
+
+    def _setup(self, leader_margin: float = 0.0):
+        index = _StubIndex({
+            "a": {"text": "cotton shirt classic"},
+            "b": {"text": "cotton shirt classic"},
+        })
+        state = DialogState("s")
+        state.observe(1, "I'm looking for shirts")
+        state.observe(2, "For that, what matters is: cotton shirt.")
+        state.leader_margin = leader_margin
+        pool = [("a", 1.0), ("b", 0.9)]
+        return index, state, pool
+
+    def test_llm_weight_zero_is_a_noop(self) -> None:
+        index, state, pool = self._setup()
+        llm = _StubLLM(order=["b", "a"])
+        base = rerank(index, state, list(pool), RerankConfig())
+        gated = rerank(index, state, list(pool), RerankConfig(llm_weight=0.0), llm=llm)
+        self.assertEqual(base, gated)
+        self.assertEqual(llm.calls, [])  # never even called
+
+    def test_llm_reorders_the_head_when_weight_positive(self) -> None:
+        index, state, pool = self._setup()
+        llm = _StubLLM(order=["b", "a"])
+        ranked = rerank(index, state, list(pool), RerankConfig(llm_weight=5.0), llm=llm)
+        self.assertEqual(ranked[0][0], "b")
+
+    def test_unavailable_llm_is_a_noop(self) -> None:
+        index, state, pool = self._setup()
+        llm = _StubLLM(order=["b", "a"], available=False)
+        base = rerank(index, state, list(pool), RerankConfig())
+        gated = rerank(index, state, list(pool), RerankConfig(llm_weight=5.0), llm=llm)
+        self.assertEqual(base, gated)
+        self.assertEqual(llm.calls, [])
+
+    def test_no_llm_passed_is_a_noop(self) -> None:
+        index, state, pool = self._setup()
+        base = rerank(index, state, list(pool), RerankConfig())
+        gated = rerank(index, state, list(pool), RerankConfig(llm_weight=5.0))
+        self.assertEqual(base, gated)
+
+    def test_llm_returning_none_falls_back_to_lexical_order(self) -> None:
+        """Any failure inside LLMReranker.rank() surfaces as None - see
+        src/llm.py. This must degrade exactly like llm_weight=0.0."""
+        index, state, pool = self._setup()
+        llm = _StubLLM(order=None)
+        base = rerank(index, state, list(pool), RerankConfig())
+        gated = rerank(index, state, list(pool), RerankConfig(llm_weight=5.0), llm=llm)
+        self.assertEqual(base, gated)
+        self.assertEqual(len(llm.calls), 1)  # it *was* called - just had no opinion
+
+    def test_gate_blocks_a_confident_pool(self) -> None:
+        index, state, pool = self._setup(leader_margin=0.5)  # confident leader
+        llm = _StubLLM(order=["b", "a"])
+        gated = rerank(index, state, list(pool),
+                       RerankConfig(llm_weight=5.0, llm_gate_margin=0.05), llm=llm)
+        self.assertEqual(gated[0][0], "a")  # lexical order stands
+        self.assertEqual(llm.calls, [])
+
+    def test_gate_opens_on_an_ambiguous_pool(self) -> None:
+        index, state, pool = self._setup(leader_margin=0.01)  # near-tied leader
+        llm = _StubLLM(order=["b", "a"])
+        gated = rerank(index, state, list(pool),
+                       RerankConfig(llm_weight=5.0, llm_gate_margin=0.05), llm=llm)
+        self.assertEqual(gated[0][0], "b")
+        self.assertEqual(len(llm.calls), 1)
+
+    def test_gate_margin_zero_disables_the_gate(self) -> None:
+        index, state, pool = self._setup(leader_margin=0.9)  # would otherwise block
+        llm = _StubLLM(order=["b", "a"])
+        gated = rerank(index, state, list(pool),
+                       RerankConfig(llm_weight=5.0, llm_gate_margin=0.0), llm=llm)
+        self.assertEqual(gated[0][0], "b")
+
+    def test_llm_depth_bounds_the_reorderable_window(self) -> None:
+        # "c" sits outside a depth-2 window and must not be promotable to the
+        # front even though the model puts it first.
+        index = _StubIndex({
+            "a": {"text": "cotton shirt classic"},
+            "b": {"text": "cotton shirt classic"},
+            "c": {"text": "cotton shirt classic"},
+        })
+        state = DialogState("s")
+        state.observe(1, "I'm looking for shirts")
+        state.observe(2, "For that, what matters is: cotton shirt.")
+        pool = [("a", 1.0), ("b", 0.9), ("c", 0.1)]
+        llm = _StubLLM(order=["c", "b", "a"])
+        ranked = rerank(index, state, list(pool),
+                        RerankConfig(llm_weight=5.0, llm_depth=2), llm=llm)
+        self.assertEqual([asin for asin, _ in ranked], ["b", "a", "c"])
+
+
 class RouterTests(unittest.TestCase):
     def test_cue_based_classification(self) -> None:
         self.assertEqual(classify("I'm looking for boots. A key requirement is: leather.").name, "buying")
@@ -641,6 +739,19 @@ class _StubFacets:
 class _StubIndex:
     def __init__(self, products: dict[str, dict]) -> None:
         self.products = products
+
+
+class _StubLLM:
+    """Stands in for src.llm.LLMReranker - a fixed ranking opinion, no network."""
+
+    def __init__(self, order: list[str] | None = None, available: bool = True) -> None:
+        self.order = order
+        self.available = available
+        self.calls: list[tuple[str, list[dict]]] = []
+
+    def rank(self, query_text: str, candidates: list[dict]) -> list[str] | None:
+        self.calls.append((query_text, list(candidates)))
+        return self.order
 
 
 class _StubEmbed:

@@ -32,6 +32,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from src.index import load_index  # noqa: E402
 from src.facets import FacetStore  # noqa: E402
+from src.llm import LLMConfig, LLMReranker  # noqa: E402
 from src.phrasing import clarify  # noqa: E402
 from src.policy import ALLOWED_ATTRIBUTES, FixedPolicy, InfoGainPolicy  # noqa: E402
 from src.rerank import RerankConfig, rerank  # noqa: E402
@@ -125,6 +126,12 @@ class AgentConfig:
     natural_questions: bool = True
     #: Candidates inspected when choosing which facet to voice (see phrasing).
     phrasing_depth: int = 40
+    # Tier-2 opt-in LLM reranking layer (src/llm.py, RerankConfig.llm_weight).
+    # LLMConfig.enabled=False by default - the Agent still builds an
+    # LLMReranker either way, but .available is False and rerank() never
+    # calls out, so every existing config/test keeps the exact offline
+    # behaviour. See docs/team/ideas_to_integrate_llm.md #3.
+    llm: LLMConfig = field(default_factory=LLMConfig)
 
 
 class Agent:
@@ -171,6 +178,8 @@ class Agent:
                 self.embed = candidate if candidate.available else None
             except Exception:
                 self.embed = None
+        # Cheap to construct even when disabled - see AgentConfig.llm above.
+        self.llm = LLMReranker(self.config.llm)
         self._states: dict[str, DialogState] = {}
         # Long-term user profile store across sessions (Dynamic Context Programming)
         self.profile_store = LongTermProfileStore()
@@ -236,7 +245,7 @@ class Agent:
         )
         candidates = rerank(
             self.index, state, candidates, self.config.rerank,
-            track=track_name, embed=self.embed, qvec=qvec,
+            track=track_name, embed=self.embed, qvec=qvec, llm=self.llm,
         )
         state.observe_pool(candidates)
 
@@ -264,7 +273,7 @@ class Agent:
                 )
                 candidates = rerank(
                     self.index, state, candidates, self.config.rerank,
-                    track=track_name, embed=self.embed, qvec=qvec,
+                    track=track_name, embed=self.embed, qvec=qvec, llm=self.llm,
                 )
                 state.observe_pool(candidates, advance=False)
             self._apply_plan_to_state(state, plan)

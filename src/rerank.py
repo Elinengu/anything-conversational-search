@@ -67,6 +67,7 @@ from src.text import terms
 
 if TYPE_CHECKING:  # avoid a hard numpy dependency on the BM25-only path
     from src.embed import EmbeddingIndex
+    from src.llm import LLMReranker
 
 
 @dataclass
@@ -168,6 +169,30 @@ class RerankConfig:
     #: dense_weight on intent_track=="browsing" regardless of dense_gate_over_general.
     #: A no-op alone if dense_weight would not otherwise fire.
     dense_gate_exclude_browsing: bool = False
+
+    # Tier-2 opt-in layer (docs/team/ideas_to_integrate_llm.md #3): a remote LLM
+    # (DeepSeek, src/llm.py) reorders the top ``llm_depth`` lexically-ranked
+    # candidates once per turn. Fused with the lexical score exactly like
+    # dense_weight is - never a replacement, and a network failure, timeout or
+    # malformed reply is caught in LLMReranker.rank() and returns None, which
+    # this file treats as "no opinion" and leaves the lexical order untouched.
+    # 0.0 (default) never calls llm.rank() at all - see _llm_gate_open below and
+    # rerank()'s call site. Needs an ``llm`` (LLMReranker) passed to rerank()
+    # with ``.available`` True (LLMConfig.enabled plus an actual API key); the
+    # Agent builds one from AgentConfig.llm and passes it through.
+    llm_weight: float = 0.0
+    # Gate: only call the model when the *previous* turn's observed pool was
+    # this undecided (state.leader_margin, src/state.py) - the same live
+    # pool-shape signal Step 3.2 gates the dense term with. A pool with a clear
+    # lexical leader has nothing to gain and a nondeterministic call to lose;
+    # an ambiguous one (low leader_margin) is exactly where a semantic re-read
+    # of the candidates can break a tie exact-token matching cannot see.
+    # <= 0.0 disables the gate (always eligible, subject to llm_weight itself).
+    llm_gate_margin: float = 0.05
+    # How many of the already lexically-sorted head candidates go into the
+    # prompt. Bounds latency, cost and prompt size; the model can only ever
+    # reorder within this window; it never promotes a candidate ranked below it.
+    llm_depth: int = 8
 
 
 def _dense_similarities(
@@ -374,6 +399,60 @@ def _dense_gate_open(state: DialogState, config: RerankConfig, track: str | None
     return True
 
 
+def _llm_gate_open(state: DialogState, config: RerankConfig) -> bool:
+    """True -> the LLM layer is eligible to fire this turn (RerankConfig.llm_gate_margin).
+
+    Mirrors ``_dense_gate_open``: consults the *previous* turn's observed pool
+    (``state.leader_margin``) since this turn's pool is exactly what is being
+    computed right now. ``llm_gate_margin <= 0.0`` disables the gate outright
+    (always eligible) - the caller still needs ``llm_weight > 0.0`` and an
+    available ``llm`` for anything to actually happen.
+    """
+    if config.llm_gate_margin <= 0.0:
+        return True
+    return state.leader_margin < config.llm_gate_margin
+
+
+def _llm_rerank(
+    scored: list[tuple[str, float]],
+    state: DialogState,
+    index: CatalogIndex,
+    config: RerankConfig,
+    llm: "LLMReranker",
+) -> list[tuple[str, float]]:
+    """Fuse the model's reordering of the top ``llm_depth`` candidates into the
+    lexical score. ``llm.rank()`` returning ``None`` (any failure at all - see
+    src/llm.py) is a no-op: ``scored`` comes back exactly as it went in, so a
+    flaky call degrades to precisely the ``llm_weight=0.0`` behaviour.
+    """
+    depth = max(2, config.llm_depth)
+    top = scored[:depth]
+    rest = scored[depth:]
+    items = []
+    for asin, _score in top:
+        product = index.products.get(asin)
+        items.append({"asin": asin, "text": product["text"] if product else ""})
+
+    try:
+        order = llm.rank(state.authoritative_text(), items)
+    except Exception:
+        order = None
+    if not order:
+        return scored
+
+    rank_of = {asin: position for position, asin in enumerate(order)}
+    denom = max(1, len(top) - 1)
+    boosted: list[tuple[str, float]] = []
+    for position, (asin, score) in enumerate(top):
+        # An asin the model dropped keeps its own lexical position as its
+        # implied rank, rather than being punished to the back of the window.
+        model_rank = rank_of.get(asin, position)
+        bonus = (len(top) - 1 - model_rank) / denom
+        boosted.append((asin, score + config.llm_weight * bonus))
+    boosted.sort(key=lambda item: (-item[1], item[0]))
+    return boosted + rest
+
+
 def rerank(
     index: CatalogIndex,
     state: DialogState,
@@ -382,6 +461,7 @@ def rerank(
     track: str | None = None,
     embed: "EmbeddingIndex | None" = None,
     qvec: Any = None,
+    llm: "LLMReranker | None" = None,
 ) -> list[tuple[str, float]]:
     config = config or RerankConfig()
     if not config.enabled or not candidates:
@@ -525,4 +605,14 @@ def rerank(
         scored.append((parent_asin, total))
 
     scored.sort(key=lambda item: (-item[1], item[0]))
+
+    if (
+        config.llm_weight > 0.0
+        and llm is not None
+        and getattr(llm, "available", False)
+        and scored
+        and _llm_gate_open(state, config)
+    ):
+        scored = _llm_rerank(scored, state, index, config, llm)
+
     return scored + tail + banished

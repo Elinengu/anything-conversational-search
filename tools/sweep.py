@@ -29,6 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from evaluator.local_evaluator import catalog_index, evaluate, load_jsonl  # noqa: E402
 from src.facets import FacetStore  # noqa: E402
 from src.index import load_index  # noqa: E402
+from src.llm import LLMConfig  # noqa: E402
 from src.policy import FixedPolicy, InfoGainPolicy  # noqa: E402
 from src.rerank import RerankConfig  # noqa: E402
 from src.retrieval import RetrievalConfig  # noqa: E402
@@ -225,6 +226,23 @@ def build_configs(catalog: str) -> dict[str, AgentConfig]:
             use_router=True,
             retrieval=RetrievalConfig(use_dense=True, dense_gate_over_general=True,
                                       dense_gate_exclude_browsing=True)),
+        # Tier-2 opt-in LLM reranking layer (src/llm.py, DeepSeek), fused into
+        # the top llm_depth of the lexical order - see
+        # docs/team/ideas_to_integrate_llm.md #3 and RerankConfig.llm_weight's
+        # docstring. Needs DEEPSEEK_API_KEY in the environment; with no key,
+        # LLMReranker.available is False and both rows fall back byte-identical
+        # to router_on. llm_rerank_always fires every turn (llm_gate_margin=0.0);
+        # llm_rerank_gated fires only when the previous turn's pool had no clear
+        # lexical leader (state.leader_margin < 0.05, the shipped default) -
+        # see docs/team/agent_changes.md Change 16 for the measured trade-off.
+        "llm_rerank_always": AgentConfig(
+            use_router=True,
+            llm=LLMConfig(enabled=True),
+            rerank=RerankConfig(llm_weight=1.0, llm_gate_margin=0.0)),
+        "llm_rerank_gated": AgentConfig(
+            use_router=True,
+            llm=LLMConfig(enabled=True),
+            rerank=RerankConfig(llm_weight=1.0, llm_gate_margin=0.05)),
     }
 
 
