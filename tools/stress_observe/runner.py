@@ -62,16 +62,22 @@ def install_stress_probes():
         observe_module._PROBE["route"] = route
         return route
 
-    def retrieve_probe(index, state, config=None):
+    def retrieve_probe(index, state, config=None, **kwargs):
         started = time.perf_counter()
-        pool = original["retrieve"](index, state, config)
+        pool = original["retrieve"](index, state, config, **kwargs)
         observe_module._PROBE["retrieve_ms"] = (time.perf_counter() - started) * 1000.0
         observe_module._PROBE["pool"] = pool
+        observe_module._PROBE["retrieval_route"] = kwargs.get("route_hint") or "terms"
         return pool
 
-    def rerank_probe(index, state, candidates, config=None, track=None):
+    def rerank_probe(index, state, candidates, config=None, **kwargs):
+        # **kwargs, not a fixed `track=None`: Agent._respond() now also calls
+        # rerank() with llm_scores= (change 17) - a fixed signature here silently
+        # TypeErrors inside Agent.respond()'s catch-all, which scores every
+        # traced session 0.000 (the exact bug docs/team/agent_changes.md change
+        # 15 already fixed once in tools/observe.py's own copy of this probe).
         started = time.perf_counter()
-        ranked = original["rerank"](index, state, candidates, config, track=track)
+        ranked = original["rerank"](index, state, candidates, config, **kwargs)
         observe_module._PROBE["rerank_ms"] = (time.perf_counter() - started) * 1000.0
         observe_module._PROBE["ranked"] = ranked
         return ranked
