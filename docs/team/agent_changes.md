@@ -1604,3 +1604,18 @@ re-run it with `DEEPSEEK_API_KEY` set, and available as
 `AgentConfig(llm=LLMConfig(enabled=True), rerank=RerankConfig(llm_weight=1.0))`
 for a network-enabled demo — exactly the "opt-in layer with a deterministic
 fallback" `ideas_to_integrate_llm.md` called for.
+
+**Follow-up (tooling, no score change):** `LLMReranker` now also falls back to
+a `.env` file at the repo root (`.env` is `.gitignore`d) when
+`DEEPSEEK_API_KEY` isn't already in the process environment — an exported
+variable still always takes precedence when both are present. This exists
+purely to remove a class of "I definitely exported it" debugging session:
+`export` only lasts for the shell it was typed into, and a new terminal tab, a
+different IDE run configuration, or a subprocess that doesn't inherit the
+parent shell's environment all silently miss it, which looks identical to
+"the layer just isn't helping" from the outside (see `llm_config_readme.md`).
+Stdlib-only (`_read_dotenv` in `src/llm.py`, ~25 lines, no `python-dotenv`
+dependency added), 170/170 tests (`DotenvFallbackTests` in
+`tests/test_llm.py`), public set unchanged at `0.923487` — this changes only
+where the credential can come from, not the reranking behaviour once it's
+resolved.

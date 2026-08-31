@@ -26,8 +26,10 @@ constraint is the whole contract of this module:
 Talks to DeepSeek's OpenAI-compatible chat-completions endpoint
 (https://api.deepseek.com/chat/completions, model "deepseek-chat"). The API
 key is read from an environment variable (default ``DEEPSEEK_API_KEY``),
+falling back to a ``.env`` file at the repo root if the process environment
+doesn't have it (`` .env`` is in ``.gitignore`` - see ``_read_dotenv``) -
 never from a config file or a repo-tracked default, so it can never be
-committed by accident.
+committed by accident either way.
 """
 
 from __future__ import annotations
@@ -36,9 +38,42 @@ import json
 import os
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 
 DEFAULT_BASE_URL = "https://api.deepseek.com/chat/completions"
 DEFAULT_MODEL = "deepseek-chat"
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _read_dotenv(name: str) -> str:
+    """Best-effort ``.env`` fallback for one variable, repo root only.
+
+    Not a general dotenv implementation - just enough to read
+    ``KEY=value`` / ``export KEY=value`` lines, skip blanks and ``#``
+    comments, and strip one layer of surrounding quotes. Never raises: a
+    missing file, a missing key, or a malformed line all just mean "not
+    found here", exactly like a missing environment variable does.
+    """
+    try:
+        text = (_REPO_ROOT / ".env").read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if key.startswith("export "):
+            key = key[len("export "):].strip()
+        if key != name:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        return value
+    return ""
 
 
 @dataclass
@@ -65,9 +100,14 @@ class LLMReranker:
 
     def __init__(self, config: LLMConfig | None = None) -> None:
         self.config = config or LLMConfig()
-        self._api_key = (
-            os.environ.get(self.config.api_key_env, "") if self.config.enabled else ""
-        )
+        self._api_key = ""
+        if self.config.enabled:
+            # An explicitly exported environment variable always wins - the
+            # .env file is a convenience fallback for when it isn't set, not
+            # an override of it.
+            self._api_key = os.environ.get(self.config.api_key_env, "") or _read_dotenv(
+                self.config.api_key_env
+            )
 
     @property
     def available(self) -> bool:

@@ -41,13 +41,15 @@ RerankConfig(
 ```
 
 `LLMReranker.available` (what `rerank()` actually checks before calling out) is
-`True` only when **both** `LLMConfig.enabled=True` **and** the environment
-variable it names (`DEEPSEEK_API_KEY` by default) is actually set. So there are
-two independent gates before any network call can happen at all:
+`True` only when **both** `LLMConfig.enabled=True` **and** the credential it
+names (`DEEPSEEK_API_KEY` by default — an exported environment variable, or a
+`.env` file at the repo root as a fallback, see Situation 2) is actually
+resolvable. So there are two independent gates before any network call can
+happen at all:
 
 ```
-enabled=True  AND  DEEPSEEK_API_KEY set  AND  llm_weight > 0.0  AND  gate open
-   (transport)         (credential)          (fusion)         (per-turn)
+enabled=True  AND  key resolvable  AND  llm_weight > 0.0  AND  gate open
+   (transport)      (credential)       (fusion)          (per-turn)
 ```
 
 Miss any one of the first three and the layer never calls out — same as
@@ -93,11 +95,29 @@ Fires the model only when the pool is genuinely ambiguous: `state.leader_margin
 embedding term is gated on. This is the configuration that was actually
 measured — see Change 17 for the split-by-split numbers.
 
-**1. Set the API key** (never commit it, never put it in a config default):
+**1. Set the API key** (never commit it, never put it in a config default) —
+either of these works, `src/llm.py` checks both:
 
 ```bash
+# a) export it in the shell you'll actually run python3 in
 export DEEPSEEK_API_KEY="sk-..."
 ```
+
+```bash
+# b) or drop it in a .env file at the repo root (gitignored - see .gitignore)
+echo 'DEEPSEEK_API_KEY=sk-...' > .env
+```
+
+An exported environment variable always takes precedence if both are present;
+`.env` is only consulted when the environment variable itself isn't set. This
+matters mainly for reproducibility across shells/IDEs — `export` only lasts
+for the shell session it was typed into, so a new terminal tab, a different
+IDE run configuration, or a subprocess spawned without inheriting your shell's
+environment will all silently miss it (the layer just no-ops — no error, see
+`LLMReranker`'s fail-closed contract in `src/llm.py`). A `.env` file avoids
+that class of "I definitely exported it" surprise, since it's read fresh from
+disk by `LLMReranker.__init__` on every construction, not inherited from
+whatever process happened to spawn `python3`.
 
 **2. Build the config:**
 
