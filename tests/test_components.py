@@ -584,6 +584,10 @@ class _StubTermsIndex:
         self._ranked = ranked
         self.products = {asin: {} for asin, _ in ranked}
 
+    def match_pool(self, category_text, limit=1500):
+        """No coarse-category pools in this stub - the route sees no opinion."""
+        return []
+
     def search_terms(self, text: str, limit: int) -> list[tuple[str, float]]:
         return self._ranked[:limit]
 

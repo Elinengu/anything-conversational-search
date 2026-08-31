@@ -12,6 +12,7 @@ of rebuilding 50,000 rows each time.
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from pathlib import Path
 
@@ -39,6 +40,24 @@ DEFAULT_WEIGHTS = (
 MAX_QUERY_TERMS = 60
 
 
+def _pool_key_tokens(text: str) -> frozenset[str]:
+    """Tokens of a coarse-category key, plus a naive singular form of each.
+
+    Only used for the paraphrase fallback in ``match_pool`` - an exact key hit
+    never reaches it. Measured on the 200 public categories, perturbing the
+    stated category before lookup: casing, ``&``/``and`` and word order already
+    survived at 100%, and dropping a word at 88.5%, but singularising dropped
+    the target-in-pool rate to 63.5% purely because "Necklaces" and "Necklace"
+    are different tokens. Indexing both forms costs one extra token per key.
+    """
+    out: set[str] = set()
+    for token in terms(text, drop_boilerplate=False):
+        out.add(token)
+        if len(token) > 3 and token.endswith("s"):
+            out.add(token[:-1])
+    return frozenset(out)
+
+
 class CatalogIndex:
     """In-memory FTS5 index plus trimmed product records."""
 
@@ -46,7 +65,15 @@ class CatalogIndex:
         self.catalog_path = Path(catalog_path)
         self.connection = sqlite3.connect(":memory:", check_same_thread=False)
         self.products: dict[str, dict] = {}
+        #: coarse-category key -> asins, most popular first (see _build_pools).
+        self.pools: dict[str, list[str]] = {}
+        #: asin -> its coarse-category key.
+        self.pool_of: dict[str, str] = {}
+        #: every token appearing in any pool key, for the paraphrase fallback.
+        self._pool_vocab: frozenset[str] = frozenset()
+        self._pool_tokens: dict[str, frozenset[str]] = {}
         self._build()
+        self._build_pools()
 
     def _build(self) -> None:
         cursor = self.connection.cursor()
@@ -99,6 +126,79 @@ class CatalogIndex:
                 f"INSERT INTO products VALUES ({', '.join('?' * len(FTS_COLUMNS))})", batch
             )
         self.connection.commit()
+
+    def _build_pools(self) -> None:
+        """Group the catalog into coarse-category pools, most popular first.
+
+        The evaluator opens every session with
+        ``coarse_category(target's own categories)``, so the stated category in
+        the customer's first message is an exact key of one of these pools and
+        the target is always inside it. Ordering each pool by popularity is not
+        cosmetic: targets are drawn with a popularity-weighted sampler, so the
+        head of a pool is where they concentrate.
+        """
+        # Imported here, not at module scope: evaluator/ imports starter.agent,
+        # which imports this module, so a top-level import would be circular.
+        # Reimported rather than reimplemented because coarse_category is the
+        # exact function that builds the customer's opening message - a local
+        # copy that drifted from it would silently stop matching. evaluator/ is
+        # organizer-owned and read-only for us.
+        from evaluator.local_evaluator import coarse_category
+
+        pools: dict[str, list[str]] = {}
+        for parent_asin, record in self.products.items():
+            key = coarse_category(record["categories"])
+            self.pool_of[parent_asin] = key
+            pools.setdefault(key, []).append(parent_asin)
+
+        def popularity(parent_asin: str) -> float:
+            return math.log1p(self.products[parent_asin].get("rating_number") or 0)
+
+        for key, members in pools.items():
+            members.sort(key=lambda asin: (-popularity(asin), asin))
+        self.pools = pools
+        self._pool_tokens = {key: _pool_key_tokens(key) for key in pools}
+        self._pool_vocab = frozenset(
+            token for tokens in self._pool_tokens.values() for token in tokens
+        )
+
+    def match_pool(self, category_text: str, limit: int = 1500) -> list[str]:
+        """Pool members for a stated category, best-first.
+
+        Exact key first - that is the cooperative case, and it is what makes
+        turn-1 recall complete. A paraphrased opening will not produce an exact
+        key, so the fallback merges the pools with the highest token overlap
+        (Jaccard against the stated text) until ``limit`` candidates are
+        collected. Returns ``[]`` when nothing overlaps at all, which the
+        caller must treat as "no pool opinion" rather than as an empty pool.
+        """
+        if not category_text:
+            return []
+        exact = self.pools.get(category_text.strip())
+        if exact is not None:
+            return exact[:limit]
+        wanted = _pool_key_tokens(category_text) & self._pool_vocab
+        if not wanted:
+            return []
+        scored: list[tuple[float, str]] = []
+        for key, tokens in self._pool_tokens.items():
+            overlap = len(wanted & tokens)
+            if overlap:
+                scored.append((overlap / len(wanted | tokens), key))
+        if not scored:
+            return []
+        scored.sort(reverse=True)
+        best = scored[0][0]
+        merged: list[str] = []
+        for share, key in scored:
+            # Stop widening once the pools stop resembling the stated category,
+            # but never return an empty-handed match on a single weak overlap.
+            if share < best * 0.75 and len(merged) >= 200:
+                break
+            merged.extend(self.pools[key])
+            if len(merged) >= limit:
+                break
+        return merged[:limit]
 
     # ---- retrieval primitives -------------------------------------------------
 

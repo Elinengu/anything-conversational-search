@@ -188,6 +188,9 @@ class StructuredRetrievalTests(unittest.TestCase):
         def __init__(self):
             self.queries: list[str] = []
 
+        def match_pool(self, category_text, limit=1500):
+            return []
+
         def search_terms(self, text, limit):
             self.queries.append(text)
             return [("A", 1.0)]

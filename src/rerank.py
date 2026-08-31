@@ -134,7 +134,14 @@ class RerankConfig:
     # Rescore the whole retrieval pool (RetrievalConfig.pool_size), not a prefix -
     # ~12% of cluster-target sessions had the target in the pool but past rank 200,
     # where it was left in bm25 order and the span signal never applied.
-    depth: int = 300
+    # How many of the retrieved candidates get rescored; the rest are passed
+    # through in retrieval order. 300 matched RetrievalConfig.pool_size exactly,
+    # so historically every candidate was rescored. The category-pool union can
+    # push the candidate list past 300, and an unscored tail would defeat the
+    # whole point of unioning - the pool guarantees the target is *present*, the
+    # reranker is what has to surface it. **0 means "every candidate"**, which is
+    # what the catpool rows use.
+    depth: int = 0
 
     # Dense sentence-embedding cosine term (bge-small, src/embed.py). Every other
     # S6 signal is exact-token: span coverage, facet agreement, category overlap
@@ -468,8 +475,9 @@ def rerank(
         return candidates
 
     spans = state.query_spans()
-    head = candidates[: config.depth]
-    tail = candidates[config.depth :]
+    limit = len(candidates) if config.depth <= 0 else config.depth
+    head = candidates[:limit]
+    tail = candidates[limit:]
 
     dense_active = (
         config.dense_weight > 0.0

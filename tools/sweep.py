@@ -243,6 +243,80 @@ def build_configs(catalog: str) -> dict[str, AgentConfig]:
             use_router=True,
             llm=LLMConfig(enabled=True),
             rerank=RerankConfig(llm_weight=1.0, llm_gate_margin=0.05)),
+        # The pre-pool lexical-only retrieval, kept as the ablation baseline.
+        "catpool_off": AgentConfig(
+            retrieval=RetrievalConfig(use_category_pool=False),
+            rerank=RerankConfig(depth=300)),
+        # ---- coarse-category pool route (S5) ----------------------------
+        # Measured motivation: at turn 1 the target is inside our 300-candidate
+        # lexical pool only 80.5% of the time, at median rank 51, and only ~66%
+        # of those 300 are in the target's category at all. The evaluator's
+        # opening message names coarse_category(target's categories), so that
+        # string keys a pool the target is inside 200/200 (median 182 members).
+        # `catpool` unions that pool into the candidate set; depth=0 makes the
+        # reranker score all of it.
+        "catpool": AgentConfig(
+            retrieval=RetrievalConfig(use_category_pool=True),
+            rerank=RerankConfig(depth=0)),
+        # Does the pool make the reranker's own category signals redundant? The
+        # union is not category-pure - it still carries the 300 lexical
+        # candidates, a third of which are out-of-category - so these should
+        # still be doing work. Measured, not assumed.
+        "catpool_nocat": AgentConfig(rerank=RerankConfig(category_weight=0.0)),
+        "catpool_notail": AgentConfig(rerank=RerankConfig(tail_weight=0.0)),
+        "catpool_nocat_notail": AgentConfig(rerank=RerankConfig(category_weight=0.0, tail_weight=0.0)),
+        # Popularity re-swept *inside* the pool. Raising it over a lexical pool
+        # was rejected on branch claude/techjam-agent-analysis-hzm14g (gains on
+        # both public splits, loses on both generated sets). Inside a
+        # category-correct pool it is a different measurement.
+        "catpool_pop070": AgentConfig(
+            retrieval=RetrievalConfig(use_category_pool=True),
+            rerank=RerankConfig(depth=0, popularity_weight=0.70)),
+        "catpool_pop100": AgentConfig(
+            retrieval=RetrievalConfig(use_category_pool=True),
+            rerank=RerankConfig(depth=0, popularity_weight=1.00)),
+        # Sniper list sizing is not on main yet (branch
+        # claude/techjam-agent-analysis-hzm14g, public 0.923487 -> 0.940083).
+        # These rows pin it explicitly so the pool route can be measured against
+        # the sizing it will actually ship alongside, in one process.
+        "sniper": AgentConfig(first_recommend_turn=1, list_size_ramp=(1, 1, 1, 1, 10)),
+        "sniper_catpool": AgentConfig(
+            first_recommend_turn=1, list_size_ramp=(1, 1, 1, 1, 10),
+            retrieval=RetrievalConfig(use_category_pool=True),
+            rerank=RerankConfig(depth=0)),
+        "sniper_catpool_pop100": AgentConfig(
+            first_recommend_turn=1, list_size_ramp=(1, 1, 1, 1, 10),
+            retrieval=RetrievalConfig(use_category_pool=True),
+            rerank=RerankConfig(depth=0, popularity_weight=1.00)),
+        # Pool-route RRF weight bracket.
+        "sn_cp_w20": AgentConfig(
+            first_recommend_turn=1, list_size_ramp=(1, 1, 1, 1, 10),
+            retrieval=RetrievalConfig(use_category_pool=True, weight_category_pool=2.0),
+            rerank=RerankConfig(depth=0)),
+        "sn_cp_w30": AgentConfig(
+            first_recommend_turn=1, list_size_ramp=(1, 1, 1, 1, 10),
+            retrieval=RetrievalConfig(use_category_pool=True, weight_category_pool=3.0),
+            rerank=RerankConfig(depth=0)),
+        "sn_cp_w03": AgentConfig(
+            first_recommend_turn=1, list_size_ramp=(1, 1, 1, 1, 10),
+            retrieval=RetrievalConfig(use_category_pool=True, weight_category_pool=0.3),
+            rerank=RerankConfig(depth=0)),
+        "sn_cp_w05": AgentConfig(
+            first_recommend_turn=1, list_size_ramp=(1, 1, 1, 1, 10),
+            retrieval=RetrievalConfig(use_category_pool=True, weight_category_pool=0.5),
+            rerank=RerankConfig(depth=0)),
+        "sn_cp_w07": AgentConfig(
+            first_recommend_turn=1, list_size_ramp=(1, 1, 1, 1, 10),
+            retrieval=RetrievalConfig(use_category_pool=True, weight_category_pool=0.7),
+            rerank=RerankConfig(depth=0)),
+        "sn_cp_w10": AgentConfig(
+            first_recommend_turn=1, list_size_ramp=(1, 1, 1, 1, 10),
+            retrieval=RetrievalConfig(use_category_pool=True, weight_category_pool=1.0),
+            rerank=RerankConfig(depth=0)),
+        "sn_cp_w15": AgentConfig(
+            first_recommend_turn=1, list_size_ramp=(1, 1, 1, 1, 10),
+            retrieval=RetrievalConfig(use_category_pool=True, weight_category_pool=1.5),
+            rerank=RerankConfig(depth=0)),
     }
 
 
