@@ -146,6 +146,33 @@ def build_configs(catalog: str) -> dict[str, AgentConfig]:
         "weights_argmax": AgentConfig(rerank=RerankConfig(
             popularity_weight=0.8, retrieval_weight=0.1, facet_weight=0.5,
             tail_weight=1.2, facet_conflict_weight=0.0)),
+        # Coordinate ascent with a variance-controlled accept rule
+        # (tools/fit_weights_cv.py, branch kwongweng_fit_cv, docs/team/cv.md).
+        # k-fold: accept a move only if >=4/5 dev folds agree. bootstrap: accept
+        # only if the 5th percentile of 20 paired resample differences is > 0.
+        # Exploratory - NOT shipping candidates. The filters reject the most
+        # extreme moves change-12's plain CA accepted, but every surviving vector
+        # still cuts retrieval_weight, which regresses the hard set (0.803 -> ~0.783).
+        "fit_cv_kfold_plain": AgentConfig(
+            use_router=False, policy=FixedPolicy(),
+            rerank=RerankConfig(
+                popularity_weight=0.8, retrieval_weight=0.02, facet_weight=0.1,
+                category_weight=0.4, tail_weight=1.2, pair_weight=2.0,
+                facet_conflict_weight=0.1)),
+        "fit_cv_kfold_default": AgentConfig(rerank=RerankConfig(
+            popularity_weight=0.8, retrieval_weight=0.02, facet_weight=0.1,
+            category_weight=0.4, tail_weight=0.8, pair_weight=0.8,
+            facet_conflict_weight=0.4)),
+        "fit_cv_boot_plain": AgentConfig(
+            use_router=False, policy=FixedPolicy(),
+            rerank=RerankConfig(
+                popularity_weight=0.5, retrieval_weight=0.1, facet_weight=0.3,
+                category_weight=0.4, tail_weight=0.8, pair_weight=0.8,
+                facet_conflict_weight=0.8)),
+        "fit_cv_boot_default": AgentConfig(rerank=RerankConfig(
+            popularity_weight=0.5, retrieval_weight=0.1, facet_weight=0.3,
+            category_weight=0.4, tail_weight=0.8, pair_weight=0.8,
+            facet_conflict_weight=0.4)),
         # Pool-aware clarification wording (src/phrasing.py). ask_attribute is
         # unchanged and the simulator never reads `message`, so these two must
         # score bit-for-bit identically - the row exists to prove that.
