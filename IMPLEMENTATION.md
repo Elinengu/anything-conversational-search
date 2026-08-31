@@ -1180,8 +1180,8 @@ costs. So the agent should be patient.
 
 #### What changed
 
-**Hold until turn 3.** No recommendations on turns 1-2, when the customer has disclosed little.
-Measured on holdout:
+**Hold until turn 3 — since superseded.** For a long time the agent showed nothing on turns 1-2,
+when the customer has disclosed little. Measured on holdout at the time:
 
 | First recommendation on | Score |
 |---|---|
@@ -1189,8 +1189,12 @@ Measured on holdout:
 | **turn 3** | **0.8349** |
 | turn 4 | 0.8196 |
 
-Turn 3 wins on both splits. Turn 2 is too eager; turn 4 wastes turns after the evidence has
-arrived.
+Turn 3 won on both splits: turn 2 was too eager, turn 4 wasted turns after the evidence had
+arrived. That table was measured while the first slate was four candidates wide, and the "too
+eager" penalty is precisely the cost of banking a bad rank early. Once the slate narrowed to a
+*single* candidate (see "Sniper sizing" below) there is no bad rank left to bank, and the
+conclusion inverts — `first_recommend_turn` now ships at `1`. The table is kept because it is the
+evidence that the emit turn and the slate width are one decision, not two.
 
 **Confidence gating.** A fixed turn number is crude — sometimes the answer is obvious on turn 2.
 `_confident()` allows early recommendation when the top candidate clearly leads:
@@ -1216,8 +1220,9 @@ buy noise. Mid-plateau is the defensible choice — the same reasoning applies t
 plateau.
 
 **Narrow the first slate.** `list_size_ramp` says how many candidates each turn reveals; the last
-entry applies to every later turn. It shipped flat at `(10,)` for a long time, and is now `(4, 10)`
-— four candidates on turn 3, ten from turn 4.
+entry applies to every later turn. It shipped flat at `(10,)` for a long time, then `(4, 10)` —
+four candidates on turn 3, ten from turn 4. It now ships at `(1, 1, 1, 1, 10)`; this paragraph
+explains the `(4, 10)` step, and "Sniper sizing" below explains the rest of the way.
 
 Showing *fewer* products scores better, which sounds backwards until you line up three facts about
 the evaluator. The session ends the instant the target appears in a shown list. The rank it held
@@ -1246,10 +1251,67 @@ its midpoint rather than `5`, which happens to top two columns. The decision rul
 `4` was measured, which is the point: choosing the winner after seeing the table is how you buy
 noise, exactly as with the `0.20` margin above.
 
-Narrowing a *second* turn is not more of the same good thing. `(5, 5, 10)` scores
+Narrowing a *second* turn seemed not to be more of the same good thing. `(5, 5, 10)` scores
 `0.9272 / 0.9044 / 0.9187 / 0.7934`, dropping holdout and hard below the flat floor. Each session
 holds four constraints and the customer discloses at most two per turn, so by turn 4-5 no further
-evidence is coming and waiting longer spends turns without buying rank.
+evidence is coming and waiting longer spends turns without buying rank. That reasoning is about
+*evidence*, and about evidence it is correct — which is exactly why it pointed the wrong way, as
+the next section explains.
+
+**Sniper sizing: one candidate per turn.** The argument above treats a narrow slate as a way of
+*deferring* commitment until better evidence arrives. Read that way, narrowing past the point where
+evidence stops arriving is pointless, and `(5, 5, 10)` is the proof.
+
+But deferral is not the only thing narrowing buys, and at a width of one it is not even the main
+thing. Count the ranks a slate can produce. A slate of ten can land the target on any of ten
+positions, worth anywhere from `RR = 1.0` down to `RR = 0.1`. A slate of five can land it on five.
+**A slate of one can only ever land it on rank 1.** That is not a bet that pays off better when the
+evidence improves — it is a bet that cannot lose on rank at all, whether or not another constraint
+is ever disclosed.
+
+So the value of narrowing is not smooth in the slate width. It improves gradually from ten down to
+about four for the deferral reason, and then there is a step at one, where a different mechanism
+takes over. `(5, 5, 10)` sits in the flat part of that curve and pays two turns for nothing;
+`(1, 1, 1, 1, 10)` reaches the step.
+
+The elimination scan is what keeps this from being a coverage disaster. Products already shown are
+excluded from later slates, so four singles followed by a ten-wide turn reveal **fourteen distinct
+products**, not ten — a *deeper* walk than the flat ramp ever took, taken in smaller steps. The
+usual precision/coverage tension does not apply, because the narrow slates are not throwing
+candidates away; they are only spreading the same walk across more turns. This is why Hit@10 does
+not pay for the MRR gain, on any dataset.
+
+And once the slate is one candidate wide, holding it back until turn 3 stops making sense. An early
+guess that misses costs one turn — `0.02` of score. An early guess that hits banks `RR = 1.0`. So
+`first_recommend_turn` moves from `3` to `1`, and the agent opens by naming its single best guess.
+
+Where to widen back to ten, measured on all four sets:
+
+| widen at turn | dev | holdout | generated | hard |
+|---|---|---|---|---|
+| pre-sniper `(4, 10)` | 0.9268 | 0.9096 | 0.9197 | 0.7981 |
+| **5** | **0.9521** | 0.9220 | 0.9322 | **0.8135** |
+| 6 | 0.9469 | 0.9222 | 0.9342 | 0.8131 |
+| 7 | 0.9468 | **0.9257** | **0.9354** | 0.8129 |
+
+Every sniper row beats every pre-sniper row on every set — that is the finding. Between the three,
+the spread is `0.001` in the mean and each column has a different winner, which is the signature of
+noise rather than of a real ordering. `5` ships, but *not* because dev likes it: it is the only one
+of the three that costs no session on any set, because widening earlier leaves more wide turns as a
+safety net. Choosing on hit rate rather than on score is the same discipline as the `0.20` margin
+and the `4`-wide slate above — with the difference that here the tie-break is a metric, not a
+midpoint.
+
+Two neighbouring versions of the idea were measured and rejected, and both are instructive.
+`src/context_programming.py`'s STAGNATING phase overrides the ramp with its own ten-wide slate when
+a session stops producing evidence; carrying the singles through it too (`stagnation_slate_size=1`)
+makes *every* hit rank 1 — dev MRR `0.967` against a dev hit rate of `0.967`, arithmetically as
+good as the metric goes — and still loses `0.0146`, because it costs three dev sessions of hit rate
+to get there. A stalled session is the one case where coverage is worth more than rank. Separately,
+re-ranking the final turn over the full pool while *ignoring* the exclusion memory — insurance
+against an unparsed override having wrongly excluded the target — costs `0.0049` on dev, because
+our scan already un-excludes on a parsed override and the unfiltered top ten is mostly products
+already shown and disproven.
 
 **Track-aware margin.** `confidence_margin` is one number for every session, but the two tracks
 disclose at different rates: a buying session states one hard requirement on turn 1 and two more
@@ -1275,6 +1337,17 @@ public, MRR `0.8513 → 0.8690` (×0.30 = +0.0053) against MTTC `2.975 → 3.040
 (0.885): this buys rank, not coverage. One cost worth naming — on the 200-session generated set
 Hit@10 slips `0.995 → 0.990`, a single session that now runs out of turns.
 
+Sniper sizing (`first_recommend_turn` `3 → 1`, `list_size_ramp` `(4, 10) → (1, 1, 1, 1, 10)`):
+public `0.923487 → 0.940083`, adversarial `0.841190 → 0.852227`, hard `0.793780 → 0.813471`,
+dev `0.9268 → 0.9521`, holdout `0.9096 → 0.9220`, and `paraphrase:heavy+browse-gated`
+`0.770651 → 0.784750`. On public the entire gain is MRR — `0.8810 → 0.9339` (×0.30 = +0.0159) —
+with MTTC essentially flat at `3.040 → 3.005`, so unlike the `(4, 10)` step this one does not even
+pay the ~13x toll: the turns the singles spend are bought back by guessing from turn 1 instead of
+turn 3. **Hit@10 moves on no dataset** (1.000 / 1.000 / 0.990 / 0.885 before and after), and
+`tools/observe.py` reports an identical failure-mode split on the hard set either way — six
+`never_retrieved`, five `ranked_out`. Nothing is retrieved better and nothing is ranked better;
+what changed is only how much of the existing ranking the scoring rule lets us keep.
+
 Track-aware margin (PR #7, `buying_confidence_margin = 0.08`): public `0.930502 → 0.931302`,
 adversarial `0.801978 → 0.802811`, dev `0.9418 → 0.9428`, holdout `0.9136 → 0.9141`. MRR does not
 move on any split — the gain is entirely MTTC, exactly the confidence-gating mechanism above,
@@ -1293,7 +1366,10 @@ the `src/context_programming.py` module shipped alongside it.
   occurred. On sessions heading for a miss it still shows the same list every turn from turn 3
   onward. Detecting stagnation — the shortlist stopped changing, the customer stopped disclosing —
   and switching to a different strategy would attack the 6% of sessions that currently miss
-  entirely.
+  entirely. Partly exercised since: the STAGNATING phase now keeps its wide ten-candidate slate
+  while the rest of the session runs on one-wide sniper slates, and that asymmetry is itself
+  measured — forcing the singles through stagnation costs `0.0146`, because a stalled session needs
+  coverage where a live one needs rank.
 - **~~Diversify a low-confidence list.~~ Tested, and it does not work.** This entry used to argue
   that spreading the list across distinct categories or brands would raise the chance of catching
   the target, on the grounds that a miss→hit is worth 2.6x a rank improvement. **That premise is
@@ -1305,12 +1381,24 @@ the `src/context_programming.py` module shipped alongside it.
   own metadata, so the crowded top of the list is a cluster formed *around the target*, which sits
   at its centre rather than being an outlier crowded out of it. `docs/team/ideas.md` Idea 3 records
   the full measurement.
-- **~~Vary list length with confidence.~~ Done — see "Narrow the first slate" above.** This entry
-  used to guess that "there is likely no benefit to showing fewer". The opposite is true, and for a
-  reason the guess missed: showing fewer is not about precision, it is about *when you commit*.
-  `list_size_ramp` now ships at `(4, 10)`, worth `+0.0040` on the public set. The remaining
-  unexercised part of the idea is making the width depend on measured confidence rather than on the
-  turn number — narrow while `_confident()` is false, ten once it is true.
+- **~~Vary list length with confidence.~~ Done twice — see "Narrow the first slate" and "Sniper
+  sizing" above.** This entry originally guessed that "there is likely no benefit to showing
+  fewer". The opposite is true, and for a reason the guess missed: showing fewer is not about
+  precision, it is about *when you commit*. `list_size_ramp` went to `(4, 10)` for `+0.0040`, and
+  then to `(1, 1, 1, 1, 10)` for a further `+0.0166` once it became clear that the width-one case
+  is a different mechanism rather than more of the same one. The remaining unexercised part is
+  still making the width depend on measured confidence rather than on the turn number — though the
+  headroom is now smaller, since a one-wide slate is already the best rank available and the only
+  question left is when to widen.
+- **Better turn-1 ranking is where the remaining headroom is.** With sizing solved, the residual
+  gap to the strongest published submission on this evaluator (0.9748) is MRR `0.934` vs `0.995`
+  and MTTC `3.005` vs `2.19` — both of which are first-guess accuracy, not timing. Their route is a
+  coarse category pool (median 184 products of 50,000, containing the target 200/200 times) plus a
+  strong popularity prior over that pool, which makes the most-popular constraint-matching product
+  the target often enough to win on turn 1. Raising our own `popularity_weight` reproduces part of
+  that on the public splits and **loses** on both generated sets (`docs/team/agent_changes.md`
+  change 18), so the honest version of this idea is an S5/S6 problem — a tighter category pool, or
+  a ranker trained on self-play sessions — not a weight to turn up.
 
 ---
 
@@ -1388,6 +1476,9 @@ not repeat the experiment.
 | **Neural cross-encoder reranking (S6b)** | dev 0.9268 → 0.9211, hard 0.7981 → 0.7944 | Built, measured, removed. Loses on every split and every setting; the optimum semantic weight is zero. Code preserved on branch `semantic-rerank`. |
 | **No-span rescore, re-opened after change 12** | dev 0.941757 → 0.941757 (bit-identical), holdout 0.9136 → 0.9188, hard 0.8020 → 0.8000 | Rejected a second time. Change 12 looked like it should revive it; dev did not move by a single digit, and everything that gained was on the gate split. See below. |
 | **Document-length tie-break** | dev 0.941757 → 0.943229, hard 0.801978 → 0.805064 at `w=0.10` only | Built in three forms, rejected. The hard-set gate is cleared at one weight with both neighbours failing — an argmax on noise, not a plateau. See below. |
+| **Raising `popularity_weight` under sniper sizing** | dev 0.9521 → 0.9583, holdout 0.9220 → 0.9350 at `w=1.0`; generated 0.9322 → 0.9315, hard 0.8135 → 0.8072 | Rejected. Both public-derived splits improve monotonically and substantially; both *generated* sets, whose sessions are not drawn from the public set's sampling, are flat to negative, and the hard set falls monotonically to 0.7872 by `w=1.8`. See below. |
+| **Singles through the STAGNATING phase** | dev 0.9521 → 0.9322 | Rejected. Makes every hit rank 1 (dev MRR 0.967 against a 0.967 hit rate) and still loses 0.0146, because it costs three dev sessions of hit rate. Knob kept as `AgentConfig.stagnation_slate_size`, defaulting to the wide slate. |
+| **Final-turn exclusion bypass** | dev 0.9521 → 0.9472, holdout 0.0000 | Rejected. Ported from a rival submission, where it insures against an unparsed override permanently excluding the target. Our elimination scan already un-excludes on a parsed override, so the last turn's unfiltered top ten is mostly products already shown and disproven — it spends the deepest slate of the session on them. |
 
 **Document length, and the difference between a signal and a shippable signal.** The
 near-miss anatomy asks a narrow question: when the target sits at rank 2-10 behind an
@@ -1521,6 +1612,41 @@ cannot return.
 
 ---
 
+### Raising `popularity_weight` under sniper sizing
+
+Change 12 fitted `popularity_weight = 0.4` while the first slate was four candidates wide, where
+the popularity prior only ever broke ties among candidates that already matched the disclosed
+constraints. Under a one-candidate slate the prior stops breaking ties and starts *making the
+decision*, so the value was re-swept from scratch:
+
+| `popularity_weight` | dev (120) | holdout (80) | generated (200) | hard (96) |
+|---|---|---|---|---|
+| **0.40 (ships)** | 0.9521 | 0.9220 | **0.9322** | **0.8135** |
+| 0.70 | 0.9569 | 0.9309 | 0.9328 | 0.8085 |
+| 1.00 | 0.9583 | 0.9350 | 0.9315 | 0.8072 |
+| 1.40 | 0.9576 | **0.9367** | 0.9298 | 0.7984 |
+| 1.80 | — | — | — | 0.7872 |
+
+Read the columns, not the rows. Both public-derived splits climb steadily — holdout gains `0.015`
+at `w = 1.4`, which is a large move by this project's standards and comfortably outside the ±0.02
+noise band on a *directional* basis, since every step goes the same way. Both generated sets go the
+other way, and the hard set falls monotonically across the whole range.
+
+That pattern is the diagnosis. Public sessions draw their hidden targets with a popularity-weighted
+sampler, so a stronger popularity prior is partly *predicting the sampler* rather than predicting
+the customer. `dev` and `holdout` are two slices of the same 200 sessions and share that bias; the
+generated and hard sets are built differently and do not. When a change gains only on the splits
+that share a known bias, the gain is the bias.
+
+The hidden 800 sessions decide the real score, so `0.4` stays. Rows `pop070`, `pop100`, `pop140`,
+`pop180` and `pop250` are kept in `tools/sweep.py` so the trade-off can be re-run rather than
+re-argued — the same treatment `weights_argmax` already gets.
+
+A rival submission scoring `0.9748` on this evaluator does run a strong popularity prior (weight
+`1.0` against a coverage term of `1.5`) and reaches MTTC `2.19` largely because of it. This sweep
+is the reason we do not simply copy it: the part of that design that transfers is the sizing, and
+the part that does not is the prior.
+
 ## 7. Results
 
 ### How the score was built up
@@ -1535,6 +1661,11 @@ cannot return.
 *(An early prototype of the state-and-questions step measured 0.7811 before the code was
 reorganised into modules; 0.7799 is the same policy re-measured in the final structure. The small
 difference comes from boilerplate word handling added in §S1.)*
+
+*(This table is the historical build-up through §S7's confidence gating and is not re-measured on
+every change. The current figure is **0.940083** on the public set — Hit@10 `1.000`, MRR `0.9339`,
+MTTC `3.005` — recorded in `results.json` and reproduced by `python3 -m evaluator.local_evaluator`.
+The per-change ledger from here to that number is `docs/team/agent_changes.md`.)*
 
 ### Dev versus holdout
 

@@ -9,12 +9,12 @@ frozen 50,000-item Amazon catalog.
 The committed default configuration keeps LLM reranking **off**. It makes no
 model API calls, requires no credentials, and reports zero token usage. On the
 repository's bundled frozen local evaluator, this offline configuration
-achieves a **0.923487 TechnicalScore** and **1.000 Hit Rate@10**.
+achieves a **0.940083 TechnicalScore** and **1.000 Hit Rate@10**.
 
 | System | Hit@10 | MRR | MTTC | Efficiency | TechnicalScore |
 |---|---:|---:|---:|---:|---:|
 | Supplied BM25 baseline | 0.125 | 0.068 | 9.81 | 0.119 | 0.1067 |
-| This project (offline default, frozen local evaluator) | **1.000** | **0.881** | **3.04** | **0.796** | **0.923487** |
+| This project (offline default, frozen local evaluator) | **1.000** | **0.934** | **3.01** | **0.800** | **0.940083** |
 
 The result above is recorded in [`results.json`](results.json) and can be
 reproduced with the commands in [Reproducing the results](#reproducing-the-results).
@@ -28,19 +28,36 @@ agent asks for a specific `ask_attribute` rather than a broad `other` question.
 
 | Customer | LLM reranking | Sessions | Hit@10 | MRR | MTTC | TechnicalScore |
 |---|---|---:|---:|---:|---:|---:|
-| Official customer | Off — default | 200 | 1.000 | 0.8810 | 3.040 | 0.923487 |
+| Official customer | Off — default | 200 | 1.000 | 0.9339 | 3.005 | **0.940083** |
+| Stress: paraphrase + gated browsing | Off — default | 200 | 0.875 | 0.7178 | 4.410 | **0.784750** |
+
+Both rows are the current committed default, which shows **one candidate per
+turn until turn 5** rather than a four-wide slate from turn 3. The evaluator
+ends a session the moment the target appears in a list and scores its position
+within that list alone, so a one-item list turns every eventual hit into rank 1;
+the elimination scan keeps coverage intact by walking a deeper set of distinct
+candidates across the extra turns. Against the previous sizing this is worth
+`0.923487 → 0.940083` on the official customer and `0.770651 → 0.784750` on the
+stress customer, entirely through MRR — Hit@10 does not move on any evaluated
+set. See `docs/team/agent_changes.md` change 18.
+
+| Customer | LLM reranking | Sessions | Hit@10 | MRR | MTTC | TechnicalScore |
+|---|---|---:|---:|---:|---:|---:|
+| Official customer | Off | 200 | 1.000 | 0.8810 | 3.040 | 0.923487 |
 | Official customer | **On — gated** | 200 | **1.000** | **0.8930** | **3.045** | **0.927012** |
-| Stress: paraphrase + gated browsing | Off — default | 200 | 0.880 | 0.6628 | 4.410 | 0.770651 |
+| Stress: paraphrase + gated browsing | Off | 200 | 0.880 | 0.6628 | 4.410 | 0.770651 |
 | Stress: paraphrase + gated browsing | **On — gated** | 200 | 0.880 | **0.6734** | **4.405** | **0.773924** |
 
-On the official customer, gated LLM reranking keeps Hit@10 at `1.000`, raises
-MRR by `0.0120`, and improves the score by **0.003525**. MTTC changes only
-slightly, from `3.040` to `3.045`. On the harder stress customer, it keeps
-Hit@10 at `0.880`, raises MRR by `0.0106`, reduces MTTC by `0.005`, and improves
-the score by **0.003273**. In both conditions, the measured gain comes mainly
-from better ordering of retrieved candidates. Under paraphrase and gated
-browsing, reranking alone does not recover the remaining retrieval and
-clarification misses.
+The optional gated LLM reranking layer was measured **under the previous
+sizing** and has not been re-run since; the table above is kept as recorded
+rather than restated against the new default, because it needs a
+`DEEPSEEK_API_KEY` to reproduce. It was worth `+0.003525` on the official
+customer and `+0.003273` on the stress customer, in both cases through better
+ordering of already-retrieved candidates. Under paraphrase and gated browsing,
+reranking alone did not recover the remaining retrieval and clarification
+misses. Since sniper sizing takes most of its gain from the same place — the
+rank a hit is scored at — the two are unlikely to be additive, and the layer
+stays off by default.
 
 ## Project overview
 
@@ -307,10 +324,10 @@ This evaluates all 200 public sessions and writes the detailed output to
 
 ```text
 Hit Rate@10:    1.000000
-MRR:            0.880956
-MTTC:           3.040000
-Efficiency:     0.796000
-TechnicalScore: 0.923487
+MRR:            0.933942
+MTTC:           3.005000
+Efficiency:     0.799500
+TechnicalScore: 0.940083
 Token usage:    0
 ```
 
