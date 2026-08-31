@@ -9,12 +9,12 @@ frozen 50,000-item Amazon catalog.
 The committed default configuration keeps LLM reranking **off**. It makes no
 model API calls, requires no credentials, and reports zero token usage. On the
 repository's bundled frozen local evaluator, this offline configuration
-achieves a **0.923487 TechnicalScore** and **1.000 Hit Rate@10**.
+achieves a **0.934554 TechnicalScore** and **1.000 Hit Rate@10**.
 
 | System | Hit@10 | MRR | MTTC | Efficiency | TechnicalScore |
 |---|---:|---:|---:|---:|---:|
 | Supplied BM25 baseline | 0.125 | 0.068 | 9.81 | 0.119 | 0.1067 |
-| This project (offline default, frozen local evaluator) | **1.000** | **0.881** | **3.04** | **0.796** | **0.923487** |
+| This project (offline default, frozen local evaluator) | **1.000** | **0.908** | **2.90** | **0.811** | **0.934554** |
 
 The result above is recorded in [`results.json`](results.json) and can be
 reproduced with the commands in [Reproducing the results](#reproducing-the-results).
@@ -28,12 +28,15 @@ agent asks for a specific `ask_attribute` rather than a broad `other` question.
 
 | Customer | LLM reranking | Sessions | Hit@10 | MRR | MTTC | TechnicalScore |
 |---|---|---:|---:|---:|---:|---:|
-| Official customer | Off — default | 200 | 1.000 | 0.8810 | 3.040 | 0.923487 |
+| Official customer | Off — default | 200 | 1.000 | 0.9082 | 2.895 | **0.934554** |
 | Official customer | **On — gated** | 200 | **1.000** | **0.8930** | **3.045** | **0.927012** |
-| Stress: paraphrase + gated browsing | Off — default | 200 | 0.880 | 0.6628 | 4.410 | 0.770651 |
+| Stress: paraphrase + gated browsing | Off — default | 200 | **0.990** | 0.7708 | 3.580 | **0.874730** |
 | Stress: paraphrase + gated browsing | **On — gated** | 200 | 0.880 | **0.6734** | **4.405** | **0.773924** |
 
-On the official customer, gated LLM reranking keeps Hit@10 at `1.000`, raises
+The two **On — gated** rows were measured before the coarse-category pool
+route (`docs/team/agent_changes.md` change 19) and have not been re-run,
+because reproducing them needs a `DEEPSEEK_API_KEY`; the **Off** rows above
+are current. On the official customer, gated LLM reranking keeps Hit@10 at `1.000`, raises
 MRR by `0.0120`, and improves the score by **0.003525**. MTTC changes only
 slightly, from `3.040` to `3.045`. On the harder stress customer, it keeps
 Hit@10 at `0.880`, raises MRR by `0.0106`, reduces MTTC by `0.005`, and improves
@@ -307,10 +310,10 @@ This evaluates all 200 public sessions and writes the detailed output to
 
 ```text
 Hit Rate@10:    1.000000
-MRR:            0.880956
-MTTC:           3.040000
-Efficiency:     0.796000
-TechnicalScore: 0.923487
+MRR:            0.908181
+MTTC:           2.895000
+Efficiency:     0.810500
+TechnicalScore: 0.934554
 Token usage:    0
 ```
 

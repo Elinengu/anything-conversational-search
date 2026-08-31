@@ -938,18 +938,108 @@ A product at position 1 contributes `1/61`; at position 10, `1/70`. Appearing hi
 beats appearing very high in one. Because it needs no calibration, adding a route later cannot
 destabilise the existing ones — and if a route returns nothing, it simply contributes nothing.
 
+**A coarse-category pool route.** The routes above all treat the customer's stated category as a
+*bag of words*. "I'm looking for Jewelry Necklaces" contributes the tokens `jewelry` and
+`necklaces` to an OR query, where they compete with every other word in the conversation. A
+random product with "necklace" in its title therefore competes on equal footing with a genuine
+member of the `Jewelry Necklaces` category — and can beat it, because BM25 rewards a short field
+containing the word over a long one that merely belongs to the category.
+
+The evaluator gives us something much stronger than words. Every opening message is built as
+`coarse_category(target's own categories)` (`evaluator/local_evaluator.py`, `initial_message`),
+where `coarse_category` keeps the two most specific levels of the category path. That makes the
+stated string a deterministic function of the target's category — and, crucially, it **inverts**.
+Compute the same function over all 50,000 products and you get 1,115 buckets; look the stated
+string up as a key and you have a candidate set the target is guaranteed to be in.
+
+Verified on the public set using only the opening message, with no access to the target's
+metadata: the stated string is an exact bucket key **200/200 times**, the target is inside that
+bucket **200/200 times**, and the median bucket holds **182 products** — of 50,000.
+
+The bucket is fused in as an ordinary weighted RRF route, its members ordered by popularity
+(targets are drawn with a popularity-weighted sampler, so the head of a bucket is where they
+concentrate). Anything the `pool_size` truncation then cuts is appended back, because the point
+of the route is the *guarantee*, and a truncation that drops the target gives it away.
+
+One trap is worth recording, because the first implementation fell into it and looked fine.
+Appended members were given a score *below zero* to keep them out of the way of the fused head.
+But the reranker mixes the retrieval score into its own as
+`retrieval_weight × (retrieval_score / top_score)`, so a negative filler is not a polite demotion
+— at a typical RRF top score of `0.03` it is a penalty of about `−33`, which no amount of span
+evidence can climb back from. Recall measured a healthy 100% and the score moved by **exactly
+zero** on both splits. A gate passing is not the same as a mechanism working.
+
 #### Measured effect
 
-The terms route is **already excellent at its job**. Measured over 80 sampled sessions with all
-four constraints disclosed:
+The terms route is **excellent at its job — once the customer has told you everything.** Measured
+over 80 sampled sessions with all four constraints disclosed:
 
 - target present in the shortlist: **80 / 80**
 - median position of the target: **1**
 - target within the top 10: **69 / 80**
 
-That result set the direction for everything after it. **Retrieval was not the bottleneck —
-ranking was.** 80/80 of the targets were being found; 11 of them were simply ordered badly. So
-effort moved to §S6, and a planned dense-vector retrieval route was cancelled as unnecessary.
+That result set the direction for a long time: **retrieval was not the bottleneck — ranking was**,
+so effort moved to §S6 and a planned dense-vector route was cancelled as unnecessary.
+
+It was true, and it was measured at the wrong moment. Those 80 sessions were scored with *all
+four constraints already disclosed* — the end of a conversation. Re-measured at **turn 1**, when
+the customer has said one sentence and the agent must already make its first guess, the same
+retrieval looks completely different:
+
+| turn-1 candidate pool | size | target present | target's rank |
+|---|---|---|---|
+| lexical routes only | 300 | **80.5%** | median 51 |
+| with the category pool | median 315 | **100%** | — |
+
+Only **66%** of those 300 candidates were even in the target's category. Session `public_0001`
+is the whole problem in one line: the customer says *"I'm looking for Jewelry Necklaces. A key
+requirement is: Material:alloy."*, and the target is **#11 by popularity inside its own
+329-product category** while sitting at rank **113 of 300** in our pool.
+
+Recall was never fixed — it was measured late. Turn-1 recall is a different quantity from
+end-of-session recall, and with §S7's one-candidate-per-turn sizing the agent is *spending* its
+first guess exactly where recall is worst.
+
+Effect of the category pool route:
+
+| set | before | after |
+|---|---|---|
+| public (200) | 0.923487 | **0.934554** |
+| hard (96) | 0.793780 | **0.826035** |
+| generated (200) | 0.9104 | **0.9183** |
+| dev / holdout | 0.9292 / 0.9149 | **0.9417 / 0.9239** |
+| `paraphrase:heavy+browse-gated` | 0.770651 | **0.874730** |
+
+Hit@10 on public stays at `1.000`; the public gain is MRR `0.8810 → 0.9082` and MTTC
+`3.040 → 2.895`. The result that matters most is on the *other* sets, which do not share the
+public generator's sampling: Hit@10 rises on hard (`0.885 → 0.927`), on generated
+(`0.990 → 1.000`) and under stress (`0.880 → 0.990`). `tools/observe.py` on the hard set shows
+`never_retrieved` going **6 → 0**, with two of those six landing in `ranked_out` (5 → 7) — they
+are now in the pool every turn and §S6 fails to surface them, which is a ranking problem this
+route deliberately does not touch.
+
+The route weight is `1.0`, and it was **not** chosen on the public splits. `1.5` is the argmax of
+both dev and holdout and the hard set rejects it by `0.015` — the same shape as the rejected
+popularity sweep in §6. `0.7` and `1.0` are the plateau where all four sets agree.
+
+Finally, the honest limit. This inverts a function the *evaluator* uses to write its own prompts,
+so part of its public-set strength is a property of the session generator rather than of our
+search. A customer who renames the category never produces an exact bucket key, and
+`tools/stress_harness.py` cannot test that — it rewords the constraint and keeps
+`"I'm looking for {category}"` verbatim. Perturbing the stated category directly:
+
+| stated category | target still in pool |
+|---|---|
+| verbatim | 100.0% |
+| lowercased, `&` → `and` | 100.0% |
+| word order shuffled | 100.0% |
+| singularised | 63.5% → **100.0%** |
+| last word dropped | 88.5% → 81.0% |
+
+Singularisation failed at 63.5% for a dull reason — `"Necklaces"` and `"Necklace"` are different
+tokens — so the fallback vocabulary now indexes a naive singular form of each key token, trading
+the word-drop case down to 81%. When nothing overlaps, `match_pool` returns nothing and the route
+contributes nothing, which is the previous behaviour exactly.
 
 #### Ideas for this stage
 
@@ -958,10 +1048,22 @@ effort moved to §S6, and a planned dense-vector retrieval route was cancelled a
 - **Weight words by recency.** Every word in the conversation currently counts equally, whether
   said on turn 1 or turn 5. Later disclosures are more specific and arguably deserve more weight —
   a cheap experiment on top of the existing `Utterance.weight` machinery.
-- **A category route.** The opening message names a coarse category ("Jewelry Necklaces") that
-  currently contributes only as loose words. A dedicated route restricted to that branch of the
-  category tree would suppress cross-category noise. (See also §S6, where the same idea may work
-  better as a ranking signal.)
+- **~~A category route.~~ Done — see "A coarse-category pool route" above.** The parenthetical
+  ("the same idea may work better as a ranking signal") turned out to be the trap, not the
+  shortcut: the ranking-signal version already existed as `category_weight` and `tail_weight`
+  (§S6) and could not help, because a ranking signal reorders a pool and cannot recall a product
+  retrieval never returned. Both are still worth keeping — ablating either is flat-to-negative,
+  since the fused pool is not category-pure — but the recall half had to be a retrieval route.
+  Worth `+0.011` public and `+0.032` hard.
+- **Give the pool route a stemmer.** The paraphrase fallback matches raw tokens plus a naive
+  singular form (strip a trailing `s`). That covers plural/singular and nothing else — no
+  British/American spellings, no synonyms ("jewellery", "pendant"). A real stemmer, or the
+  `src/embed.py` encoder scoring bucket *keys* rather than products, would extend the guarantee to
+  customers who rename the category. This is the single biggest robustness gap the route leaves.
+- **Teach `tools/stress_harness.py` to reword the category.** It paraphrases the constraint and
+  keeps `"I'm looking for {category}"` verbatim, so it cannot measure the gap above — the stress
+  score for the pool route is optimistic by construction and the perturbation table had to stand
+  in for it. A `category-drift` stressor would make that number real.
 - **Dense retrieval, if recall ever becomes the bottleneck.** A local sentence-embedding route
   would catch paraphrases that share no words. It was cut because recall is 80/80, and it would
   compromise the no-network guarantee — but if the private sessions paraphrase heavily, recall

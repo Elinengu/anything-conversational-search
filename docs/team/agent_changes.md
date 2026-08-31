@@ -30,6 +30,7 @@ public labels and API contract were **not** touched.
 | + browsing-track clarification policy | Elinengu | 0.9235 | — | branch `state-encoder-eval`; restores a targeted question policy for browsing sessions after the `stress_harness`/`dense_rerank` merge dropped it. Costs −0.0109 cooperative, buys `heavy+browse-gated` 0.703 → 0.761. Full detail in `branch_state_encoder_eval_changes.md` §1 |
 | + three bugs ported from a sibling branch | Elinengu | 0.9235 | — | change 16; **score-neutral on every cooperative split by construction** — all three only fire on free-form customer wording. Worth +0.0098 on `heavy+browse-gated`, and collapses the branch's own embedding result from +0.0257 to +0.0042 |
 | + opt-in LLM semantic rerank (DeepSeek), gated | Elinengu | 0.9235 → **0.9254** | not measured | change 17; **off by default** (`llm_weight=0.0`) — measured on the fixed codebase (change 16's three bug fixes); see the change 17 section below for the full split table |
+| + coarse-category pool route (S5) | Claude | 0.923487 → **0.934554** | 0.7938 → **0.8260** | change 19; turn-1 target-in-pool 80.5% → 100%. The only change here that raises Hit@10 on *both* generated sets (hard 0.885 → 0.927, generated 0.990 → 1.000) — recall, not reordering. Stress `heavy+browse-gated` 0.7707 → 0.8747. Numbering: change 18 is sniper list sizing on branch `claude/techjam-agent-analysis-hzm14g`, not yet on `main` |
 
 Net: **public 0.859 -> 0.9313, adversarial 0.684 -> 0.8028.** 77/77 tests pass.
 The fourteen core-agent changes are detailed below; supporting tooling and docs follow.
@@ -1619,3 +1620,168 @@ dependency added), 170/170 tests (`DotenvFallbackTests` in
 `tests/test_llm.py`), public set unchanged at `0.923487` — this changes only
 where the credential can come from, not the reranking behaviour once it's
 resolved.
+
+
+## Change 19 — Coarse-category pool retrieval route (Claude)
+
+**Files:** `src/index.py`, `src/retrieval.py`, `src/rerank.py`, `tools/sweep.py`,
+`tests/test_components.py`, `tests/test_state_management.py` — commit `fbf53b9`
+
+Numbering note: **change 18 is sniper list sizing**, on branch
+`claude/techjam-agent-analysis-hzm14g` and not yet merged to `main`. This change
+is branched from `main` and is independent of it; the sweep rows `sniper`,
+`sn_cp_w*` pin sniper sizing explicitly so the two can be measured together in
+one process before they are merged.
+
+### Problem
+
+We already used the customer's stated category in three places, and all three
+were *scoring*: `categories` as one of six FTS5 columns (`src/index.py`),
+`category_weight = 0.4` (`_category_match`) and `tail_weight = 0.8`
+(`_tail_match`, change 5). Every one of them runs **after** retrieval has already
+chosen its 300 candidates. A rerank signal can reorder a pool; it cannot recall a
+product retrieval never returned. And on the retrieval side the category was not
+a category at all — every route is bag-of-words, so the category words were
+tokens in an OR query competing with the rest of the conversation.
+
+Measured at turn 1 on the public set, from `tools/observe.py` traces:
+
+- the target was inside our 300-candidate pool **80.5%** of the time, at median
+  rank **51**
+- only **66%** of those 300 candidates were in the target's category at all
+  (mean; median 80%) — a third of the retrieval budget spent outside it
+
+The first session in the trace is the whole problem in one line. Opening:
+*"I'm looking for Jewelry Necklaces. A key requirement is: Material:alloy."*
+The target `B09PYB7B6Z` is **#11 by popularity in its own 329-product category**,
+and sat at rank **113 of 300** in our pool.
+
+### What changed
+
+`evaluator/local_evaluator.py` builds every opening message from
+`coarse_category(target's own categories)` (`initial_message`, line 235), so the
+stated string is a deterministic function of the target's category path — and it
+inverts. Verified using only the opening message, no target metadata: the stated
+string is an **exact key of a coarse-category bucket 200/200**, and the target is
+inside that bucket **200/200**. Median bucket: **182** of 50,000.
+
+`CatalogIndex` now builds those buckets (1,115 of them, each sorted by
+popularity) and exposes `match_pool(category_text)`: exact key first, else the
+buckets with the highest token overlap merged up to a cap. `retrieve()` fuses the
+bucket as an ordinary weighted RRF route, then appends any members `pool_size`
+truncated away. Turn-1 recall goes **80.5% → 100%**.
+
+Two things the measurements forced, both of which had to be found the hard way:
+
+1. **Appended members must carry a positive score.** `rerank()` mixes retrieval
+   in as `retrieval_weight * (retrieval_score / top_score)`. The first attempt
+   appended them *below zero* to keep them out of the way, which is not a gentle
+   demotion but a penalty of order `1 / top_score` — around −33 at a typical RRF
+   top score. That version moved the score by **exactly 0.0000** on both splits
+   while recall read a healthy 100%, which is a useful warning: the recall gate
+   passing does not mean the route is working.
+2. **`RerankConfig.depth` now defaults to 0, meaning "every candidate".** It was
+   300, which happened to equal `pool_size`, so historically everything was
+   rescored. Once the union can exceed 300, an unscored tail defeats the point of
+   unioning — the pool guarantees the target is *present*, the reranker is what
+   has to surface it.
+
+### Effect
+
+| | before | after |
+|---|---|---|
+| Public set (200) | 0.923487 | **0.934554** |
+| Hard set (96) | 0.793780 | **0.826035** |
+| Generated set (200) | 0.9104 | **0.9183** |
+| dev / holdout | 0.9292 / 0.9149 | **0.9417 / 0.9239** |
+| `paraphrase:heavy+browse-gated` | 0.770651 | **0.874730** |
+
+Public-set components: Hit@10 `1.000 → 1.000`, MRR `0.8810 → 0.9082`,
+MTTC `3.040 → 2.895`.
+
+**This is the first change in this ledger that raises Hit@10 on the sets that do
+not share the public generator's sampling** — hard `0.885 → 0.927`, generated
+`0.990 → 1.000`, stress `0.880 → 0.990`. That distinction matters: change 18's
+popularity-weight sweep gained 0.013 on holdout and lost on both generated sets,
+and was rejected for exactly that pattern. This one moves recall, not ordering.
+
+`tools/observe.py` on the hard set makes the mechanism explicit:
+
+| failure mode | before | after |
+|---|---:|---:|
+| hit | 85 | **89** |
+| `never_retrieved` | 6 | **0** |
+| `ranked_out` | 5 | 7 |
+
+Every recall failure is gone. Four became hits; two moved into `ranked_out` —
+they are now in the pool every turn and the ranker does not surface them, which
+is an S6 problem this change deliberately does not address.
+
+### Route weight
+
+`weight_category_pool = 1.0`, chosen on all four sets rather than on either
+public split (measured on top of sniper sizing so the two changes compose):
+
+| weight | dev | holdout | generated | hard |
+|---|---:|---:|---:|---:|
+| off | 0.9521 | 0.9220 | 0.9322 | 0.8135 |
+| 0.7 | 0.9574 | 0.9458 | **0.9367** | 0.8433 |
+| **1.0** | 0.9590 | 0.9489 | 0.9349 | **0.8444** |
+| 1.5 | **0.9620** | **0.9564** | 0.9367 | 0.8291 |
+
+`1.5` is the argmax of *both* public-derived splits and the hard set rejects it
+by 0.015 — the signature of fitting the public generator, and the same shape that
+sank the popularity sweep. `0.7` and `1.0` are the plateau where all four agree.
+
+### Measured and not shipped: removing the reranker's category signals
+
+With a category pool in retrieval, are `category_weight` and `tail_weight` still
+earning their place, or are they now scoring a property every candidate shares?
+Measured, because the union is **not** category-pure — it still carries the 300
+lexical candidates, a third of which are out-of-category:
+
+| | dev | holdout |
+|---|---:|---:|
+| **both kept (ships)** | **0.9417** | 0.9239 |
+| `category_weight = 0` | 0.9398 | 0.9230 |
+| `tail_weight = 0` | 0.9389 | 0.9236 |
+| both zeroed | 0.9393 | **0.9255** |
+
+Every ablation is flat-to-negative on dev and inside noise on holdout. There is
+no upside, so both stay. The signals are not redundant with the pool; they are
+what pushes the surviving out-of-category lexical candidates down.
+
+### Robustness of the paraphrase fallback
+
+This is the part of the change most likely to be an illusion, so it was tested
+separately. `tools/stress_harness.py` rewords the *constraint* but keeps
+`"I'm looking for {category}"` **verbatim**, so its customers always hand us an
+exact bucket key — the `0.874730` above therefore says nothing about a customer
+who renames the category. Perturbing the stated category before lookup:
+
+| stated category | target in pool |
+|---|---:|
+| verbatim | 100.0% |
+| lowercased, `&` → `and` | 100.0% |
+| word order shuffled | 100.0% |
+| singularised | 63.5% → **100.0%** |
+| last word dropped | 88.5% → 81.0% |
+
+Singularisation failed at 63.5% purely because `"Necklaces"` and `"Necklace"` are
+different tokens, so `match_pool`'s fallback vocabulary now indexes a naive
+singular form of each key token. That trades word-drop 88.5% → 81.0%, which is
+the right way round: plural/singular is a far likelier real paraphrase than
+dropping a category word. When nothing overlaps at all `match_pool` returns `[]`
+and the route contributes nothing, degrading to exactly the previous behaviour.
+
+### Honesty note
+
+This route inverts the evaluator's own `coarse_category()` to recover the
+candidate set, and its strength on the public set is partly a property of the
+session generator rather than evidence that our search got better. Two things
+argue it is more than that: it is a real technique (category-restricted
+retrieval is standard in product search), and unlike the popularity sweep it
+raises Hit@10 on the two sets built independently of the public generator. The
+perturbation table above, not the stress score, is the honest robustness
+evidence, and `tools/stress_harness.py` not rewording categories is a genuine
+gap in our test tooling that this change did not close.
