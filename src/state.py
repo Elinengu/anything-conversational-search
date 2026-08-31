@@ -38,6 +38,24 @@ NO_PREFERENCE_CUES = re.compile(
     re.IGNORECASE,
 )
 
+# A stall/deferral to a broad question ("I'm still just browsing - ask me
+# about one particular thing and I'll tell you", tools/stress_harness.py's
+# browse-gated customer). Unlike NO_PREFERENCE_CUES this is not a decline of a
+# specific attribute - dead_attributes must not learn from it - but it reveals
+# nothing and must not reach _record_slots either. Without this guard,
+# constraint_spans() (built for the official simulator's templated wording,
+# not freeform text) chunks the sentence on " - " into "i m still just
+# browsing" / "ask me about one particular thing and i ll tell you" and
+# records both as fabricated "feature" slots - polluting the structured
+# retrieval query and falsely marking the turn productive (see
+# docs/team/agent_changes.md change 20).
+STALL_CUES = re.compile(
+    r"\b(still (?:just )?(?:browsing|exploring|looking)|"
+    r"ask me (?:about )?(?:one particular thing|something specific)|"
+    r"not sure (?:yet|what i want))\b",
+    re.IGNORECASE,
+)
+
 PRE_OVERRIDE_WEIGHT = 0.35
 
 
@@ -148,6 +166,19 @@ class DialogState:
         if turn == 1:
             self.opening = message
         declined = bool(message and NO_PREFERENCE_CUES.search(message))
+        # A deferral to a broad question ("still just browsing, ask me
+        # something specific") reveals nothing, but - unlike a true decline -
+        # it is not "no preference for X" and must not deaden the asked
+        # attribute. It still needs the same treatment everywhere else a
+        # decline gets: held out of _record_slots and every retrieval view
+        # (Utterance.declined), and never counted as a productive turn.
+        # turn > 1 only: evaluator.local_evaluator's own browsing opening
+        # template is literally "I'm looking for {category}, but I'm still
+        # exploring." for every browsing session - STALL_CUES would otherwise
+        # exclude turn 1's opening (the single most important utterance for
+        # retrieval) from every browsing session in the entire dataset.
+        stalled = bool(message and turn > 1 and STALL_CUES.search(message))
+        excluded = declined or stalled
         is_override = bool(
             message and OVERRIDE_CUES.search(message) and self.override_turn is None
         )
@@ -161,18 +192,18 @@ class DialogState:
             for attribute, slots in self.active_slots.items()
             for slot in slots
         }
-        self.utterances.append(Utterance(turn=turn, text=message, declined=declined))
-        if message and not declined:
+        self.utterances.append(Utterance(turn=turn, text=message, declined=excluded))
+        if message and not excluded:
             self._record_slots(turn, message)
         # A turn is "productive" when it disclosed a constraint we had not seen.
         # The policy uses this to judge whether broad questions are exhausted; a
-        # decline never counts.
+        # decline (or a stall that discloses nothing) never counts.
         current_slots = {
             (attribute, slot.value)
             for attribute, slots in self.active_slots.items()
             for slot in slots
         }
-        produced = not declined and turn > 1 and (
+        produced = not excluded and turn > 1 and (
             any(span not in known for span in constraint_spans(message))
             or bool(current_slots - known_slots)
         )

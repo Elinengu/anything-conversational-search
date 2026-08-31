@@ -31,7 +31,8 @@ public labels and API contract were **not** touched.
 | + merged `feat/dynamic-context-programming`; DeepSeek listwise rerank measured | Elinengu | 0.921016 | — | change 17; **not on the change-16 lineage** — this branch (`integration/gemini-stress-harness`) carries dual-track routing on by default, which the doc above (change 15) already prices at "costs ~0.013 on the cooperative public sim, gains nothing there" in exchange for the stress-harness robustness gain, so 0.921016 is not comparable to 0.9305 above. Within *this* branch the merge itself moved public 0.91868 → 0.921016 with the LLM off (default). `llm_weight` **stays 0.0 (off) by default** — measured with a real DeepSeek key for the first time: byte-identical on dev at `llm_weight=0.3`, **−0.0074 score / −0.026 MRR** under `paraphrase:heavy+browse-gated` (the practical/realistic stressor), −0.016 score on a public-set slice. Also fixed two tests that assumed no real API key would ever be present |
 | + live structured state and orchestration (branch `dynamic-state-slot`) | Elinengu | **0.9344** | — | change 15 on that branch's own lineage (see its section below); active/superseded slots, rolling pool signals (entropy, leader margin, stagnation streak), plan-driven questions/gating/retrieval, intent transitions and observable snapshots. Merged into `integration/gemini-stress-harness` as change 19, which also rewires change 18's LLM-rerank trigger-gate onto `DialogState.leader_margin` instead of a redundant second deterministic rerank pass |
 | + trigger-gate the LLM rerank on deterministic uncertainty | Elinengu | — | — | change 18; **measured worse than always-on, not better** — 0.78622 vs 0.79269 (both below the 0.80010 baseline) on `paraphrase:heavy+browse-gated`. A 7-session diagnostic (5 regressions demoting a correct #1, 2 rescues including one miss→#1) didn't generalize to the full 60-session set at `llm_trigger_margin=0.20`. Superseded by change 19, not reverted — see its section |
-| + rewire the trigger-gate onto `DialogState.leader_margin` (merge `dynamic-state-slot`) | Elinengu | 0.921497 | — | change 19; same gating *idea* as change 18, now reading the live pool-uncertainty signal `dynamic-state-slot` computes once per turn (`observe_pool`, post-orchestration-reroute) instead of a bespoke second rerank call. **Real gain under stress**: dev −0.0035 (0.9275→0.9240), holdout −0.0070 (0.9125→0.9055) — both inside the team's own "<0.02 is noise" band — vs. **+0.0471 score / hit@10 0.917→0.950 / MRR 0.6342→0.7157** on `paraphrase:heavy+browse-gated`, the practical/realistic stressor. `llm_weight` stays `0.0` (off) per the house rule (must not regress the public score); this is the measured case *for* turning it on as an opt-in Innovation/Presentation/Impact layer, not a default-on change |
+| + rewire the trigger-gate onto `DialogState.leader_margin` (merge `dynamic-state-slot`) | Elinengu | 0.921497 | — | change 19; same gating *idea* as change 18, now reading the live pool-uncertainty signal `dynamic-state-slot` computes once per turn (`observe_pool`, post-orchestration-reroute) instead of a bespoke second rerank call. **Real gain under stress**: dev −0.0035 (0.9275→0.9240), holdout −0.0070 (0.9125→0.9055) — both inside the team's own "<0.02 is noise" band — vs. **+0.0471 score / hit@10 0.917→0.950 / MRR 0.6342→0.7157** on `paraphrase:heavy+browse-gated`, the practical/realistic stressor. `llm_weight` stays `0.0` (off) per the house rule (must not regress the public score); this is the measured case *for* turning it on as an opt-in Innovation/Presentation/Impact layer, not a default-on change. **These numbers are superseded by change 20** — see below |
+| + fix: browse-gated stall text corrupting the active-slot ledger | Elinengu | 0.921497 | — | change 20; found by inspecting change 19's own viewer.html transcripts. `dynamic-state-slot`'s `_record_slots` recorded *every* punctuation-split chunk of *every* customer message as a "feature" slot, unconditionally — including the stress harness's stall sentence ("I'm still just browsing - ask me about one particular thing and I'll tell you"), which also falsely marked those turns "productive," silently disabling the stagnation-detection/recovery machinery `dynamic-state-slot` was built around. Public/dev/holdout **unaffected** (0.921497, unchanged — the official cooperative customer never sends this wording). Re-measuring change 19's own comparison on the same stress condition: **llm_off 0.78794→0.78485, llm_rerank 0.83506→0.81025 — still a real gain (+0.0254), for the intended reason this time** rather than partly riding a broken signal. See its section for a concrete before/after session |
 
 Net: **public 0.859 -> 0.9313, adversarial 0.684 -> 0.8028.** 77/77 tests pass.
 Change 15 is branch `dual_tracking` work (89/89 tests) and does not move the `main` number.
@@ -1582,6 +1583,91 @@ half of the difference is the signal change and which is the merge's other
 concurrent changes (dual-track ramp/timing composition, structured retrieval
 route); not done here for cost (this write-up alone used ~2 hours of real
 DeepSeek-backed stress-harness and sweep runs).
+
+## Change 20 — Fix: browse-gated stall text corrupting the active-slot ledger (Elinengu)
+
+**Files:** `src/state.py` (`STALL_CUES`, `DialogState.observe`) — found by
+inspecting change 19's own `viewer.html` transcripts (user question: "I think
+there is some bugs in state machine ... active slots:
+{'feature':['leaning towards a elastic fastening','i m still just browsing',
+'ask me about one particular thing and i ll tell you']}").
+
+### Problem
+
+`dynamic-state-slot`'s `_record_slots` (merged in change 19) recorded every
+punctuation-split chunk of `constraint_spans(message)` into the `"feature"`
+active-slot bucket for any turn after the first, unconditionally:
+
+```python
+if turn > 1:
+    values.extend(("feature", span, 0.8) for span in constraint_spans(message))
+```
+
+`constraint_spans` was built for the *official* evaluator's customer, which
+only ever sends templated disclosure sentences - splitting on `.;:,` and
+` - ` reliably isolates real constraint values there. `tools/stress_harness.py`'s
+browse-gated customer sends free-form text when it has nothing to disclose:
+
+> "I'm still just browsing - ask me about one particular thing and I'll tell you."
+
+Split on ` - `, that produces two >=2-word non-stopword chunks - "i m still
+just browsing" and "ask me about one particular thing and i ll tell you" -
+and both got recorded as if the customer had disclosed two "feature" values.
+Worse than cosmetic: the same unconditional `constraint_spans(message)` call
+also fed `produced` (turn 195-204 of `state.py`), so a turn where the
+customer explicitly refused to answer was marked **productive**, resetting
+`unproductive_streak` to 0 every time. That streak is the entire input to
+`DialogPhase.STAGNATING` detection, so a session stuck in exactly the loop
+the stress harness exists to probe (broad question -> stonewall -> broad
+question again) could never trigger `dynamic-state-slot`'s own stagnation
+recovery (`retrieval_route="structured"`, the targeted-policy pivot) - the
+mechanism most directly built to handle it.
+
+### What changed
+
+A new cue-based regex, `STALL_CUES` (matching the browse-gated deferral
+language: "still browsing/exploring/looking", "ask me about one particular
+thing", "not sure yet"), gated to `turn > 1` only. **That guard is load-bearing,
+not incidental**: `evaluator/local_evaluator.py`'s own browsing-scenario
+opening template is `"I'm looking for {category}, but I'm still exploring."`
+for *every* browsing session in the dataset - an ungated `STALL_CUES` check
+would have matched "still exploring" in turn 1 and excluded the opening
+itself (the single most important utterance) from every browsing session's
+retrieval view. Caught before it shipped by checking `evaluator/local_evaluator.py`
+directly, not by a failing test.
+
+A stalled message is now treated like a decline for exclusion purposes
+(`Utterance.declined`, held out of `full_text`/`focused_text`/`query_spans`/
+`_record_slots`) but *not* for `dead_attributes` - unlike "I don't have a
+preference for X", a deferral doesn't mean the customer will never answer
+that attribute, only that this broad question didn't work.
+
+### Effect
+
+| | before | after |
+|---|---|---|
+| Public set (official customer never sends this text) | 0.921497 | **0.921497 (unchanged)** |
+| `paraphrase:heavy+browse-gated`, `llm_off` (change 19's baseline) | 0.78794 | 0.78485 |
+| `paraphrase:heavy+browse-gated`, `llm_rerank` (change 19's gated LLM) | 0.83506 | 0.81025 |
+| Gain attributed to the LLM trigger-gate | +0.0471 | **+0.0254 (still real)** |
+| Tests | 125/125 | 125/125 |
+
+Concrete session (`public_0047`, `--customer browse-gated`, `router_off`
+config, traced with `python3 -m tools.stress_observe`): before the fix, a
+total miss over 10 turns (`unproductive_streak` never left 0-1,
+`active_slots` polluted with the stall text, phase stuck `exploring`). After:
+`unproductive_streak` climbs 1, 2, 3 ..., phase correctly flips to
+`stagnating` at turn 3, `retrieval_route` switches to `structured`, and the
+session converts - hit at turn 7, rank 5 (MRR 0.20 instead of 0).
+
+### Why the public score doesn't move
+
+`STALL_CUES` only matches the browse-gated customer's specific deferral
+wording, which the official simulator - fully cooperative, always discloses
+on `ask_attribute` - never produces. This bug was invisible to every number
+this project reports as "the score" and only surfaces on the realism/stress
+harness, which is exactly why it survived a full merge and 125 passing tests
+undetected until someone read the transcripts.
 
 ## Not touched (organizer-owned)
 
