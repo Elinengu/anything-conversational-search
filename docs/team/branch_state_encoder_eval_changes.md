@@ -83,16 +83,19 @@ under that harder customer without hurting the easy one.
 
 ---
 
-**Headline: the S5 dense retrieval route, gated to withhold on the browsing track
-(`dense_route_nobrowse`), resolves its own trade-off and then some - official −0.0002
-(noise-zero, down from −0.0042 ungated), holdout +0.0031 (actually above baseline, not
-just recovered), and 98% of the gain preserved under the realistic worst case this branch
-exists to defend against (+0.0257 of +0.0263, `heavy+browse-gated`). All three
-independent checks agree. This is the strongest, most complete result of the
-investigation: a documented, flag-gated option
-(`RetrievalConfig(use_dense=True, dense_gate_exclude_browsing=True)`), not shipped as a
-new default. All four S6-rerank variants (ungated, two gated, a cleaner query-text
-version) measured net-zero or worse at full scale. The cross-encoder is still blocked.**
+**Headline (revised after §3f/§3g - the earlier version of this line is superseded):
+the embedding line closes. The S5 dense retrieval route gated to the buying track
+(`dense_route_nobrowse`) was this investigation's one result that cleared the noise floor,
+at +0.0257 on `heavy+browse-gated`. Three bugs ported in from a sibling branch (§3f) then
+showed that gain was largely compensating for a broken lexical signal: with
+`constraint_spans()` fixed, the same comparison re-run at 200 sessions gives
+**+0.0042** - 16% of what it was - while the deterministic baseline it is measured against
+rose +0.0098 for free. Official (−0.0002) and holdout (+0.0031) are unchanged by the fixes
+and were always inside the ~0.02 noise floor. **No embedding configuration now clears
+noise on any of the three checks**, and all four S6-rerank variants were already
+net-zero-or-worse at full scale. The recommendation in §3e is withdrawn (§3g). The
+cross-encoder remains blocked. The durable win from this work is the three bug fixes and
+the tooling repair, not the model.**
 
 ---
 
@@ -110,7 +113,7 @@ each stage.
 | S6 rerank | same `dense_weight` term | **state-gated** — withheld on `intent_track=="browsing"` | ✅ measured, 21 sessions — small overall gain, but structurally limited: browsing only lasts 2-3 turns before promoting to buying, so the gate has almost no turns left to act on (§3b, traced directly) |
 | S6 rerank | `dense_query="slots"` — feed it `state.authoritative_text()` instead of the raw conversation | none (unconditional) | ✅ **measured at both 21 and 200 sessions** — 21: **+0.044**; 200: **+0.0023 (noise)**. The small-sample result did not hold (§3c) |
 | **S5 retrieval** — searches the full 50,000-product catalog by meaning, builds the candidate pool | `RetrievalConfig.use_dense` — a 5th RRF-fused route alongside the BM25 ones | **none** — fires unconditionally | ✅ measured, 200 sessions, three ways (§3d): stressed **+0.0263** (clears noise), official **−0.0042**, holdout **−0.0065**. A confirmed trade-off, not shipped unconditionally |
-| S5 retrieval | same `use_dense` route | **state-gated** — withheld on `intent_track=="browsing"` | ✅ **measured, all three checks** (§3e): official **−0.0002**, holdout **+0.0031**, stressed **+0.0257** (98% of the gain kept). Resolves the trade-off - recommended as a documented flag-gated option |
+| S5 retrieval | same `use_dense` route | **state-gated** — withheld on `intent_track=="browsing"` | ⚠️ **re-measured after the §3f bug fixes (§3g)**: official **−0.0002**, holdout **+0.0031**, stressed **+0.0042** (was +0.0257). Nothing clears the noise floor any more - **recommendation withdrawn** |
 | S5 retrieval | same `use_dense` route | **state-gated** on `state.over_general` | ✅ measured, 200 sessions, both customers (§3e) — **no-op again**, matches ungated almost exactly on both, same pattern as the S6 pool-shape gate |
 | Cross-encoder rerank (S6, different model) | scores `(query, candidate)` pairs jointly | top-20 only, fired on state ambiguity signals (Plan Part 4) | ⬜ **blocked** — no reachable model source found, not attempted |
 
@@ -379,6 +382,11 @@ and is measured.
 
 ## 3e. Gating the S5 route - `dense_route_nobrowse` resolves the trade-off
 
+> **Superseded by §3g.** The numbers below are correct as measured, but the baseline they
+> were measured against carried the two bugs fixed in §3f. Re-run on the fixed codebase,
+> the stressed gain falls from +0.0257 to +0.0042 and the recommendation at the end of this
+> section is withdrawn. The mechanism discussion still holds; the conclusion does not.
+
 `RetrievalConfig` gains `dense_gate_over_general` / `dense_gate_exclude_browsing`,
 identically named and worded to `RerankConfig`'s (§3b), and `retrieve()` reuses
 `src.rerank._dense_gate_open` directly rather than duplicating the logic - no circular
@@ -515,6 +523,57 @@ All three fixes are score-neutral on the official set: **0.923487 bit-identical*
 The two branches solved the browsing-policy problem differently - live per-turn here,
 fixed-at-opening there. Neither is ported; they are alternative designs, not a fix and a
 bug.
+
+---
+
+## 3g. Re-measurement after the §3f fixes - the S5 result does not survive
+
+Two of the three bugs in §3f corrupt exactly the paraphrase and browse-gated paths §3d/§3e
+were measured on, so the headline comparison was re-run on the fixed codebase. Same
+configs, same 200-session scale, same three checks:
+
+| check | baseline `router_on` | `dense_route_nobrowse` | gain |
+|---|---|---|---|
+| official (200) — **before** fixes | 0.92349 | 0.92329 | −0.0002 |
+| official (200) — **after** fixes | 0.92349 | 0.92329 | −0.0002 *(unchanged)* |
+| holdout (80) — **before** | 0.9149 | 0.9180 | +0.0031 |
+| holdout (80) — **after** | 0.9149 | 0.9180 | +0.0031 *(unchanged)* |
+| `heavy+browse-gated` (200) — **before** | 0.76086 | 0.78652 | **+0.0257** |
+| `heavy+browse-gated` (200) — **after** | **0.77065** | 0.77480 | **+0.0042** |
+
+Two things happened at once on the stressed customer, and they point the same way:
+
+1. **The baseline rose +0.0098** (0.76086 → 0.77065) with no model involved. That is the
+   §3f fixes paying off directly: `constraint_spans()` now returns `synthetic sole` where
+   it used to return `i d also want it to be synthetic sole`, and `query_spans()` feeds
+   that straight into the reranker's span-coverage term.
+2. **The dense gain fell to 16% of its former size** (+0.0257 → +0.0042). The route was in
+   large part *substituting for the broken lexical signal*. Once the exact-match signal
+   works on paraphrased wording again, there is much less left for the embedding to add.
+
+Official and holdout are bit-identical before and after, which is the expected result and a
+useful control: the fixes only fire on free-form customer wording, which the official
+simulator never produces. It also means the two checks that were already inside the noise
+floor stay there.
+
+**Conclusion: the recommendation in §3e is withdrawn.** `dense_route_nobrowse`'s case rested
+entirely on the stressed +0.0257 being the one number that cleared noise; at +0.0042 it no
+longer does, and neither do official (−0.0002) or holdout (+0.0031). Combined with the four
+S6-rerank variants already measured net-zero-or-worse at full scale (§3, §3b, §3c), **no
+embedding configuration tested on this branch now clears the noise floor on any check.** The
+code stays (flag-gated, `use_dense=False` by default, byte-identical off-path) so the result
+is reproducible and the next person does not repeat it — but it should not be turned on.
+
+This is also the clearest vindication of the project's own measurement discipline: the
++0.0257 was a real, correctly-run, full-scale measurement. It was just measured against a
+baseline that was quietly broken, and only a cross-branch audit surfaced that. Per §3f, no
+`never_retrieved` figure from `tools/observe.py` or `tools/stress_observe` predating
+`e484cbe` should be trusted either.
+
+Not re-run after the fixes: the four S6-rerank variants (§3, §3b, §3c). They were
+net-zero-or-worse beforehand and the fixes raise the baseline they lost to, so re-running
+them could only make their case worse, not better - but the specific post-fix numbers are
+genuinely unmeasured rather than assumed.
 
 ---
 
