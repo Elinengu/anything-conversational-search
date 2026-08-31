@@ -5,14 +5,15 @@ and cross-encoder work from branches `dense_rerank` / `semantic-rerank-experimen
 the live state machine and the paraphrase/browse-gated stress harness, neither of which
 existed when those branches were originally measured.
 
-**Headline: the S5 dense retrieval route (Step 3.4) is a genuine trade-off, confirmed
-across three full-scale measurements - a small, consistent cost on the cooperative
-simulator and holdout split (−0.004 to −0.007, both driven by the same browsing-MRR
-dilution the pre-state-machine bi-encoder attempts documented), bought back several times
-over under the realistic worst case this branch exists to defend against (+0.0263
-overall, +0.0561 browsing, `heavy+browse-gated`). It currently fires unconditionally and
-should not ship that way - the next step is gating it the way Step 3.2 already gates the
-S6 rerank term. All four S6-rerank variants (ungated, two gated, a cleaner query-text
+**Headline: the S5 dense retrieval route, gated to withhold on the browsing track
+(`dense_route_nobrowse`), resolves its own trade-off and then some - official −0.0002
+(noise-zero, down from −0.0042 ungated), holdout +0.0031 (actually above baseline, not
+just recovered), and 98% of the gain preserved under the realistic worst case this branch
+exists to defend against (+0.0257 of +0.0263, `heavy+browse-gated`). All three
+independent checks agree. This is the strongest, most complete result of the
+investigation: a documented, flag-gated option
+(`RetrievalConfig(use_dense=True, dense_gate_exclude_browsing=True)`), not shipped as a
+new default. All four S6-rerank variants (ungated, two gated, a cleaner query-text
 version) measured net-zero or worse at full scale. The cross-encoder is still blocked.**
 
 ---
@@ -30,7 +31,9 @@ each stage.
 | S6 rerank | same `dense_weight` term | **state-gated** on `state.over_general` (pool has stopped discriminating) | ✅ measured, 21 sessions — **identical to ungated**; the gate never closed on this subset (§3b) |
 | S6 rerank | same `dense_weight` term | **state-gated** — withheld on `intent_track=="browsing"` | ✅ measured, 21 sessions — small overall gain, but structurally limited: browsing only lasts 2-3 turns before promoting to buying, so the gate has almost no turns left to act on (§3b, traced directly) |
 | S6 rerank | `dense_query="slots"` — feed it `state.authoritative_text()` instead of the raw conversation | none (unconditional) | ✅ **measured at both 21 and 200 sessions** — 21: **+0.044**; 200: **+0.0023 (noise)**. The small-sample result did not hold (§3c) |
-| **S5 retrieval** — searches the full 50,000-product catalog by meaning, builds the candidate pool | `RetrievalConfig.use_dense` — a 5th RRF-fused route alongside the BM25 ones | none — fires unconditionally | ✅ **measured, 200 sessions, three ways** (§3d): stressed **+0.0263** (clears noise), official **−0.0042**, holdout **−0.0065** (both within noise, same browsing-MRR-dilution mechanism). A confirmed trade-off, not shipped unconditionally |
+| **S5 retrieval** — searches the full 50,000-product catalog by meaning, builds the candidate pool | `RetrievalConfig.use_dense` — a 5th RRF-fused route alongside the BM25 ones | **none** — fires unconditionally | ✅ measured, 200 sessions, three ways (§3d): stressed **+0.0263** (clears noise), official **−0.0042**, holdout **−0.0065**. A confirmed trade-off, not shipped unconditionally |
+| S5 retrieval | same `use_dense` route | **state-gated** — withheld on `intent_track=="browsing"` | ✅ **measured, all three checks** (§3e): official **−0.0002**, holdout **+0.0031**, stressed **+0.0257** (98% of the gain kept). Resolves the trade-off - recommended as a documented flag-gated option |
+| S5 retrieval | same `use_dense` route | **state-gated** on `state.over_general` | ✅ measured, 200 sessions, both customers (§3e) — **no-op again**, matches ungated almost exactly on both, same pattern as the S6 pool-shape gate |
 | Cross-encoder rerank (S6, different model) | scores `(query, candidate)` pairs jointly | top-20 only, fired on state ambiguity signals (Plan Part 4) | ⬜ **blocked** — no reachable model source found, not attempted |
 
 **In short: all four S6-rerank variants are net-zero-or-worse at full scale. The S5
@@ -296,20 +299,82 @@ and is measured.
 
 ---
 
+## 3e. Gating the S5 route - `dense_route_nobrowse` resolves the trade-off
+
+`RetrievalConfig` gains `dense_gate_over_general` / `dense_gate_exclude_browsing`,
+identically named and worded to `RerankConfig`'s (§3b), and `retrieve()` reuses
+`src.rerank._dense_gate_open` directly rather than duplicating the logic - no circular
+import (`rerank.py` does not import `retrieval.py`), and the function is duck-typed
+against the two config fields, so it works unchanged against a `RetrievalConfig`. Three
+new `tools/sweep.py` rows mirror the S6 gate rows: `dense_route_gate` (pool-shape alone),
+`dense_route_nobrowse` (track exclusion alone), `dense_route_gate_nobrowse` (both).
+`starter/agent.py` threads `track=track_name` through both `retrieve()` call sites, and 4
+new `DenseRouteTests` (`tests/test_components.py`) passed on the first run - the
+track/`state.intent_track` precedence bug §3b caught and fixed is shared by construction,
+so this reuse was protected from it automatically.
+
+Measured at full 200-session scale, both customers:
+
+| | router_on | dense_route_all | dense_route_gate | dense_route_nobrowse | dense_route_gate_nobrowse |
+|---|---|---|---|---|---|
+| **official** (200, cooperative) | 0.92349 | 0.91931 (−0.0042) | 0.91851 (−0.0050) | **0.92329 (−0.0002)** | 0.92315 (−0.0003) |
+| **heavy+browse-gated** (200, stressed) | 0.76086 | 0.78718 (+0.0263) | 0.78629 (+0.0254) | **0.78652 (+0.0257)** | 0.78401 (+0.0232) |
+
+**`dense_route_gate` (pool-shape alone) is a no-op again**, on both customers - matching
+`dense_route_all` almost exactly everywhere. Same pattern as `dense_rr_gate` in §3b:
+`state.over_general` does not discriminate the turns where this route actually helps or
+hurts.
+
+**`dense_route_nobrowse` (track exclusion alone) resolves the trade-off cleanly.** On
+`official`, browsing MRR is 0.8716 vs `router_on`'s 0.8715 - an almost exact match, the
+cooperative cost is gone. On `heavy+browse-gated`, it keeps +0.0257 of the ungated
+route's +0.0263 - **98% of the stress-side gain survives**. `dense_route_gate_nobrowse`
+(both gates together) is close behind but strictly worse than `nobrowse` alone on both
+customers - the pool-shape gate adds restriction without benefit, consistent with it
+being a no-op on its own.
+
+**Why the same gate behaves so differently on the two customers - the mechanism from §3b,
+now working in the exclusion's favour.** Under `heavy+browse-gated`, sessions promote out
+of `intent_track=="browsing"` within 2-3 turns and stay `"buying"` for the rest of a
+longer session (§3b, traced directly); most of the turns that decide the outcome happen
+after promotion, outside the gate's reach, so most of the gain survives untouched. Under
+the cooperative customer, disclosure and convergence are faster - more of a browsing
+session's scoring-decisive turns land *before* promotion completes, which is exactly
+where the cost was concentrated, so excluding that window removes it almost entirely.
+Not a designed property of the gate; an empirical asymmetry this measurement surfaced.
+
+**Confirmed on holdout too, and it goes further than "cost eliminated."**
+`tools/sweep.py --split holdout --configs router_on,dense_route_all,dense_route_nobrowse`
+(80 sessions - the split this project's own convention treats as the actual gate, dev
+selects/holdout gates):
+
+| | router_on | dense_route_all | dense_route_nobrowse |
+|---|---|---|---|
+| holdout (80) | 0.9149 | 0.9084 (−0.0065) | **0.9180 (+0.0031)** |
+| browsing MRR (holdout) | 0.87 | 0.80 | **0.89** |
+
+On holdout, `dense_route_nobrowse` doesn't just recover the ungated route's cost - it
+scores *above* `router_on`, and browsing MRR (0.89) is the highest of all three
+configurations, including the un-gated baseline. All three independent checks now point
+the same way: official −0.0002 (noise-zero), holdout **+0.0031**, stressed **+0.0257**.
+
+**Recommendation: `dense_route_nobrowse` is the S5 configuration worth keeping as a
+documented, flag-gated option** - `RetrievalConfig(use_dense=True,
+dense_gate_exclude_browsing=True)`. Not shipped as a new default; `use_dense` stays
+`False` by default, unchanged. `dense_route_gate` and the redundant
+`dense_route_gate_nobrowse` combination are not worth carrying forward as separate rows.
+
+---
+
 ## 4. What has not been checked
 
-- **Gating `use_dense` on the state machine's own signals** (`state.over_general`,
-  `intent_track`), the way `_dense_gate_open` already does for the S6 rerank term (§3b) -
-  motivated directly by the robustness result above: `dense_route_all` fires
-  unconditionally and has a real (if small) cooperative cost, so a gate that gives it up
-  only when word-matching has visibly stopped working is the natural next step. Not
-  designed or coded for the retrieval route yet.
-- **Whether §3d's result is stable across a second run** - RRF fusion and ONNX inference
-  are deterministic here in principle, but this has not been independently re-run to
-  confirm, only reasoned about.
-- **Whether combining §3d (S5 retrieval) with §3c (slots query text) does better than
-  either alone** - untested. §3d used `full_text()` for its query (the default); §3c
-  showed query-text quality plausibly matters more on this branch than it used to.
+- **Whether §3d/§3e's results are stable across a second run** - RRF fusion and ONNX
+  inference are deterministic here in principle, but this has not been independently
+  re-run to confirm, only reasoned about.
+- **Whether combining §3e (gated S5 retrieval) with §3c (slots query text) does better
+  than either alone** - untested. §3d/§3e used `full_text()` for the query (the
+  default); §3c showed query-text quality plausibly matters more on this branch than it
+  used to.
 - **Full 200-session comparison of the ungated S6 term** (`dense_rr_10`, no
   `--targets generic` filter) - the original §3 result (net −0.016) has only ever been
   measured on the 21-session subset. Given how differently `dense_rr_slots` behaved at
@@ -351,9 +416,15 @@ python3 tools/stress_harness.py --customer paraphrase:heavy+browse-gated \
 # §3d robustness: cooperative simulator + holdout split
 python3 tools/stress_harness.py --customer official --configs router_on,dense_route_all
 python3 tools/sweep.py --split holdout --configs router_on,dense_route_all
+
+# §3e - the recommended gated variant, both customers
+python3 tools/stress_harness.py --customer official \
+    --configs router_on,dense_route_all,dense_route_gate,dense_route_nobrowse,dense_route_gate_nobrowse
+python3 tools/stress_harness.py --customer paraphrase:heavy+browse-gated \
+    --configs router_on,dense_route_all,dense_route_gate,dense_route_nobrowse,dense_route_gate_nobrowse
 ```
 
-Everything above is off by default (`dense_weight=0.0`, `use_dense=False`, both
+Everything above is off by default (`dense_weight=0.0`, `use_dense=False`, all four
 `dense_gate_*` fields `False`); the official evaluator and the full test suite are
 unaffected regardless of artifact presence - `python3 -m evaluator.local_evaluator` still
-reads **0.923487**, `python3 -m unittest discover -s tests -t .` still passes 123/123.
+reads **0.923487**, `python3 -m unittest discover -s tests -t .` still passes 127/127.

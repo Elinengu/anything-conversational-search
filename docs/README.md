@@ -43,7 +43,7 @@ Everything under [`team/`](team/) is ours to edit freely.
 | [`team/dual_track_routing.md`](team/dual_track_routing.md) | (branch `dual_tracking`) making Buying/Browsing routing drive behaviour, and why it stayed on a branch |
 | [`team/dense_rerank.md`](team/dense_rerank.md) | (branch `dense_rerank`) `bge-small` embedding cosine as an S6 rerank signal, tested under paraphrase: helps only the degenerate tail, wash on the full set |
 | [`team/dense_route.md`](team/dense_route.md) | (branch `dense_rerank`) same `bge-small` as an S5 retrieval route, browsing-track-only — recovers **none** of the `never_retrieved` tail, slightly negative overall |
-| [`team/branch_state_encoder_eval_changes.md`](team/branch_state_encoder_eval_changes.md) | (branch `state-encoder-eval`) re-running the dense work against the live state machine — four S6 rerank variants net-zero-or-worse at full scale; the S5 dense retrieval route is a confirmed trade-off: +0.0263 under stress, −0.004 to −0.007 cooperative/holdout, not yet gated |
+| [`team/branch_state_encoder_eval_changes.md`](team/branch_state_encoder_eval_changes.md) | (branch `state-encoder-eval`) re-running the dense work against the live state machine — four S6 rerank variants net-zero-or-worse at full scale; the S5 dense retrieval route, gated to withhold on the browsing track, resolves its own cooperative/holdout trade-off while keeping 98% of the stressed-customer gain |
 
 Each `.md` has a `.pdf` rendering beside it; regenerate with
 `python3 tools/md_to_pdf.py <file>.md <file>.pdf` (a lightweight reportlab
