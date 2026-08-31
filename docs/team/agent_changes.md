@@ -27,6 +27,8 @@ public labels and API contract were **not** touched.
 | + pool-aware clarification wording | KW | 0.9305 | 0.8020 | change 13; **score-neutral by construction** — `ask_attribute` unchanged, simulator never reads `message`. Realism for Pillar II / Presentation |
 | + track-aware turn-2 gating | xiaotong0329 | **0.9313** | **0.8028** | change 14; PR #7 — one config knob (`buying_confidence_margin`); the accompanying `src/context_programming.py` module is built but not wired into any decision — verified by ablation |
 | + live structured state and orchestration | Elinengu | **0.9344** | — | change 15; active/superseded slots, rolling pool signals, plan-driven questions/gating/retrieval, intent transitions and observable snapshots |
+| *(subsequent, unrelated branch work — dense retrieval/rerank gating, browsing-policy retune — moves the measured baseline to public 0.923487 / holdout 0.9149; see `docs/team/branch_state_encoder_eval_changes.md` line 138. Change 16 below measures against that baseline, not 0.9344.)* | | | | |
+| + opt-in LLM semantic rerank (DeepSeek), gated | Elinengu | 0.9235 → **0.9252** | not measured | change 16; **off by default** (`llm_weight=0.0`) — see below for the full split table |
 
 Net: **public 0.859 -> 0.9313, adversarial 0.684 -> 0.8028.** 77/77 tests pass.
 The fourteen core-agent changes are detailed below; supporting tooling and docs follow.
@@ -1361,3 +1363,124 @@ another.
 The score is not the only purpose of this work—the main result is that state can
 now be inspected and the plan changes real behavior—but the measurements show
 that wiring it in did not buy the architecture by sacrificing retrieval quality.
+
+## Change 16 — Opt-in LLM semantic reranking, gated on pool ambiguity (Elinengu)
+
+**Files:** `src/llm.py` (new), `src/rerank.py`, `starter/agent.py`,
+`tools/sweep.py`, `tools/observe.py`, `tests/test_llm.py` (new),
+`tests/test_components.py` — commits `10ab28f`, `d8d6718`, `0c1f9bc`
+
+### Problem
+
+`docs/team/ideas_to_integrate_llm.md` §Tier 2 #3 named "LLM semantic
+reranking (opt-in layer over the top ~15-20)" as a Pillar I checkbox the
+agent had no code for — a cross-encoder attempt existed and was measured and
+removed (change 11: `semantic-rerank` branch, lost on every split at 13x
+latency), but nothing using an actual instruction-following model had been
+tried. The open question, stated exactly by the user: does a real LLM call
+help enough to justify the network dependency, on both the cooperative
+public set and the realistic `paraphrase:heavy+browse-gated` stress harness
+— without regressing the offline score floor the submission rules protect.
+
+### What changed
+
+`src/llm.py` adds `LLMConfig` + `LLMReranker`, a stdlib-only (`urllib`)
+client for DeepSeek's chat-completions endpoint. `rank()` sends the
+conversation's `state.authoritative_text()` plus a batch of candidate
+`{asin, text}` pairs and asks for a best-first JSON ordering; it returns
+`None` on *any* failure at all — no key, network error, timeout, a
+non-JSON reply, an id the model invented — and the caller treats `None`
+identically to "no opinion this turn."
+
+`src/rerank.py` fuses that ordering into the existing lexical score exactly
+the way `dense_weight` fuses the embedding cosine — never a replacement:
+
+```
+RerankConfig.llm_weight      = 0.0   # off unless a config sets it
+RerankConfig.llm_gate_margin = 0.05  # only ask when the pool has no clear leader
+RerankConfig.llm_depth       = 8     # only the lexically-sorted head is reorderable
+```
+
+`_llm_gate_open()` mirrors `_dense_gate_open()` (Step 3.2, this same
+branch): it reads `state.leader_margin` from the *previous* turn's observed
+pool. A pool with a confident lexical leader has nothing to gain from a
+nondeterministic network call and everything to lose; an ambiguous one
+(`leader_margin < 0.05`) is exactly where a semantic read of the candidates
+can break a tie that exact-token matching cannot see. `llm_weight` stays
+`0.0` in every existing config and the shipped default — the offline
+BM25 + span pipeline runs identically with the network disabled, per
+`README.md`'s "Disclosure": *"the submission rules reserve the right to
+score under network restrictions, and an agent that scores zero in that
+environment is worth less than one that scores 0.8592 everywhere."*
+
+Two named configs (`tools/sweep.py`) exercise it: `llm_rerank_always`
+(`llm_gate_margin=0.0`, fires every turn) and `llm_rerank_gated` (the
+measured row below).
+
+**Side fix, found while building this:** `tools/observe.py`'s tracing
+probes (`install_probes()`) predated the `track=`/`embed=`/`qvec=` keywords
+`retrieve()`/`rerank()` now accept. Every traced call raised `TypeError`
+inside `Agent.respond()`'s broad `except Exception`, so **every**
+`tools/observe.py` run — not just this change's — silently degraded every
+turn to the empty fallback response and reported 100% `never_retrieved`.
+Fixed with `**kwargs` forwarding on both probes (commit `10ab28f`); verified
+`tools/observe.py --limit 5` now reports `hit 1.000, score 0.9107` instead
+of `0/5`. `--config <name>` was also added so a named `tools/sweep.py`
+config (not just the default `AgentConfig()`) can be traced into its own
+`viewer.html` (commit `0c1f9bc`) — used to produce the two viewer files
+below.
+
+### Effect
+
+Baseline is the branch's current measured state (public `0.923487`, holdout
+`0.9149` — see the score-progression table above; `Change 15`'s `0.9344` predates
+later, unrelated branch commits). All four rows below are **live DeepSeek
+calls**, not a simulation.
+
+| split (sessions) | baseline score | `llm_rerank_gated` score | Δ score | baseline MRR | `llm_rerank_gated` MRR | Δ MRR |
+|---|---|---|---|---|---|---|
+| dev (120, cooperative) | 0.9292 | 0.9280 | −0.0012 (noise) | 0.893 | 0.889 | −0.004 |
+| holdout (80, cooperative) | 0.9149 | **0.9215** | **+0.0066** | 0.862 | **0.884** | **+0.022** |
+| public set (200, official `evaluator.local_evaluator` config) | 0.923487 | **0.925362** | **+0.0019** | 0.8810 | **0.8872** | **+0.0062** |
+| stress: `paraphrase:heavy+browse-gated` (200) | 0.76086 | **0.76798** | **+0.0071** | 0.6249 | **0.6476** | **+0.0227** |
+
+`hit@10` never regresses on any split (stays `1.000` on dev/holdout/public,
+flat `0.885` under stress) — every score movement above is pure ranking,
+never recall. Per-scenario, the gain is concentrated in **buying**
+(stress MRR `0.6896 → 0.7408`, +0.051) and, under stress specifically,
+**browsing** (`0.4867 → 0.5283`, +0.042 — the hardest bucket, where a vague
+opening leaves the lexical pool least discriminating). The one real cost is
+**intent_override** under stress (`0.7753 → 0.6892`, −0.086): a reversed
+preference is exactly the case where the model's own judgment of "what the
+customer wants" can disagree with the state machine's `focused_text()`
+about which turns still count. Dev's tiny net negative sits entirely inside
+the ±0.02 noise band this project treats as indistinguishable from flat.
+
+The public-set number was measured twice, independently: `tools/sweep.py
+--split all` (0.9252) and `tools/observe.py --config llm_rerank_gated`
+(0.925362) agree to within 0.0002 — the small residual is expected
+call-to-call nondeterminism in the live model (`temperature=0.0` reduces but
+does not eliminate it; `ideas_to_integrate_llm.md` names this risk
+explicitly), not a measurement error. `runs/baseline-*/viewer.html` and
+`runs/llm_rerank_gated-*/viewer.html` hold the full 200-session traces this
+table is built from.
+
+### Why this stays off by default
+
+Every split moved flat-to-positive and none regressed hit@10, so the layer
+is a genuine, measured win where the network is available — but three
+things keep `llm_weight=0.0` the shipped default rather than flipping it on:
+the offline score floor is a hard guarantee this project has kept since
+change 11 (a network-restricted scoring run must still get `0.923487`, not
+degrade unpredictably); the gain size (`+0.002` to `+0.007` on the sets that
+matter) sits inside or just outside this project's own noise band, the same
+territory change 9's "measured no-change" and change 13's "score-neutral by
+construction" occupy; and the one real regression (`intent_override` under
+stress, −0.086 MRR) is a genuine trade-off, not settled by one measurement
+run. The layer is built, tested (`tests/test_llm.py`, `LLMRerankTests` in
+`tests/test_components.py` — 152/152 total), wired through `tools/sweep.py`
+and `tools/observe.py` for anyone who wants to re-run it with
+`DEEPSEEK_API_KEY` set, and available as `AgentConfig(llm=LLMConfig(enabled=True),
+rerank=RerankConfig(llm_weight=1.0))` for a network-enabled demo — exactly
+the "opt-in layer with a deterministic fallback" `ideas_to_integrate_llm.md`
+called for.

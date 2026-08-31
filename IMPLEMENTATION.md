@@ -1018,11 +1018,53 @@ candidates on the right leaf. It is worth **+0.0058** on the public set and **+0
 adversarial set, entirely through better ordering — hit rate does not move on either set, which
 is exactly what a reranking signal should look like (`RerankConfig.tail_weight = 0.8`).
 
+**Later addition — opt-in LLM semantic reranking (DeepSeek), gated on pool ambiguity.**
+Every signal above is exact-token: `span_coverage`, facet agreement and the category
+tail match all go to zero the moment a candidate says "cowhide" where the customer said
+"leather". A real language model can read past that. `src/llm.py` adds a small client
+(`urllib` only, no new dependency) for DeepSeek's chat API: once per turn it can be shown
+the top handful of already-ranked candidates and asked to reorder them by how well each
+matches the conversation so far.
+
+Two design choices keep this from ever costing the guaranteed offline score. First, it is
+*fused*, not a replacement: the model's suggested order becomes one more additive term in
+`rerank()`'s scoring formula (`RerankConfig.llm_weight`, same shape as `dense_weight`), so
+a bad reorder from the model can only nudge the ranking, never override the lexical
+evidence outright. Second, it is *gated*: `RerankConfig.llm_gate_margin` reads
+`state.leader_margin` — the previous turn's gap between the top two candidates — and only
+calls the model when that gap is small (`< 0.05`, the same signal `dense_gate_over_general`
+already uses). A pool with a clear lexical leader has nothing to gain from a second,
+nondeterministic opinion; an undecided one is exactly where a semantic read can break a
+tie exact-token matching cannot see. `RerankConfig.llm_weight = 0.0` by default, so nothing
+about the shipped agent's offline guarantee changes — every existing test and config still
+runs with zero network calls.
+
+`LLMReranker.rank()` treats *any* failure — no API key, a timeout, a malformed reply, an
+id the model invented — as "no opinion" and returns `None`; `rerank()` then leaves the
+lexical order exactly as it was. There is no path where a flaky network call can make a
+turn score worse than leaving the layer off.
+
 #### Measured effect
 
 **0.7799 → 0.8543** for verbatim span coverage — the single largest gain after dialog state.
 The signals added since (facet agreement, category agreement, and the category tail match) are
 recorded per change in `agent_changes.md`.
+
+**The LLM layer, measured with live DeepSeek calls (change 16, `agent_changes.md`), against
+this branch's current baseline (public `0.923487`):**
+
+| split | offline baseline | with the LLM layer on, gated | Δ |
+|---|---|---|---|
+| public set (200, official) | 0.923487 | 0.925362 | +0.0019 |
+| holdout (80) | 0.9149 | 0.9215 | +0.0066 |
+| stress: `paraphrase:heavy+browse-gated` | 0.76086 | 0.76798 | +0.0071 |
+| dev (120) | 0.9292 | 0.9280 | −0.0012 (noise) |
+
+`hit@10` never regresses anywhere — the layer only ever moves ordering. It stays off by
+default (`RerankConfig.llm_weight = 0.0`): the gains are real but small (inside or just past
+this project's own noise floor), and one scenario — `intent_override` under stress — gets
+measurably worse (MRR `0.7753 → 0.6892`), a genuine trade-off rather than something one run
+settles. See `agent_changes.md` change 16 for the full per-scenario breakdown.
 
 #### Ideas for this stage
 
@@ -1046,6 +1088,12 @@ recorded per change in `agent_changes.md`.
   never mentions grey was merely left unrewarded, not pushed down. This ships as
   `RerankConfig.facet_conflict_weight` (`_facet_conflicts`), judged against `focused_text()`
   and guarded so that silence is never punished.
+- ~~**LLM semantic reranking (Tier 2 #3, `docs/team/ideas_to_integrate_llm.md`).**~~ **Built,
+  measured, kept — off by default.** Unlike the cross-encoder (change 11, removed), a real
+  DeepSeek call fused into the top of the pool and gated on `state.leader_margin` moves every
+  split flat-to-positive with `hit@10` never regressing — but the gain is small and one
+  scenario (`intent_override` under stress) regresses, so `RerankConfig.llm_weight` ships at
+  `0.0` rather than flipping the default. See the measured-effect table above and change 16.
 - **Correct the retrieval score's length bias at its source.** The near-miss anatomy says the
   impostor wins on the retrieval score alone, and the reason is BM25's length normalisation
   favouring thin listings. Three attempts to correct it *after* the fact — as an additive

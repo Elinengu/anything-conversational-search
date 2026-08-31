@@ -68,6 +68,12 @@ replacing it), local scorer as fallback.
   exact-string-match target. Mitigate: fusion with low weight, plateau-swept,
   disqualify on any public hit@10 regression.
 - Note: a `semantic-rerank-experiment` branch already exists.
+- **Status: built and measured with a real DeepSeek call** (`src/llm.py`,
+  `agent_changes.md` change 16) - fused (not replacing) and gated on
+  `state.leader_margin`, exactly as prescribed above. Every split moved
+  flat-to-positive with hit@10 never regressing, but the size of the gain
+  and one scenario regression (`intent_override` under stress) kept it an
+  available, tested, off-by-default layer rather than the shipped default.
 
 ### 4. Paraphrase-robust constraint extraction
 
