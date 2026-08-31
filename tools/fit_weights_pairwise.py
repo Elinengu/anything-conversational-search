@@ -27,7 +27,7 @@ import json
 import sys
 import types
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -48,6 +48,7 @@ from evaluator.local_evaluator import (
     normalize_recommendations,
 )
 from src.facets import extract, extract_query_facets
+from src.index import load_index
 from src.rerank import (
     RerankConfig,
     _category_match,
@@ -64,6 +65,23 @@ from tools.fit_common import FITTED, Scorer, make_config, scalar_from_sessions
 LENGTH_BONUS = 0.12
 DEPTH = 300
 CS = (0.1, 1.0, 10.0)
+
+_IDX_PRODS: dict = {}
+
+
+def index_products(catalog: str) -> dict:
+    """The reranker sees index.products (has the token-joined 'text' blob),
+    NOT the evaluator's raw catalog_index() dicts. Feature helpers need 'text'."""
+    if catalog not in _IDX_PRODS:
+        _IDX_PRODS[catalog] = load_index(catalog).products
+    return _IDX_PRODS[catalog]
+
+
+class Log(list):
+    """A list that echoes every appended line to stdout as it lands."""
+    def append(self, item):
+        print(item, flush=True)
+        super().append(item)
 
 
 @dataclass
@@ -267,13 +285,16 @@ def fit_one_C(diffs: list, C: float):
     return clf.coef_[0]
 
 
-def fit_pairwise(diffs: list, scorer: Scorer, log: list):
-    """Try each C, convert to weights, pick the C with the best dev Scorer score."""
+def fit_select_C(diffs: list, scorer: Scorer, log: list):
+    """Try each C, convert to weights, pick the C with the best dev Scorer score.
+
+    Run once, on iteration 0's synthesized pairs; the chosen C is then reused for
+    the weight-dependent re-fits so the iterate loop costs one dev pass per step
+    (dev is the fitting set, so selecting C on it is allowed - house rules)."""
     best = None
     for C in CS:
         c = fit_one_C(diffs, C)
         scale = float(c[0])
-        raw = {f"idx{i}": float(v) for i, v in enumerate(c)}
         if scale <= 0:
             log.append(f"  C={C}: DEGENERATE span_cov coef {scale:.4f} <= 0 - skipped")
             continue
@@ -288,6 +309,17 @@ def fit_pairwise(diffs: list, scorer: Scorer, log: list):
         raise RuntimeError("all C values degenerate - pairwise signal disagrees "
                            "with span coverage as the unit")
     return best  # (dev_score, C, weights, coef, negatives_wanted)
+
+
+def fit_fixed_C(diffs: list, C: float, scorer: Scorer, log: list):
+    c = fit_one_C(diffs, C)
+    scale = float(c[0])
+    if scale <= 0:
+        raise RuntimeError(f"C={C}: degenerate span_cov coef {scale:.4f} <= 0")
+    w = coef_to_weights(c)
+    neg = _negatives_wanted(c)
+    sc = scorer.score(w)
+    return sc, C, w, c, neg
 
 
 def _negatives_wanted(c: np.ndarray) -> dict:
@@ -330,17 +362,22 @@ def run_variant(variant: str, data: dict, top_neg: int, iters: int, log: list) -
     trajectory = []
     w_prev = baseline
     chosen = None
+    fixed_C = None
     for i in range(iters + 1):
         src_w = baseline if i == 0 else w_prev
         snaps, sess = snapshot_pass(src_w, variant, data)
         # fidelity of this transcript's own scalar (informational)
         snap_scalar = scalar_from_sessions(sess)["score"]
-        diffs, skipped = build_pairs(snaps, data["prods"], top_neg)
+        diffs, skipped = build_pairs(snaps, index_products(data["catalog"]), top_neg)
         log.append(f"iter {i}: snapshots={len(snaps)} (skipped {skipped} no-target-in-head)  "
                    f"pairs={len(diffs)}  transcript-from={_fmt(src_w) if i else 'baseline'}  "
                    f"snap_dev_scalar={snap_scalar:.6f}")
-        dev_score, C, w, coef, neg = fit_pairwise(diffs, scorer, log)
-        log.append(f"iter {i}: PICKED C={C}  dev={dev_score:.6f}  weights={_fmt(w)}")
+        if fixed_C is None:
+            dev_score, C, w, coef, neg = fit_select_C(diffs, scorer, log)
+            fixed_C = C
+        else:
+            dev_score, C, w, coef, neg = fit_fixed_C(diffs, fixed_C, scorer, log)
+        log.append(f"iter {i}: C={C}  dev={dev_score:.6f}  weights={_fmt(w)}")
         trajectory.append({"iter": i, "C": C, "dev": dev_score, "weights": w,
                            "coef": [float(x) for x in coef], "neg_wanted": neg,
                            "snapshots": len(snaps), "pairs": len(diffs), "skipped": skipped})
@@ -355,7 +392,7 @@ def run_variant(variant: str, data: dict, top_neg: int, iters: int, log: list) -
         else:
             w_prev = w
             chosen = w
-    return {"trajectory": trajectory, "w_final": chosen, "scorer_evals": scorer.evals}
+    return {"trajectory": trajectory, "w_final": chosen, "scorer": scorer}
 
 
 # --------------------------------------------------------------------------- #
@@ -413,28 +450,24 @@ def main() -> int:
         return 0 if ok else 1
 
     variants = ["plain", "default"] if args.variant == "both" else [args.variant]
-    log: list[str] = []
+    log: list = Log()
     result: dict = {}
     for v in variants:
         r = run_variant(v, data, args.top_neg, args.iters, log)
         w = r["w_final"]
         snapped = fit_common.snap(w)
-        scorer = Scorer(data, v, "dev")
-        pl_raw = fit_common.plateau(w, scorer)
+        scorer = r["scorer"]
         pl_snap = fit_common.plateau(snapped, scorer)
-        log.append(f"\n--- {v}: w_final     = {_fmt(w)}")
-        log.append(f"--- {v}: snapped     = {_fmt(snapped)}")
-        log.append(f"--- {v}: plateau(raw)  base={pl_raw['_base']:.6f}")
-        for k in FITTED:
-            log.append(f"      {k:22s} x0.5={pl_raw[k][0.5]:.6f}  x1.5={pl_raw[k][1.5]:.6f}")
-        log.append(f"--- {v}: plateau(snap) base={pl_snap['_base']:.6f}")
+        raw_base = scorer.score(w)
+        log.append(f"\n--- {v}: w_final (raw argmax) = {_fmt(w)}  dev={raw_base:.6f}")
+        log.append(f"--- {v}: snapped (rounded)     = {_fmt(snapped)}")
+        log.append(f"--- {v}: plateau(snapped) base={pl_snap['_base']:.6f}  (dev score at +/-50% per weight)")
         for k in FITTED:
             log.append(f"      {k:22s} x0.5={pl_snap[k][0.5]:.6f}  x1.5={pl_snap[k][1.5]:.6f}")
-        result[v] = {"trajectory": r["trajectory"], "w_final": w, "snapped": snapped,
-                     "plateau_raw": {k: pl_raw[k] for k in FITTED} | {"_base": pl_raw["_base"]},
+        result[v] = {"trajectory": r["trajectory"], "w_final": w, "w_final_dev": raw_base,
+                     "snapped": snapped,
                      "plateau_snap": {k: pl_snap[k] for k in FITTED} | {"_base": pl_snap["_base"]}}
 
-    print("\n".join(log))
     if args.out:
         Path(args.out).write_text(json.dumps(result, indent=2, default=str) + "\n")
         print(f"\nwrote {args.out}")

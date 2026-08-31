@@ -146,6 +146,15 @@ def build_configs(catalog: str) -> dict[str, AgentConfig]:
         "weights_argmax": AgentConfig(rerank=RerankConfig(
             popularity_weight=0.8, retrieval_weight=0.1, facet_weight=0.5,
             tail_weight=1.2, facet_conflict_weight=0.0)),
+        # Pairwise-logistic (linear RankNet) fitted weights - branch
+        # kwongweng_fit_pairwise, docs/team/pairwise.md. Exploratory - NOT a shipping candidate.
+        # Rounded, plateau-checked vectors from tools/fit_weights_pairwise.py (dev-only fit).
+        "fit_pairwise_plain": AgentConfig(use_router=False, policy=FixedPolicy(),
+            rerank=RerankConfig(popularity_weight=1.5, retrieval_weight=0.0, facet_weight=0.3,
+                category_weight=0.3, tail_weight=0.5, pair_weight=0.2, facet_conflict_weight=0.05)),
+        "fit_pairwise_default": AgentConfig(rerank=RerankConfig(
+                popularity_weight=1.2, retrieval_weight=0.0, facet_weight=0.2,
+                category_weight=0.3, tail_weight=0.5, pair_weight=0.2, facet_conflict_weight=0.05)),
         # Pool-aware clarification wording (src/phrasing.py). ask_attribute is
         # unchanged and the simulator never reads `message`, so these two must
         # score bit-for-bit identically - the row exists to prove that.
