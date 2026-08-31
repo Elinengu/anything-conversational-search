@@ -13,3 +13,8 @@ tokenizers>=0.15
 # Build-time only (tools/build_embeddings.py, run once on a dev machine to
 # produce data/embeddings/*). NOT needed for scoring:
 #   pip install huggingface_hub
+#
+# Offline experiment tooling only (tools/fit_weights_pairwise.py, the
+# weight-learning fitter described in docs/team/pairwise.md). NOT needed for
+# scoring, and not imported by anything on the agent's path:
+#   pip install numpy scikit-learn
