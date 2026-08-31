@@ -444,6 +444,80 @@ dense_gate_exclude_browsing=True)`. Not shipped as a new default; `use_dense` st
 
 ---
 
+## 3f. Cross-branch audit vs `integration/gemini-stress-harness` - three bugs ported in
+
+This branch and `integration/gemini-stress-harness` both branch from the same commit
+(`9921650`, the `dynamic-state-slot` tip) and both independently merged `stress_harness`,
+so both carry `tools/stress_harness.py` and `tools/stress_observe/`. Neither is an
+ancestor of the other: 23 commits here, 16 there. `dynamic-state-slot` itself has **no**
+unique commits - it is a strict ancestor of this branch, so there is nothing to port from
+it.
+
+The gemini branch went on to find four bugs. **Three were in code this branch also has,
+and all three were still present here** - confirmed by running them, not by reading code.
+Two of them corrupt exactly the paraphrase and browse-gated paths §3d/§3e were measured
+on, which is why they are recorded here and not just in `agent_changes.md`.
+
+| bug | file | gemini fix | status here |
+|---|---|---|---|
+| A. carrier framing glued onto real disclosures | `src/text.py` | `5b7c76f` | **was present** → ported (`0462f4d`) |
+| B. browse-gated stall text pollutes the slot ledger and fakes a productive turn | `src/state.py` | `df080db` | **was present** → ported (`b6a334f`) |
+| C. observe probes reject the kwargs the agent passes | `tools/stress_observe/runner.py`, `tools/observe.py` | `ec470db` | **was present, in both files** → ported (`e484cbe`) |
+| D. LLM rerank temperature + reroute discards `llm_scores` | `src/llm.py`, `starter/agent.py` | `2224245` | **n/a** - no `src/llm.py` here, and this branch's reroute already threads `embed=`/`qvec=` through both calls |
+
+**Bug A** was the significant one for ranking. `constraint_spans()` kept every ≥2-word
+punctuation-split chunk with no stopword stripping - correct for the official evaluator's
+templated wording, where a colon isolates the carrier, but wrong for the harness's
+paraphrased carriers, which have no separator:
+
+```
+"One more thing - a breathable net weave."   was ['one more thing', 'a breathable net weave']
+"I'd also want it to be synthetic sole."     was ['i d also want it to be synthetic sole']
+```
+
+The clean value was being destroyed, not merely accompanied by noise. `query_spans()`
+feeds the reranker's span-coverage term - the primary deterministic ranking signal - and
+a glued blob is far less likely to appear literally in a product's text than the clean
+value, so this was diluting ranking under exactly the paraphrase stress this branch
+exists to measure.
+
+**Bug C** was the most misleading. Both probe copies had signatures predating this
+branch's `track=`/`embed=`/`qvec=` kwargs, so every call raised `TypeError` inside
+`Agent.respond()`'s catch-all and the turn returned an empty envelope. Measured on 5
+`paraphrase:heavy+browse-gated` sessions, before → after the fix:
+
+```
+hit 0.000 / MRR 0.0000 / score 0.000000  ->  hit 1.000 / MRR 0.6750 / score 0.858500
+```
+
+Worse than a zero score: the empty envelope made the diagnostic classify all 5 as
+`never_retrieved` - "target never entered the retrieval pool, a recall problem (S1/S5)".
+That is the exact signal used to reason about where a dense route could help, so **any
+`never_retrieved` figure taken from `tools/stress_observe` or `tools/observe.py` on this
+branch before `e484cbe` is an artifact, not a measurement.** Aggregate numbers from
+`tools/stress_harness.py` are unaffected - it does not install these probes, which is why
+§3d/§3e's headline scores stand independently of this bug.
+
+All three fixes are score-neutral on the official set: **0.923487 bit-identical**
+(hit@10 1.000, MRR 0.880956, efficiency 0.796) after each, and harness `--verify` delta
+`9.52e-08`. Tests went 127 → 134.
+
+### Other differences (design divergence, not bugs)
+
+| | `state-encoder-eval` | `integration/gemini-stress-harness` |
+|---|---|---|
+| official score | 0.923487 | 0.921497 |
+| unique work | bi-encoder embeddings (`src/embed.py`, S5 route + S6 term) | DeepSeek LLM listwise rerank (`src/llm.py`, `src/router.py`) |
+| dense/embedding code | yes | **none** |
+| browsing-policy mechanism | live per-turn `state.intent_track` (§1) | kept `dual_tracking`'s `route_policies`, fixed at session open |
+| `src/phrasing.py`, `policy.py`, `context_programming.py`, `router.py` | unchanged from base | all four changed |
+
+The two branches solved the browsing-policy problem differently - live per-turn here,
+fixed-at-opening there. Neither is ported; they are alternative designs, not a fix and a
+bug.
+
+---
+
 ## 4. What has not been checked
 
 - **Whether §3d/§3e's results are stable across a second run** - RRF fusion and ONNX
