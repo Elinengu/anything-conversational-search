@@ -1,14 +1,15 @@
-# Branch `state-encoder-eval` — embedding work, so far: no clear signal
+# Branch `state-encoder-eval` — embedding work: one signal that clears noise, rerank does not
 
 Branch `state-encoder-eval` (from `dynamic-state-slot`). Purpose: re-test the bi-encoder
 and cross-encoder work from branches `dense_rerank` / `semantic-rerank-experiment` against
 the live state machine and the paraphrase/browse-gated stress harness, neither of which
 existed when those branches were originally measured.
 
-**Headline: infrastructure is done and working. Four S6-rerank variants of the bi-encoder
-have now been measured (ungated, two gated, and a cleaner query-text version) - none
-clears this project's own noise floor (~0.02) at full 200-session scale. The S5 retrieval
-stage (Step 3.4) and the cross-encoder are still open.**
+**Headline: the S5 dense retrieval route (Step 3.4) is the first result in this whole
+investigation that clears this project's own noise floor at full 200-session scale -
++0.0263 overall, +0.0561 on the specific browsing scenario the harness stresses. All four
+S6-rerank variants (ungated, two gated, a cleaner query-text version) measured net-zero
+or worse at full scale. The cross-encoder is still blocked.**
 
 ---
 
@@ -25,14 +26,15 @@ each stage.
 | S6 rerank | same `dense_weight` term | **state-gated** on `state.over_general` (pool has stopped discriminating) | ✅ measured, 21 sessions — **identical to ungated**; the gate never closed on this subset (§3b) |
 | S6 rerank | same `dense_weight` term | **state-gated** — withheld on `intent_track=="browsing"` | ✅ measured, 21 sessions — small overall gain, but structurally limited: browsing only lasts 2-3 turns before promoting to buying, so the gate has almost no turns left to act on (§3b, traced directly) |
 | S6 rerank | `dense_query="slots"` — feed it `state.authoritative_text()` instead of the raw conversation | none (unconditional) | ✅ **measured at both 21 and 200 sessions** — 21: **+0.044**; 200: **+0.0023 (noise)**. The small-sample result did not hold (§3c) |
-| **S5 retrieval** — searches the full 50,000-product catalog by meaning, builds the candidate pool | `RetrievalConfig.use_dense` — a 5th RRF-fused route alongside the BM25 ones | none | ⬜ **in progress** (Plan Step 3.4) — recall, not ranking; historically recovered 0/10 missing targets pre-state-machine |
+| **S5 retrieval** — searches the full 50,000-product catalog by meaning, builds the candidate pool | `RetrievalConfig.use_dense` — a 5th RRF-fused route alongside the BM25 ones | none | ✅ **measured, 200 sessions — +0.0263 overall, +0.0561 browsing** (§3d). Beats the ~0.02 noise floor. Historically recovered 0/10 missing targets pre-state-machine (`docs/team/dense_route.md`) - this run recovered 1/18, so the mechanism is qualitatively different this time (see §3d) |
 | Cross-encoder rerank (S6, different model) | scores `(query, candidate)` pairs jointly | top-20 only, fired on state ambiguity signals (Plan Part 4) | ⬜ **blocked** — no reachable model source found, not attempted |
 
-**In short: four S6-rerank variants are now measured. None clears the noise floor at
-full scale — the one variant that looked promising (`dense_query="slots"`, +0.044 on 21
-sessions) collapsed to +0.0023 on 200. The S5 retrieval question (does the embedding
-recover targets BM25 never finds, rather than just reorder ones it did find) is still
-open and is where any real signal would most plausibly live.**
+**In short: all four S6-rerank variants are net-zero-or-worse at full scale. The S5
+retrieval route is the exception — a real, noise-clearing gain, measured directly at 200
+sessions (no small-sample step this time, learning from §3c). It is not primarily a
+recall fix as originally framed (`never_retrieved` barely moved); the gain shows up as
+better ranking/conversion among targets the fused pool already reaches. This is the
+strongest embedding result of the investigation and the one worth pursuing further.**
 
 ---
 
@@ -211,8 +213,65 @@ finding.
 
 ---
 
+## 3d. Step 3.4 — S5 dense retrieval route, measured directly at 200 sessions
+
+`RetrievalConfig.use_dense` (`dense_route_all` in `tools/sweep.py`, both tracks,
+`weight_dense=0.6`, unconditional) - a fifth RRF-fused route alongside the three BM25
+ones, searching the full 50,000-product catalog by meaning rather than reordering a
+pool BM25 already built. Run directly at full 200-session scale
+(`--customer paraphrase:heavy+browse-gated --configs router_on,dense_route_all`, no
+small-sample step first - §3c's collapse from +0.044 to +0.0023 argued against trusting a
+21-session read on anything further in this investigation).
+
+| | router_on | dense_route_all | Δ |
+|---|---|---|---|
+| **overall (200)** | 0.76086 | **0.78718** | **+0.0263** |
+| boundary (10) | 0.8783 | 0.8465 | −0.032 |
+| **browsing (80)** | 0.6338 | **0.6899** | **+0.0561** |
+| buying (80) | 0.8296 | 0.8408 | +0.0112 |
+| intent_override (30) | 0.8773 | 0.8839 | +0.0066 |
+
+**This clears the ~0.02 noise floor - the first result in the whole investigation that
+does, at a sample size (80 browsing, 80 buying, 30 intent_override) large enough to
+trust.** boundary moved negative, but N=10 there is small enough to be the exception, not
+a contradiction.
+
+**Not primarily a recall fix, despite the framing.** `never_retrieved` for browsing moved
+18/80 -> **17/80** - one target recovered, not the dramatic fix "Step 3.4 recovers
+targets BM25 never finds" implied. `pool_rank>100` (in the pool but deep) rose 7/80 ->
+9/80, consistent with a couple of previously-absent targets being pulled into the pool
+without yet surfacing to a scored position. The larger effect is elsewhere: browsing hit
+rate 0.762 -> 0.825 and MRR 0.4867 -> 0.5337 - **ranking/conversion among targets the
+fused pool already reached**, not recall of ones it didn't.
+
+**Qualitatively different from the historical result.** The pre-state-machine
+`dense_route.md` measurement recovered 0/10 missing targets and was net negative
+(browsing MRR 0.855 -> 0.829, "a 4th RRF route full of semantically-plausible belts
+dilutes the lexical ranking of a target that was already sitting at pool rank ~7"). Here
+it is net positive and the dilution effect does not dominate - plausibly because this
+branch's richer, policy-fixed disclosure (§1) gives the lexical routes a stronger signal
+to fuse against, changing the RRF balance in the dense route's favour rather than against
+it. Not confirmed, but consistent with §3c's parallel finding that query-text quality
+matters more here than it did pre-state-machine.
+
+**This is the strongest and most trustworthy result of the investigation so far** -
+measured at full scale directly, on the exact scenario this whole branch exists to
+stress, and it holds up where every S6 rerank variant did not.
+
+---
+
 ## 4. What has not been checked
 
+- **Whether §3d's dense_route_all gain is robust to the official (cooperative) simulator
+  and to `--verify`-level scrutiny** - it has one measurement, on the stressed customer
+  only. Not yet checked: the cooperative `official` customer (does it cost anything
+  there, the way earlier bi-encoder attempts did - `docs/team/dense_rerank.md`,
+  `dense_route.md`), the holdout split (`tools/sweep.py --split holdout`), and whether
+  it is stable across a second run (RRF/embedding paths are deterministic here, but this
+  has not been independently re-run to confirm).
+- **Whether combining §3d (S5 retrieval) with §3c (slots query text) does better than
+  either alone** - untested. §3d used `full_text()` for its query (the default); §3c
+  showed query-text quality plausibly matters more on this branch than it used to.
 - **Full 200-session comparison of the ungated S6 term** (`dense_rr_10`, no
   `--targets generic` filter) - the original §3 result (net −0.016) has only ever been
   measured on the 21-session subset. Given how differently `dense_rr_slots` behaved at
@@ -220,11 +279,6 @@ finding.
 - **Plan Step 3.2 at full scale** - both gate variants (§3b) are 21-session-only; the
   pool-shape gate specifically needs the full set to be a fair test at all, since the
   generic-tail subset leaves it almost always open.
-- **Plan Step 3.4** - the S5 dense *retrieval* route (`use_dense`, recovering
-  `never_retrieved` targets rather than reordering the pool). **In progress** -
-  `dense_route_all` (`tools/sweep.py`) at full 200-session scale, `--customer
-  paraphrase:heavy+browse-gated`. Historical result (pre-state-machine) recovered 0 of 10
-  missing targets; untested against the current 18/80 baseline.
 - **Cross-encoder (Part 4 of the plan).** Blocked - no reranker ONNX model found on any
   reachable host (`bge-reranker-base` is not on the Qdrant GCS bucket that served the
   bi-encoder; every mirror probed - `hf-mirror.com`, `cdn-lfs.huggingface.co`,
@@ -252,7 +306,7 @@ python3 tools/stress_harness.py --customer paraphrase:heavy+browse-gated --targe
 python3 tools/stress_harness.py --customer paraphrase:heavy+browse-gated \
     --configs router_on,dense_rr_slots
 
-# §4 - Step 3.4, S5 retrieval route
+# §3d at full scale - the one result that clears the noise floor
 python3 tools/stress_harness.py --customer paraphrase:heavy+browse-gated \
     --configs router_on,dense_route_all
 ```
