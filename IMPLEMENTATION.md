@@ -1781,6 +1781,27 @@ A rival submission scoring `0.9748` on this evaluator does run a strong populari
 is the reason we do not simply copy it: the part of that design that transfers is the sizing, and
 the part that does not is the prior.
 
+### The reranker does not run on turn 1
+
+Found while tracing the dense term, and larger than that result. `rerank()`
+returns its input untouched when `state.query_spans()` is empty
+(`src/rerank.py`), and `query_spans()` deliberately skips turn 1 — the opening
+line is the simulator's own framing, not quoted product copy
+(`src/state.py`). So on turn 1 **every S6 signal is inert**: span coverage,
+facet agreement, category overlap, the category tail, popularity and the dense
+cosine alike. Turn-1 ordering is whatever S5 retrieval produced, full stop.
+
+That is measurable: with the dense term on, the target's rank changes on turn 1
+in **zero** of 200 sessions, while it moves on 16.7% of later turns.
+
+Two things follow. It explains why §S5's category pool moved turn 1 so far
+(`0.9235 → 0.9346` on its own) while rerank-side weight tuning never could —
+retrieval is the only stage that runs there. And it means the agent's single
+most valuable turn, the one §S7's sniper sizing stakes a whole slate on, is
+ranked by the least evidence-aware stage in the pipeline. Making the reranker
+run on turn 1 — with the opening's category words treated as the weak evidence
+they are, rather than skipped — is the most promising untried lever left.
+
 ### The two optional layers, re-measured on the merged agent
 
 Both optional signals — the dense sentence-embedding term (§S5/§S6) and the
@@ -1822,11 +1843,36 @@ Two results are firmer than the public column:
 - **The dense term is negative exactly where it was supposed to help.** It
   exists for paraphrase recall — the one signal that scores meaning rather than
   exact tokens. On the hard set it is `−0.0046` and under the
-  `paraphrase:heavy+browse-gated` stress customer `−0.0048`. Change 19 appears
-  to be the reason: a category-correct pool already excludes the cross-category
-  neighbours that semantic similarity used to rescue, so the dense term now
-  mostly reorders within a set that is already right, occasionally pushing the
-  target down.
+  `paraphrase:heavy+browse-gated` stress customer `−0.0048`. Traced against the
+  same run with the term off, over 527 comparable turns: the target's rank is
+  **unchanged on 83.3%**, pushed **down on 10.6%** and up on only **6.1%**
+  (mean `+0.39` ranks, downward); session outcomes 10 better, 16 worse.
+
+  The reason is not the query text, which was the first guess: encoding the
+  compact active slots instead of the full conversation (`dense_rr_slots`,
+  boilerplate stripped) scores `0.9538`, *worse* than the `0.9546` with it, and
+  lowering the weight to `0.2` returns `0.9556` — the optimum weight is zero.
+
+  The reason is what the customer says. The evaluator builds constraints by
+  regex over the target's *own* metadata and quotes them verbatim, so they are
+  strings like `"Imported; Rubber sole."` and
+  `"78% Cotton, 20% Polyester, 2% Elastane; Imported."` — **exact identifiers,
+  not descriptions**. A sentence embedding is built to make near-synonyms
+  collide, which is precisely the wrong operation on a unique literal string.
+  In `public_0031` the customer quotes that fabric composition, which is nearly
+  a fingerprint for one product; the dense term blurs it into "skinny jeans",
+  promotes `Levi's Women's Slimming Skinny Jeans` to rank 1 and demotes the
+  actual target to 2. In `public_0016`, `"Imported; Rubber sole"` encodes as
+  *rugged boot* and the most prototypical combat boots displace the target.
+  The term substitutes **topical** similarity for **literal** discrimination —
+  and topical similarity is what §S5's category pool already supplies, more
+  precisely and for free. It is competing with change 19 and losing.
+
+  This is the second independent semantic reranker to fail this way: §6's
+  cross-encoder (change 11) concluded "the optimum semantic weight is zero" for
+  the same reason, on a different model family. If the hidden set paraphrases
+  heavily the trade could invert — that is what the term is insurance for — but
+  nothing we can measure shows it paying.
 
 Both stay off by default, which also keeps the submission's offline, zero-token
 guarantee intact.
