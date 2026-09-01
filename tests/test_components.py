@@ -7,7 +7,6 @@ import unittest
 from src.facets import extract
 from src.policy import ALLOWED_ATTRIBUTES, FixedPolicy, InfoGainPolicy
 from src.rerank import RerankConfig, rerank
-from src.retrieval import RetrievalConfig, retrieve
 from src.router import classify, detect_turn_intent, extract_opening_facets
 from src.state import PRE_OVERRIDE_WEIGHT, DialogState
 from src.text import constraint_spans, pair_spans, terms
@@ -326,100 +325,6 @@ class RerankTests(unittest.TestCase):
         self.assertEqual(ranked[0][0], "right")
         self.assertEqual(ranked[-1][0], "wrong")
 
-    def test_dense_weight_zero_is_a_noop(self) -> None:
-        index = _StubIndex({"a": {"text": "cotton shirt grey"}, "b": {"text": "cotton shirt black"}})
-        state = DialogState("s")
-        state.observe(1, "I'm looking for shirts")
-        state.observe(2, "For that, what matters is: cotton shirt.")
-        pool = [("a", 1.0), ("b", 0.5)]
-        base = rerank(index, state, list(pool), RerankConfig())
-        self.assertEqual(base, rerank(index, state, list(pool), RerankConfig(dense_weight=0.0),
-                                      embed=_StubEmbed(), qvec=[1.0]))
-
-    def test_dense_term_reorders_toward_the_semantic_match(self) -> None:
-        # identical lexical evidence; the stub embed says "b" is the closer meaning.
-        index = _StubIndex({"a": {"text": "cotton shirt classic"}, "b": {"text": "cotton shirt classic"}})
-        state = DialogState("s")
-        state.observe(1, "I'm looking for shirts")
-        state.observe(2, "For that, what matters is: cotton shirt.")
-        embed = _StubEmbed({"a": 0.5, "b": 0.9})
-        ranked = rerank(index, state, [("a", 1.0), ("b", 0.9)],
-                        RerankConfig(dense_weight=2.0), embed=embed, qvec=[1.0])
-        self.assertEqual(ranked[0][0], "b")
-
-    # -- Step 3.2: dense_gate_over_general / dense_gate_exclude_browsing -------
-
-    def _dense_setup(self):
-        index = _StubIndex({"a": {"text": "cotton shirt classic"}, "b": {"text": "cotton shirt classic"}})
-        state = DialogState("s")
-        state.observe(1, "I'm looking for shirts")
-        state.observe(2, "For that, what matters is: cotton shirt.")
-        embed = _StubEmbed({"a": 0.5, "b": 0.9})
-        pool = [("a", 1.0), ("b", 0.9)]
-        return index, state, embed, pool
-
-    def test_over_general_gate_closed_is_byte_identical_to_dense_off(self) -> None:
-        index, state, embed, pool = self._dense_setup()
-        self.assertFalse(state.over_general)  # default - the gate under test starts closed
-        base = rerank(index, state, list(pool), RerankConfig())
-        gated = rerank(index, state, list(pool),
-                       RerankConfig(dense_weight=2.0, dense_gate_over_general=True),
-                       embed=embed, qvec=[1.0])
-        self.assertEqual(base, gated)
-
-    def test_over_general_gate_open_reorders(self) -> None:
-        index, state, embed, pool = self._dense_setup()
-        state.over_general = True
-        ranked = rerank(index, state, list(pool),
-                        RerankConfig(dense_weight=2.0, dense_gate_over_general=True),
-                        embed=embed, qvec=[1.0])
-        self.assertEqual(ranked[0][0], "b")
-
-    def test_exclude_browsing_gate_withholds_on_the_browsing_track(self) -> None:
-        index, state, embed, pool = self._dense_setup()
-        base = rerank(index, state, list(pool), RerankConfig())
-        gated = rerank(index, state, list(pool),
-                       RerankConfig(dense_weight=2.0, dense_gate_exclude_browsing=True),
-                       track="browsing", embed=embed, qvec=[1.0])
-        self.assertEqual(base, gated)
-
-    def test_exclude_browsing_gate_falls_back_to_state_intent_track(self) -> None:
-        """No `track` kwarg passed - the gate must still read state.intent_track."""
-        index, state, embed, pool = self._dense_setup()
-        state.intent_track = "browsing"
-        base = rerank(index, state, list(pool), RerankConfig())
-        gated = rerank(index, state, list(pool),
-                       RerankConfig(dense_weight=2.0, dense_gate_exclude_browsing=True),
-                       embed=embed, qvec=[1.0])
-        self.assertEqual(base, gated)
-
-    def test_exclude_browsing_gate_allows_buying(self) -> None:
-        index, state, embed, pool = self._dense_setup()
-        ranked = rerank(index, state, list(pool),
-                        RerankConfig(dense_weight=2.0, dense_gate_exclude_browsing=True),
-                        track="buying", embed=embed, qvec=[1.0])
-        self.assertEqual(ranked[0][0], "b")
-
-    # -- Step 3.3: dense_query="slots" ------------------------------------------
-
-    def test_dense_query_slots_encodes_authoritative_text(self) -> None:
-        class _RecordingEmbed(_StubEmbed):
-            def __init__(self) -> None:
-                super().__init__()
-                self.queries: list[str] = []
-
-            def encode_query(self, text: str):
-                self.queries.append(text)
-                return [1.0]
-
-        index, state, _unused_embed, pool = self._dense_setup()
-        embed = _RecordingEmbed()
-        # qvec is the full_text() vector the agent would have cached - "slots"
-        # must ignore it and encode authoritative_text() fresh instead.
-        rerank(index, state, list(pool), RerankConfig(dense_weight=1.0, dense_query="slots"),
-              embed=embed, qvec=[0.0, 0.0])
-        self.assertEqual(embed.queries, [state.authoritative_text()])
-
     def test_hard_filter_keeps_the_slate_when_every_candidate_contradicts(self) -> None:
         index = _StubIndex({
             "a": {"text": "cotton shirt black only"},
@@ -575,108 +480,6 @@ class RouterTests(unittest.TestCase):
         self.assertTrue(t2_route.is_buying)
 
 
-
-
-class _StubTermsIndex:
-    """Fixed FTS5 ranking, ignores the query - just enough for retrieve()."""
-
-    def __init__(self, ranked: list[tuple[str, float]]) -> None:
-        self._ranked = ranked
-        self.products = {asin: {} for asin, _ in ranked}
-
-    def match_pool(self, category_text, limit=1500):
-        """No coarse-category pools in this stub - the route sees no opinion."""
-        return []
-
-    def search_terms(self, text: str, limit: int) -> list[tuple[str, float]]:
-        return self._ranked[:limit]
-
-
-class DenseRouteTests(unittest.TestCase):
-    """S5 dense retrieval route (RetrievalConfig.use_dense)."""
-
-    @staticmethod
-    def _state() -> DialogState:
-        state = DialogState("s")
-        state.observe(1, "a lightweight waterproof jacket")
-        return state
-
-    def test_use_dense_false_is_byte_identical_to_the_no_kwarg_call(self) -> None:
-        index = _StubTermsIndex([("a", 3.0), ("b", 2.0), ("c", 1.0)])
-        state = self._state()
-        base = retrieve(index, state, RetrievalConfig())
-        self.assertEqual(retrieve(index, state, RetrievalConfig(), embed=None, qvec=None), base)
-        # A usable embed present but use_dense off -> still the exact lexical pool.
-        embed = _StubEmbed({"z": 0.99, "a": 0.2})
-        self.assertEqual(
-            retrieve(index, state, RetrievalConfig(use_dense=False), embed=embed, qvec=[1.0]),
-            base,
-        )
-
-    def test_use_dense_changes_the_fused_pool(self) -> None:
-        index = _StubTermsIndex([("a", 3.0), ("b", 2.0), ("c", 1.0)])
-        state = self._state()
-        base = retrieve(index, state, RetrievalConfig())
-        embed = _StubEmbed({"z": 0.99, "a": 0.2})  # "z" is dense-only
-        fused = retrieve(index, state, RetrievalConfig(use_dense=True), embed=embed, qvec=[1.0])
-        self.assertNotEqual(fused, base)
-        self.assertIn("z", [asin for asin, _ in fused])
-
-    def test_dense_path_swallows_embed_failure(self) -> None:
-        class _Boom:
-            available = True
-
-            def search(self, qvec, limit):
-                raise RuntimeError("no onnx here")
-
-        index = _StubTermsIndex([("a", 3.0), ("b", 2.0)])
-        state = self._state()
-        base = retrieve(index, state, RetrievalConfig())
-        self.assertEqual(
-            retrieve(index, state, RetrievalConfig(use_dense=True), embed=_Boom(), qvec=[1.0]),
-            base,
-        )
-
-    # -- gating: RetrievalConfig.dense_gate_* (mirrors RerankConfig's, reuses
-    #    the same _dense_gate_open - see docs/team/branch_state_encoder_eval_changes.md §3d) --
-
-    def test_over_general_gate_closed_is_byte_identical_to_dense_off(self) -> None:
-        index = _StubTermsIndex([("a", 3.0), ("b", 2.0), ("c", 1.0)])
-        state = self._state()
-        self.assertFalse(state.over_general)
-        base = retrieve(index, state, RetrievalConfig())
-        embed = _StubEmbed({"z": 0.99, "a": 0.2})
-        gated = retrieve(index, state, RetrievalConfig(use_dense=True, dense_gate_over_general=True),
-                         embed=embed, qvec=[1.0])
-        self.assertEqual(gated, base)
-
-    def test_over_general_gate_open_changes_the_pool(self) -> None:
-        index = _StubTermsIndex([("a", 3.0), ("b", 2.0), ("c", 1.0)])
-        state = self._state()
-        state.over_general = True
-        embed = _StubEmbed({"z": 0.99, "a": 0.2})
-        fused = retrieve(index, state, RetrievalConfig(use_dense=True, dense_gate_over_general=True),
-                         embed=embed, qvec=[1.0])
-        self.assertIn("z", [asin for asin, _ in fused])
-
-    def test_exclude_browsing_gate_withholds_on_the_browsing_track(self) -> None:
-        index = _StubTermsIndex([("a", 3.0), ("b", 2.0), ("c", 1.0)])
-        state = self._state()
-        base = retrieve(index, state, RetrievalConfig())
-        embed = _StubEmbed({"z": 0.99, "a": 0.2})
-        gated = retrieve(index, state, RetrievalConfig(use_dense=True, dense_gate_exclude_browsing=True),
-                         track="browsing", embed=embed, qvec=[1.0])
-        self.assertEqual(gated, base)
-
-    def test_exclude_browsing_gate_allows_buying(self) -> None:
-        index = _StubTermsIndex([("a", 3.0), ("b", 2.0), ("c", 1.0)])
-        state = self._state()
-        embed = _StubEmbed({"z": 0.99, "a": 0.2})
-        fused = retrieve(index, state, RetrievalConfig(use_dense=True, dense_gate_exclude_browsing=True),
-                         track="buying", embed=embed, qvec=[1.0])
-        self.assertIn("z", [asin for asin, _ in fused])
-
-
 class _StubShortlistState:
     """The only state ``Agent._shortlist`` reads once the first turn has passed."""
 
@@ -803,25 +606,6 @@ class _StubLLM:
     def rank(self, query_text: str, candidates: list[dict]) -> list[str] | None:
         self.calls.append((query_text, list(candidates)))
         return self.order
-
-
-class _StubEmbed:
-    """Stands in for src.embed.EmbeddingIndex - fixed cosine per asin."""
-
-    available = True
-
-    def __init__(self, sims: dict[str, float] | None = None) -> None:
-        self._sims = sims or {}
-
-    def encode_query(self, text: str):
-        return [1.0]
-
-    def similarities(self, qvec, asins):
-        return {a: self._sims.get(a, 0.0) for a in asins}
-
-    def search(self, qvec, limit):
-        ranked = sorted(self._sims.items(), key=lambda kv: (-kv[1], kv[0]))
-        return ranked[:limit]
 
 
 class _SplitFacets:

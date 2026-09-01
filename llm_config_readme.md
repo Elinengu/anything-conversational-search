@@ -91,8 +91,8 @@ network-restricted scoring guarantee depends on — see `README.md` "Disclosure"
 ## Situation 2 — gated LLM rerank (recommended)
 
 Fires the model only when the pool is genuinely ambiguous: `state.leader_margin
-< llm_gate_margin` (default `0.05`), the same live pool-shape signal the dense
-embedding term is gated on. This is the configuration that was actually
+< llm_gate_margin` (default `0.05`), the same live pool-shape signal the removed
+dense embedding term was gated on. This is the configuration that was actually
 measured — see Change 17 for the split-by-split numbers.
 
 **1. Set the API key** (never commit it, never put it in a config default) —

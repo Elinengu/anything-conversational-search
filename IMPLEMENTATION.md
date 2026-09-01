@@ -1057,17 +1057,23 @@ contributes nothing, which is the previous behaviour exactly.
   Worth `+0.011` public and `+0.032` hard.
 - **Give the pool route a stemmer.** The paraphrase fallback matches raw tokens plus a naive
   singular form (strip a trailing `s`). That covers plural/singular and nothing else — no
-  British/American spellings, no synonyms ("jewellery", "pendant"). A real stemmer, or the
-  `src/embed.py` encoder scoring bucket *keys* rather than products, would extend the guarantee to
-  customers who rename the category. This is the single biggest robustness gap the route leaves.
+  British/American spellings, no synonyms ("jewellery", "pendant"). A real stemmer would extend
+  the guarantee to customers who rename the category. (Scoring bucket *keys* with the `src/embed.py`
+  encoder was the other candidate; that encoder has since been deleted — see "The two optional
+  layers" below — so a stemmer or an explicit synonym table is what is left, and either is stdlib.)
+  This is the single biggest robustness gap the route leaves.
 - **Teach `tools/stress_harness.py` to reword the category.** It paraphrases the constraint and
   keeps `"I'm looking for {category}"` verbatim, so it cannot measure the gap above — the stress
   score for the pool route is optimistic by construction and the perturbation table had to stand
   in for it. A `category-drift` stressor would make that number real.
-- **Dense retrieval, if recall ever becomes the bottleneck.** A local sentence-embedding route
-  would catch paraphrases that share no words. It was cut because recall is 80/80, and it would
-  compromise the no-network guarantee — but if the private sessions paraphrase heavily, recall
-  could fall and this becomes relevant again.
+- **~~Dense retrieval, if recall ever becomes the bottleneck.~~ Built, measured, removed.** A
+  local sentence-embedding route catches paraphrases that share no words, and it was built
+  (`src/embed.py`, `RetrievalConfig.use_dense`) after this bullet was first written. It recovered
+  **none** of the `never_retrieved` tail it was aimed at and was slightly negative overall
+  (`docs/team/dense_route.md`, `docs/team/branch_state_encoder_eval_changes.md` §3d), so change 20
+  deleted it rather than keep it as an off-by-default flag. If the private sessions paraphrase
+  heavily enough for recall to fall, the idea becomes relevant again — but it starts from the
+  measurements above, not from a knob.
 
 ---
 
@@ -1175,12 +1181,13 @@ matches the conversation so far.
 
 Two design choices keep this from ever costing the guaranteed offline score. First, it is
 *fused*, not a replacement: the model's suggested order becomes one more additive term in
-`rerank()`'s scoring formula (`RerankConfig.llm_weight`, same shape as `dense_weight`), so
+`rerank()`'s scoring formula (`RerankConfig.llm_weight`, the same shape the removed
+`dense_weight` term had), so
 a bad reorder from the model can only nudge the ranking, never override the lexical
 evidence outright. Second, it is *gated*: `RerankConfig.llm_gate_margin` reads
 `state.leader_margin` — the previous turn's gap between the top two candidates — and only
-calls the model when that gap is small (`< 0.05`, the same signal `dense_gate_over_general`
-already uses). A pool with a clear lexical leader has nothing to gain from a second,
+calls the model when that gap is small (`< 0.05`, the same pool-shape signal the removed
+`dense_gate_over_general` used). A pool with a clear lexical leader has nothing to gain from a second,
 nondeterministic opinion; an undecided one is exactly where a semantic read can break a
 tie exact-token matching cannot see. `RerankConfig.llm_weight = 0.0` by default, so nothing
 about the shipped agent's offline guarantee changes — every existing test and config still
@@ -1607,7 +1614,7 @@ not repeat the experiment.
 | **Neural cross-encoder reranking (S6b)** | dev 0.9268 → 0.9211, hard 0.7981 → 0.7944 | Built, measured, removed. Loses on every split and every setting; the optimum semantic weight is zero. Code preserved on branch `semantic-rerank`. |
 | **No-span rescore, re-opened after change 12** | dev 0.941757 → 0.941757 (bit-identical), holdout 0.9136 → 0.9188, hard 0.8020 → 0.8000 | Rejected a second time. Change 12 looked like it should revive it; dev did not move by a single digit, and everything that gained was on the gate split. See below. |
 | **Document-length tie-break** | dev 0.941757 → 0.943229, hard 0.801978 → 0.805064 at `w=0.10` only | Built in three forms, rejected. The hard-set gate is cleared at one weight with both neighbours failing — an argmax on noise, not a plateau. See below. |
-| **The dense embedding term, re-measured after changes 18+19** | public −0.0004, holdout +0.0007, hard **−0.0046**, paraphrase stress **−0.0048** | Rejected. Negative on the two sets built to test the paraphrase claim it exists for. |
+| **The dense embedding term, re-measured after changes 18+19** | public −0.0004, holdout +0.0007, hard **−0.0046**, paraphrase stress **−0.0048** | Rejected, then removed. Negative on the two sets built to test the paraphrase claim it existed for. `src/embed.py`, `tools/build_embeddings.py`, the `dense_*` sweep rows and the three third-party pins they needed are all deleted (change 20); the measurements stay here and in `docs/team/`. |
 | **LLM listwise rerank (DeepSeek), re-measured after changes 18+19** | public +0.0008 and +0.0017 on two runs of the same config, holdout −0.0005 | Rejected for now. Its run-to-run spread is the same size as its effect. Was worth +0.003525 before those changes. |
 | **Both optional layers together** | public −0.0011 | Rejected. Below either alone and below the baseline. |
 | **Raising `popularity_weight` under sniper sizing** | dev 0.9521 → 0.9583, holdout 0.9220 → 0.9350 at `w=1.0`; generated 0.9322 → 0.9315, hard 0.8135 → 0.8072 | Rejected. Both public-derived splits improve monotonically and substantially; both *generated* sets, whose sessions are not drawn from the public set's sampling, are flat to negative, and the hard set falls monotonically to 0.7872 by `w=1.8`. See below. |
@@ -1804,6 +1811,13 @@ they are, rather than skipped — is the most promising untried lever left.
 
 ### The two optional layers, re-measured on the merged agent
 
+> **Since removed.** The dense half of this section is a record, not a
+> description of the code: `src/embed.py`, `tools/build_embeddings.py`, the
+> `dense_*` sweep rows and the `RerankConfig` / `RetrievalConfig` dense knobs
+> were deleted in change 20 on the strength of exactly these numbers. The LLM
+> layer is unchanged and still ships off by default. Everything below is left as
+> measured.
+
 Both optional signals — the dense sentence-embedding term (§S5/§S6) and the
 opt-in LLM listwise reranker (§S6) — were measured before changes 18 and 19.
 Both were re-run afterwards, with the encoder artifact rebuilt and a live API
@@ -1902,11 +1916,17 @@ Two results are firmer than the public column:
   This is the second independent semantic reranker to fail this way: §6's
   cross-encoder (change 11) concluded "the optimum semantic weight is zero" for
   the same reason, on a different model family. If the hidden set paraphrases
-  heavily the trade could invert — that is what the term is insurance for — but
-  nothing we can measure shows it paying.
+  heavily the trade could invert — that is what the term was insurance for — but
+  nothing we can measure shows it paying, and an insurance policy that is
+  measurably negative on both paraphrase sets is not insurance. Change 20 stopped
+  paying the premium: the term is deleted rather than carried at weight zero, on
+  the same rule that deleted span rarity (§S6) and the cross-encoder (change 11) —
+  a code path no measurement justifies does not earn its place. Reviving it means
+  restoring it from history, not flipping a flag.
 
-Both stay off by default, which also keeps the submission's offline, zero-token
-guarantee intact.
+The LLM layer stays off by default, which also keeps the submission's offline,
+zero-token guarantee intact — now structurally, since with the encoder gone the
+scoring path has no third-party dependency left to fail on.
 
 **A bug found while measuring, worth fixing before anyone enables the layer:**
 `src/llm.py` never reads the `usage` object the API returns, and

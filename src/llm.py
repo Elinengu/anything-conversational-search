@@ -19,9 +19,10 @@ constraint is the whole contract of this module:
     and keeps the lexical order untouched. There is no path where a flaky
     model call can make a turn score worse than turning the layer off.
   * **Stdlib only.** ``urllib.request``, not ``requests`` - this stays an
-    optional layer a bare Python interpreter can still import, matching
-    ``src/embed.py``'s pattern of degrading to unavailable rather than adding
-    a hard dependency.
+    optional layer a bare Python interpreter can still import, degrading to
+    unavailable rather than adding a hard dependency. It is now the only
+    optional layer left: the dense sentence-embedding signal that followed the
+    same pattern was removed (change 20), so nothing in the tree needs a wheel.
 
 Talks to DeepSeek's OpenAI-compatible chat-completions endpoint
 (https://api.deepseek.com/chat/completions, model "deepseek-chat"). The API

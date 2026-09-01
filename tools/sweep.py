@@ -199,70 +199,12 @@ def build_configs(catalog: str) -> dict[str, AgentConfig]:
         # than kept unwired.
         "router_off": AgentConfig(use_router=False),
         "router_on": AgentConfig(use_router=True),
-        # Dense sentence-embedding cosine as an S6 rerank signal (branch
-        # dense_rerank). The only S6 term that scores meaning rather than exact
-        # tokens - the paraphrase hypothesis. 0.0 is router_on; these bracket the
-        # weight. `_spans` encodes the disclosed spans instead of full_text.
-        "dense_rr_02": AgentConfig(use_router=True, rerank=RerankConfig(dense_weight=0.2)),
-        "dense_rr_05": AgentConfig(use_router=True, rerank=RerankConfig(dense_weight=0.5)),
-        "dense_rr_10": AgentConfig(use_router=True, rerank=RerankConfig(dense_weight=1.0)),
-        "dense_rr_15": AgentConfig(use_router=True, rerank=RerankConfig(dense_weight=1.5)),
-        "dense_rr_05_spans": AgentConfig(
-            use_router=True, rerank=RerankConfig(dense_weight=0.5, dense_query="spans")),
-        "dense_rr_05_rns": AgentConfig(   # also rescore when no verbatim span exists
-            use_router=True,
-            rerank=RerankConfig(dense_weight=0.5, rescore_without_spans=True)),
-        # Step 3.2/3.3 (branch state-encoder-eval): the 21-session generic-tail
-        # sanity check on dense_rr_10 came back net -0.016, scenario-split -
-        # buying/override up, browsing down hard - see
-        # docs/team/branch_state_encoder_eval_changes.md. These gate/query-text
-        # variants test whether that split is fixable rather than intrinsic.
-        # dense_rr_gate: fire only when state.over_general (pool has stopped
-        # discriminating) - the pool-shape hypothesis alone.
-        "dense_rr_gate": AgentConfig(
-            use_router=True,
-            rerank=RerankConfig(dense_weight=1.0, dense_gate_over_general=True)),
-        # dense_rr_nobrowse: withhold on the browsing track only, no pool-shape
-        # gate - isolates whether avoiding the track that collapsed is
-        # sufficient on its own.
-        "dense_rr_nobrowse": AgentConfig(
-            use_router=True,
-            rerank=RerankConfig(dense_weight=1.0, dense_gate_exclude_browsing=True)),
-        # dense_rr_gate_nobrowse: both gates together - fire only on a stalled
-        # pool, and never on browsing even then.
-        "dense_rr_gate_nobrowse": AgentConfig(
-            use_router=True,
-            rerank=RerankConfig(dense_weight=1.0, dense_gate_over_general=True,
-                                dense_gate_exclude_browsing=True)),
-        # dense_rr_slots: same unconditional dense_weight as dense_rr_10, but
-        # query state.authoritative_text() (the state machine's compact
-        # active-slot text) instead of full_text() - no simulator boilerplate.
-        "dense_rr_slots": AgentConfig(
-            use_router=True,
-            rerank=RerankConfig(dense_weight=1.0, dense_query="slots")),
-        # Dense sentence-embedding cosine as an S5 retrieval route (branch
-        # dense_rerank). Originally trialled per-track (browsing only, since the
-        # paraphrase recall tail concentrates there - docs/team/dense_route.md);
-        # that per-track config surface (buying_retrieval/browsing_retrieval) is
-        # dropped on this branch in favour of the state machine's own routing
-        # (see router_on's comment above), so this row is the both-tracks form.
-        "dense_route_all": AgentConfig(
-            use_router=True, retrieval=RetrievalConfig(use_dense=True)),
-        # dense_route_all is a confirmed trade-off (branch state-encoder-eval):
-        # +0.0263 under paraphrase:heavy+browse-gated stress, -0.0042/-0.0065 on
-        # the cooperative official/holdout sets - see
-        # docs/team/branch_state_encoder_eval_changes.md §3d. These gate it the
-        # same way dense_rr_gate/dense_rr_nobrowse gate the S6 rerank term.
-        "dense_route_gate": AgentConfig(
-            use_router=True,
-            retrieval=RetrievalConfig(use_dense=True, dense_gate_over_general=True)),
-        "dense_route_nobrowse": AgentConfig(
-            use_router=True,
-            retrieval=RetrievalConfig(use_dense=True, dense_gate_exclude_browsing=True)),
-        "dense_route_gate_nobrowse": AgentConfig(
-            use_router=True,
-            retrieval=RetrievalConfig(use_dense=True, dense_gate_over_general=True,
-                                      dense_gate_exclude_browsing=True)),
+        # The dense sentence-embedding rows (dense_rr_*, dense_route_*) that used
+        # to sit here are gone with src/embed.py: every one of them was measured
+        # on branches dense_rerank and state-encoder-eval and none cleared the
+        # noise floor - see docs/team/dense_rerank.md,
+        # docs/team/dense_route.md and
+        # docs/team/branch_state_encoder_eval_changes.md for the numbers.
         # Tier-2 opt-in LLM reranking layer (src/llm.py, DeepSeek), fused into
         # the top llm_depth of the lexical order - see
         # docs/team/ideas_to_integrate_llm.md #3 and RerankConfig.llm_weight's
@@ -280,15 +222,6 @@ def build_configs(catalog: str) -> dict[str, AgentConfig]:
             use_router=True,
             llm=LLMConfig(enabled=True),
             rerank=RerankConfig(llm_weight=1.0, llm_gate_margin=0.05)),
-        # Both optional layers at once, on the merged (change 18 + 19) default.
-        # They are independent signals over the same head: the dense term scores
-        # meaning per candidate, the LLM term reorders the top llm_depth
-        # listwise. Measured together because each was only ever measured alone,
-        # and both fire on ambiguous pools - which change 19 made rarer.
-        "dense_llm": AgentConfig(
-            use_router=True,
-            llm=LLMConfig(enabled=True),
-            rerank=RerankConfig(dense_weight=1.0, llm_weight=1.0, llm_gate_margin=0.05)),
         # The pre-pool lexical-only retrieval, kept as the ablation baseline.
         "catpool_off": AgentConfig(
             retrieval=RetrievalConfig(use_category_pool=False),

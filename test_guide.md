@@ -44,19 +44,15 @@ mv catalog.jsonl data/catalog.jsonl
 
 Expected: `wc -l data/catalog.jsonl` → `50000`.
 
-### Optional: the dense signal
+### No dependencies to install
 
-The agent runs on the Python standard library alone. Only the *optional* dense
-sentence-embedding signal (`src/embed.py`, and the `dense_*` sweep configs) needs
-extra wheels:
-
-```bash
-pip install -r requirements.txt      # numpy, onnxruntime, tokenizers
-```
-
-If these are missing the dense signal self-disables and the pipeline is the
-pure-stdlib BM25 one. You do **not** need them for the official score or for any
-test except the `dense_*` sweep rows.
+The agent, the evaluator, and every tool here run on the Python standard library
+alone — `requirements.txt` pins nothing, and there is no `pip install` step. The
+one signal that ever needed wheels (`numpy`, `onnxruntime`, `tokenizers`, for the
+dense `src/embed.py` sentence-embedding term and the `dense_*` sweep rows) never
+beat the lexical pipeline on any split and has been removed; its measurements
+live in `docs/team/dense_rerank.md`, `docs/team/dense_route.md`, and
+`docs/team/branch_state_encoder_eval_changes.md`.
 
 ### Confirm you're set up
 
@@ -162,7 +158,6 @@ argmax — that fits the 200 public sessions through the back door, and the priv
 | `weights_argmax` | The coordinate-ascent dev argmax — higher on dev/holdout/public, **regresses the hard set**; kept as a row, not shipped. |
 | `natural_off` / `natural_on` | Pool-aware clarification wording (`src/phrasing.py`). Must score **bit-for-bit identical** — the simulator never reads `message`. The row exists to prove that. |
 | `router_off` / `router_on` / `router_on_hardfilter` | Dual-track routing (branch `dual_tracking`). `router_off` must match the flat pre-routing agent bit-for-bit; `router_on` lets the track drive policy/rerank/timing; `_hardfilter` adds the buying-track candidate banish. |
-| `dense_rr_02/05/10/15`, `dense_rr_05_spans`, `dense_rr_05_rns` | Dense-cosine S6 rerank term at several weights (branch `dense_rerank`). **Needs `pip install -r requirements.txt`.** |
 
 Add a row to `build_configs()` to test your own change.
 
@@ -247,8 +242,7 @@ between two runs, not just the score.
 
 `tools/stress_harness.py` drives the **unmodified** agent through a faithful copy
 of the evaluator loop with customers the official simulator cannot produce:
-paraphrasing, non-cooperative browsers, genuine decoys. Pure stdlib **unless** a
-`dense_*` config is used (then it needs `onnxruntime` + `tokenizers`).
+paraphrasing, non-cooperative browsers, genuine decoys. Pure stdlib.
 
 **Always run `--verify` first:**
 

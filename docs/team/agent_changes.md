@@ -32,6 +32,7 @@ public labels and API contract were **not** touched.
 | + opt-in LLM semantic rerank (DeepSeek), gated | Elinengu | 0.9235 → **0.9254** | not measured | change 17; **off by default** (`llm_weight=0.0`) — measured on the fixed codebase (change 16's three bug fixes); see the change 17 section below for the full split table |
 | + sniper list sizing `(1,1,1,1,10)` | Claude | 0.923487 → **0.940083** | 0.841190 → **0.852227** | change 18; one candidate per turn until turn 5. Pure scoring-position change — Hit@10 unchanged on all four sets, failure-mode mix identical. Stress `heavy+browse-gated` 0.7707 → 0.7848. A popularity re-sweep that gains on both public splits was measured and **not shipped** (regresses both generated sets) |
 | + coarse-category pool route (S5) | Claude | 0.923487 → **0.934554** (with change 18: **0.954975**) | 0.7938 → **0.8260** | change 19; turn-1 target-in-pool 80.5% → 100%. The only change here that raises Hit@10 on *both* generated sets (hard 0.885 → 0.927, generated 0.990 → 1.000) — recall, not reordering. Stress `heavy+browse-gated` 0.7707 → 0.8747. Numbering: change 18 is sniper list sizing on branch `claude/techjam-agent-analysis-hzm14g`, not yet on `main` |
+| + remove the dense embedding signal | Claude | 0.954975 (unchanged) | 0.844356 (unchanged) | change 20; **byte-identical on every split by construction** — every `dense_*` knob already defaulted off, so the deleted code was unreachable in every shipped config. Removes `src/embed.py`, `tools/build_embeddings.py`, 15 sweep rows, 15 tests and the last three third-party pins; the scoring path is now stdlib-only with no optional dependency left to fail on |
 
 Net: **public 0.859 -> 0.9313, adversarial 0.684 -> 0.8028.** 77/77 tests pass.
 The fourteen core-agent changes are detailed below; supporting tooling and docs follow.
@@ -2018,3 +2019,99 @@ duplicates of `router_on` and were removed (`sniper`, `sniper_catpool`,
 behaviour are what remain useful and are kept: `pre_sniper` (old sizing),
 `catpool_off` (no pool route), and `no_sniper_no_catpool` (neither). The
 `sn_cp_w03/05/07/15/20/30` bracket is kept as the pool-weight evidence.
+
+
+## Change 20 — Remove the dense sentence-embedding signal (Claude)
+
+**Files:** `src/embed.py` (deleted), `tools/build_embeddings.py` (deleted),
+`src/retrieval.py`, `src/rerank.py`, `starter/agent.py`, `tools/sweep.py`,
+`tools/observe.py`, `tools/stress_observe/runner.py`, `tests/test_components.py`,
+`requirements.txt`, `.gitignore`, plus `README.md`, `ARCHITECTURE.md`,
+`IMPLEMENTATION.md`, `test_guide.md`, `llm_config_readme.md`, `docs/README.md`
+and four documents under `docs/team/`.
+
+### Problem
+
+The dense signal was never used. `RerankConfig.dense_weight` defaulted to `0.0`
+and `RetrievalConfig.use_dense` to `False`, so no shipped configuration ever
+encoded a query; the encoder artifact under `data/embeddings/` is git-ignored and
+is not in a clone, so even the `dense_*` sweep rows self-disabled without a
+one-time local build. What the tree still carried for it:
+
+- two modules (`src/embed.py`, `tools/build_embeddings.py`, 503 lines);
+- eleven config fields across `RetrievalConfig` and `RerankConfig`, a
+  `_dense_gate_open()` shared between the two stages, a `_dense_similarities()`
+  helper with four query modes, and `embed=` / `qvec=` threaded through both
+  stage signatures and every call site;
+- fifteen sweep rows, fifteen unit tests, and the only three third-party pins in
+  `requirements.txt` (`numpy`, `onnxruntime`, `tokenizers`);
+- an import guard in `starter/agent.py` and two probe comments in the tracing
+  tools that existed only to survive the extra keywords.
+
+And the measurements said it does not work. Every attempt is on record: as an S6
+rerank term (`docs/team/dense_rerank.md`), as an S5 retrieval route
+(`docs/team/dense_route.md`), re-run against the live state machine with pool-shape
+and per-track gates and three query texts
+(`docs/team/branch_state_encoder_eval_changes.md`), and re-measured once more after
+changes 18+19 (`IMPLEMENTATION.md` §6). The best public reading is `−0.0004`; on
+the two sets built to test the paraphrase claim it exists for it is `−0.0046`
+(hard) and `−0.0048` (`paraphrase:heavy+browse-gated`). The one stress result that
+ever cleared noise (`+0.0257`) was compensating for the glued-carrier-text bug in
+`query_spans()`, and collapsed to `+0.0042` once change 16 fixed it.
+
+This repo already has a rule for that case, applied twice before: span rarity
+weighting was "deleted entirely, not left as an off-by-default flag" (§6), and the
+S6b cross-encoder was removed with its measurements kept (change 11). This applies
+it a third time.
+
+### What changed
+
+Deleted, not disabled. `src/embed.py` and `tools/build_embeddings.py` are gone;
+`RetrievalConfig` loses `use_dense`, `weight_dense`, `weight_dense_focused`,
+`dense_pool` and both `dense_gate_*` fields; `RerankConfig` loses `dense_weight`,
+`dense_query`, `rescore_without_spans` and both `dense_gate_*` fields;
+`_dense_gate_open()` and `_dense_similarities()` are gone with them.
+
+`retrieve()` loses `embed=`, `qvec=` and `track=` — the last of those existed only
+to feed the dense gate, and no lexical route reads it. `rerank()` loses `embed=`
+and `qvec=` and keeps `track=`, which the buying-track `hard_filter` still uses.
+The rerank head-guard collapses back to its original form:
+
+```python
+    if not spans:
+        return candidates
+```
+
+`requirements.txt` now pins nothing and says so — the scoring path is stdlib-only,
+so the offline guarantee is structural rather than a fallback. The measurement
+documents keep every number and gain a status banner saying the code they describe
+is gone.
+
+### Effect
+
+| | before | after |
+|---|---|---|
+| Public set (200, official) | 0.954975 | 0.954975 |
+| Adversarial set (96) | 0.844356 | 0.844356 |
+| dev / holdout | 0.9590 / 0.9489 | 0.9590 / 0.9489 |
+
+Measured by running the official evaluator and `tools/sweep.py --configs catpool`
+on both splits against this tree and against the same tree with the change
+stashed, on the same machine in the same session. Hit@10 is `1.000` public and
+`0.927` hard on both sides; MRR, MTTC and the per-scenario breakdown are identical
+to six decimal places, as they must be — every deleted branch was already
+unreachable from a default `AgentConfig`.
+
+Test count drops `173 → 158`: the fifteen removed tests all asserted the dense
+signal's own behaviour — eight for the S6 term (its no-op at weight zero, the
+reorder it produces, its two gates across five cases, its `slots` query mode) and
+seven for the S5 route — and the `_StubEmbed` / `_StubTermsIndex` helpers went
+with them. The remaining 158 pass. Nothing else moved:
+`evaluator/`, `data/`, and the five organizer-owned files under `docs/` are
+untouched.
+
+What this buys is not score, it is surface: 11 config fields, 2 modules, 15 sweep
+rows and 3 dependencies that a reader had to understand, a sweep had to skip and a
+grader had to install for nothing. Reviving the idea means restoring the two
+modules from history — the measurements above say to start from a different
+hypothesis instead.

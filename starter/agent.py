@@ -47,11 +47,6 @@ from src.context_programming import (  # noqa: E402
 )
 from src.state import DialogState, SessionPhase  # noqa: E402
 
-try:  # optional dense sentence-embedding signal - needs onnxruntime + tokenizers
-    from src.embed import load_embedding_index  # noqa: E402
-except Exception:  # pragma: no cover
-    load_embedding_index = None  # type: ignore[assignment]
-
 
 @dataclass
 class AgentConfig:
@@ -188,21 +183,6 @@ class Agent:
         # browse-gated loss (measured). expected_broad_answers=4.0 is what
         # branch dual_tracking shipped for the same job (docs/team/agent_changes.md).
         self._browsing_policy = InfoGainPolicy(self.facets, expected_broad_answers=4.0)
-        # Dense sentence-embedding index, shared by the S5 dense retrieval route
-        # and the S6 dense_weight term. Loaded only when some config asks for it
-        # (rerank.dense_weight > 0, or retrieval.use_dense); missing artifact /
-        # deps -> None and both stages run BM25-only exactly as before.
-        self.embed = None
-        needs_embed = (
-            self.config.rerank.dense_weight > 0.0
-            or self.config.retrieval.use_dense
-        )
-        if needs_embed and load_embedding_index is not None:
-            try:
-                candidate = load_embedding_index(catalog_path=catalog_path)
-                self.embed = candidate if candidate.available else None
-            except Exception:
-                self.embed = None
         # Cheap to construct even when disabled - see AgentConfig.llm above.
         self.llm = LLMReranker(self.config.llm)
         self._states: dict[str, DialogState] = {}
@@ -254,23 +234,10 @@ class Agent:
         is_buying = (route.name == "buying") if route else False
         track_name = route.name if route else "browsing"
 
-        # One query vector per turn, shared by every dense consumer: the S5
-        # dense retrieval route and the S6 dense_weight rerank term. None
-        # unless a config asked for embeddings (self.embed stays None then).
-        qvec = None
-        if self.embed is not None:
-            try:
-                qvec = self.embed.encode_query(state.full_text())
-            except Exception:
-                qvec = None
-
-        candidates = retrieve(
-            self.index, state, self.config.retrieval,
-            track=track_name, embed=self.embed, qvec=qvec,
-        )
+        candidates = retrieve(self.index, state, self.config.retrieval)
         candidates = rerank(
             self.index, state, candidates, self.config.rerank,
-            track=track_name, embed=self.embed, qvec=qvec, llm=self.llm,
+            track=track_name, llm=self.llm,
         )
         state.observe_pool(candidates)
 
@@ -292,13 +259,10 @@ class Agent:
                     state,
                     self.config.retrieval,
                     route_hint=plan.retrieval_route,
-                    track=track_name,
-                    embed=self.embed,
-                    qvec=qvec,
                 )
                 candidates = rerank(
                     self.index, state, candidates, self.config.rerank,
-                    track=track_name, embed=self.embed, qvec=qvec, llm=self.llm,
+                    track=track_name, llm=self.llm,
                 )
                 state.observe_pool(candidates, advance=False)
             self._apply_plan_to_state(state, plan)

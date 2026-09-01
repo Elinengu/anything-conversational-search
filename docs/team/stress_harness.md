@@ -181,8 +181,9 @@ To add a stressor, add a flag and one hook:
   it as a **cache-keyed lazy rewrite**: the first time a constraint string is
   needed at a given level, call the model and store the result under
   `(constraint, level, prompt-version)`; every run after the first reads from
-  disk. Same pattern as the `bge-small` embedding cache already in the tree — it
-  keeps `--verify` deterministic and the dozens of A/B passes cheap. The rewriter
+  disk. Same pattern as the `bge-small` embedding cache the tree used to carry
+  (`tools/build_embeddings.py`, removed in change 20) — it keeps `--verify`
+  deterministic and the dozens of A/B passes cheap. The rewriter
   must see only the constraint text (never the target id) and its output is
   validated (meaning preserved, nothing dropped) with the rule-based `heavy` as
   the fallback.

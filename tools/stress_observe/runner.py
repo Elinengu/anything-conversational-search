@@ -62,9 +62,8 @@ def install_stress_probes():
         observe_module._PROBE["route"] = route
         return route
 
-    # **kwargs rather than a fixed signature: Agent._respond() passes track=,
-    # embed= and qvec= on every retrieve()/rerank() call (the dual-track routing
-    # and the dense sentence-embedding signal), plus route_hint= on the
+    # **kwargs rather than a fixed signature: Agent._respond() passes track= on
+    # every rerank() call (dual-track routing), plus route_hint= on the
     # orchestrator's retrieval reroute. A probe that cannot accept them raises
     # TypeError inside Agent.respond()'s catch-all handler, so the turn returns
     # an empty envelope and every traced session silently scores 0.000 - the

@@ -16,7 +16,7 @@ criterion" — so it is at most ~35% of one criterion.
 | Pillar (from the problem statement) | Value on the public evaluator |
 |---|---|
 | I — Dual-track routing | ~0. The router only changes question wording; routing retrieval by intent was measured and dropped (dev flat, holdout -0.002). |
-| I — LLM semantic ranking / vector similarity | ~0. BM25 recall is already ~100%; the dense route is off by default and never helped. |
+| I — LLM semantic ranking / vector similarity | ~0. BM25 recall is already ~100%; the dense route never helped and has since been removed from the tree (change 20). |
 | II — Incremental slots (accumulate constraints) | **The whole game.** 0.11 -> 0.78 came from this alone. |
 | II — Slot *erasure* on override | **Negative.** The "erased" preference is still drawn from the target, so erasing it costs score; down-weighting / ignoring wins. |
 | II — Proactive clarification / retrieval cutoff on over-generality | ~0. The simulator always answers "anything else?", so `ask_attribute="other"` strictly dominates targeted questions. |
@@ -160,7 +160,7 @@ cost are disclosed as feasibility metrics, not part of the score.
 
 | add | public | hard set | notes |
 |---|---|---|---|
-| bge-small dense retrieval route | ~0 | ~0 | BM25 recall already ~100%; cache + `dense_weight` already in the tree, defaulted off after measuring flat |
+| bge-small dense retrieval route | ~0 | ~0 | BM25 recall already ~100%. Built, measured flat-to-negative, and deleted in change 20 — reviving it means restoring `src/embed.py` and `tools/build_embeddings.py` from history, not flipping `dense_weight` |
 | bge-reranker cross-encoder over top-20 | ~0 to +0.01 | maybe +0.01-0.03 on `homogeneous_cluster` / `degenerate_card` | The winning rerank signal is *exact verbatim span match* — the disclosed constraints are literal catalog text. A semantic cross-encoder optimises for *meaning*, not string matching, so it may not beat span coverage on public and can even demote an exact-match target. Only clearly helps where span coverage saturates. |
 | small LLM: clarification questions | **0** | 0 | The simulator ignores the English entirely. Pure Presentation / Innovation / demo value. |
 | small LLM: extraction fallback | 0 | 0 | Helps only if the private simulator paraphrases; regex is fine on public. |
