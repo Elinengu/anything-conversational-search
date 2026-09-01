@@ -128,6 +128,35 @@ def build_configs(catalog: str) -> dict[str, AgentConfig]:
         "ramp4": AgentConfig(list_size_ramp=(4, 10)),
         "ramp5": AgentConfig(list_size_ramp=(5, 10)),
         "ramp55": AgentConfig(list_size_ramp=(5, 5, 10)),
+        # The pre-sniper shipped defaults, kept so before/after can be measured
+        # in one process on any dataset (Change 17).
+        "pre_sniper": AgentConfig(first_recommend_turn=3, list_size_ramp=(4, 10)),
+        # Sniper sizing (Change 17): one candidate per turn until a wide
+        # safety-net turn. The evaluator ends a session the moment the target
+        # appears and scores its position *within that turn's list only*, so a
+        # 1-item slate converts every eventual hit into rank 1. Rank r -> 1 is
+        # worth 0.30*(1 - 1/r); a turn of MTTC costs 0.20/10 = 0.02, so rank is
+        # worth ~13x a turn. The elimination scan makes the singles cumulative:
+        # eight singles plus a wide turn walk 18+ distinct candidates, deeper
+        # than one 10-item slate. sniperN widens at turn N.
+        "sniper5": AgentConfig(first_recommend_turn=1, list_size_ramp=(1,) * 4 + (10,)),
+        "sniper6": AgentConfig(first_recommend_turn=1, list_size_ramp=(1,) * 5 + (10,)),
+        "sniper7": AgentConfig(first_recommend_turn=1, list_size_ramp=(1,) * 6 + (10,)),
+        "sniper8": AgentConfig(first_recommend_turn=1, list_size_ramp=(1,) * 7 + (10,)),
+        "sniper9": AgentConfig(first_recommend_turn=1, list_size_ramp=(1,) * 8 + (10,)),
+        "sniper10": AgentConfig(first_recommend_turn=1, list_size_ramp=(1,) * 9 + (10,)),
+        # Isolates the two halves of sniper9: singles but still holding turns
+        # 1-2 back (sniper9_t3), and guessing from turn 1 at the shipped widths
+        # (elim1 is that row without the ramp change).
+        "sniper9_t3": AgentConfig(first_recommend_turn=3, list_size_ramp=(1,) * 6 + (10,)),
+        # The STAGNATING orchestration phase (context_programming Phase 3)
+        # overrides the ramp with its own wide slate, so sniper9 above still
+        # emits 10 on a stalled turn - which is where its remaining rank losses
+        # sit. These rows carry the singles through stagnation too.
+        "sniper9_stag1": AgentConfig(
+            first_recommend_turn=1, list_size_ramp=(1,) * 8 + (10,), stagnation_slate_size=1),
+        "sniper7_stag1": AgentConfig(
+            first_recommend_turn=1, list_size_ramp=(1,) * 6 + (10,), stagnation_slate_size=1),
         # Rerank weight mixture: the near-miss anatomy (rerank_signals.md) shows
         # every remaining public rank loss sits in a tie-break regime where the
         # retrieval score picks the impostor 33/33 (BM25 length normalization
@@ -141,6 +170,14 @@ def build_configs(catalog: str) -> dict[str, AgentConfig]:
         "pop030": AgentConfig(rerank=RerankConfig(popularity_weight=0.30)),
         "pop040": AgentConfig(rerank=RerankConfig(popularity_weight=0.40)),
         "pop050": AgentConfig(rerank=RerankConfig(popularity_weight=0.50)),
+        # Re-swept under sniper sizing: with a one-item slate the popularity
+        # prior stops being a tie-break and becomes the decision, so the 0.4
+        # fitted against a 4-wide slate is not automatically still right.
+        "pop070": AgentConfig(rerank=RerankConfig(popularity_weight=0.70)),
+        "pop100": AgentConfig(rerank=RerankConfig(popularity_weight=1.00)),
+        "pop140": AgentConfig(rerank=RerankConfig(popularity_weight=1.40)),
+        "pop180": AgentConfig(rerank=RerankConfig(popularity_weight=1.80)),
+        "pop250": AgentConfig(rerank=RerankConfig(popularity_weight=2.50)),
         # The coordinate-ascent dev argmax (tools/fit_weights.py): higher on
         # dev/holdout/public, regresses the hard set - kept as a row so the
         # trade-off stays reproducible, not as a default.
@@ -162,70 +199,12 @@ def build_configs(catalog: str) -> dict[str, AgentConfig]:
         # than kept unwired.
         "router_off": AgentConfig(use_router=False),
         "router_on": AgentConfig(use_router=True),
-        # Dense sentence-embedding cosine as an S6 rerank signal (branch
-        # dense_rerank). The only S6 term that scores meaning rather than exact
-        # tokens - the paraphrase hypothesis. 0.0 is router_on; these bracket the
-        # weight. `_spans` encodes the disclosed spans instead of full_text.
-        "dense_rr_02": AgentConfig(use_router=True, rerank=RerankConfig(dense_weight=0.2)),
-        "dense_rr_05": AgentConfig(use_router=True, rerank=RerankConfig(dense_weight=0.5)),
-        "dense_rr_10": AgentConfig(use_router=True, rerank=RerankConfig(dense_weight=1.0)),
-        "dense_rr_15": AgentConfig(use_router=True, rerank=RerankConfig(dense_weight=1.5)),
-        "dense_rr_05_spans": AgentConfig(
-            use_router=True, rerank=RerankConfig(dense_weight=0.5, dense_query="spans")),
-        "dense_rr_05_rns": AgentConfig(   # also rescore when no verbatim span exists
-            use_router=True,
-            rerank=RerankConfig(dense_weight=0.5, rescore_without_spans=True)),
-        # Step 3.2/3.3 (branch state-encoder-eval): the 21-session generic-tail
-        # sanity check on dense_rr_10 came back net -0.016, scenario-split -
-        # buying/override up, browsing down hard - see
-        # docs/team/branch_state_encoder_eval_changes.md. These gate/query-text
-        # variants test whether that split is fixable rather than intrinsic.
-        # dense_rr_gate: fire only when state.over_general (pool has stopped
-        # discriminating) - the pool-shape hypothesis alone.
-        "dense_rr_gate": AgentConfig(
-            use_router=True,
-            rerank=RerankConfig(dense_weight=1.0, dense_gate_over_general=True)),
-        # dense_rr_nobrowse: withhold on the browsing track only, no pool-shape
-        # gate - isolates whether avoiding the track that collapsed is
-        # sufficient on its own.
-        "dense_rr_nobrowse": AgentConfig(
-            use_router=True,
-            rerank=RerankConfig(dense_weight=1.0, dense_gate_exclude_browsing=True)),
-        # dense_rr_gate_nobrowse: both gates together - fire only on a stalled
-        # pool, and never on browsing even then.
-        "dense_rr_gate_nobrowse": AgentConfig(
-            use_router=True,
-            rerank=RerankConfig(dense_weight=1.0, dense_gate_over_general=True,
-                                dense_gate_exclude_browsing=True)),
-        # dense_rr_slots: same unconditional dense_weight as dense_rr_10, but
-        # query state.authoritative_text() (the state machine's compact
-        # active-slot text) instead of full_text() - no simulator boilerplate.
-        "dense_rr_slots": AgentConfig(
-            use_router=True,
-            rerank=RerankConfig(dense_weight=1.0, dense_query="slots")),
-        # Dense sentence-embedding cosine as an S5 retrieval route (branch
-        # dense_rerank). Originally trialled per-track (browsing only, since the
-        # paraphrase recall tail concentrates there - docs/team/dense_route.md);
-        # that per-track config surface (buying_retrieval/browsing_retrieval) is
-        # dropped on this branch in favour of the state machine's own routing
-        # (see router_on's comment above), so this row is the both-tracks form.
-        "dense_route_all": AgentConfig(
-            use_router=True, retrieval=RetrievalConfig(use_dense=True)),
-        # dense_route_all is a confirmed trade-off (branch state-encoder-eval):
-        # +0.0263 under paraphrase:heavy+browse-gated stress, -0.0042/-0.0065 on
-        # the cooperative official/holdout sets - see
-        # docs/team/branch_state_encoder_eval_changes.md §3d. These gate it the
-        # same way dense_rr_gate/dense_rr_nobrowse gate the S6 rerank term.
-        "dense_route_gate": AgentConfig(
-            use_router=True,
-            retrieval=RetrievalConfig(use_dense=True, dense_gate_over_general=True)),
-        "dense_route_nobrowse": AgentConfig(
-            use_router=True,
-            retrieval=RetrievalConfig(use_dense=True, dense_gate_exclude_browsing=True)),
-        "dense_route_gate_nobrowse": AgentConfig(
-            use_router=True,
-            retrieval=RetrievalConfig(use_dense=True, dense_gate_over_general=True,
-                                      dense_gate_exclude_browsing=True)),
+        # The dense sentence-embedding rows (dense_rr_*, dense_route_*) that used
+        # to sit here are gone with src/embed.py: every one of them was measured
+        # on branches dense_rerank and state-encoder-eval and none cleared the
+        # noise floor - see docs/team/dense_rerank.md,
+        # docs/team/dense_route.md and
+        # docs/team/branch_state_encoder_eval_changes.md for the numbers.
         # Tier-2 opt-in LLM reranking layer (src/llm.py, DeepSeek), fused into
         # the top llm_depth of the lexical order - see
         # docs/team/ideas_to_integrate_llm.md #3 and RerankConfig.llm_weight's
@@ -243,6 +222,74 @@ def build_configs(catalog: str) -> dict[str, AgentConfig]:
             use_router=True,
             llm=LLMConfig(enabled=True),
             rerank=RerankConfig(llm_weight=1.0, llm_gate_margin=0.05)),
+        # The pre-pool lexical-only retrieval, kept as the ablation baseline.
+        "catpool_off": AgentConfig(
+            retrieval=RetrievalConfig(use_category_pool=False),
+            rerank=RerankConfig(depth=300)),
+        # Both changes off - the pre-change-18 agent, the floor both are measured
+        # from. `pre_sniper` is the sizing ablation on its own; `catpool_off` is
+        # the retrieval ablation on its own.
+        "no_sniper_no_catpool": AgentConfig(
+            first_recommend_turn=3, list_size_ramp=(4, 10),
+            retrieval=RetrievalConfig(use_category_pool=False),
+            rerank=RerankConfig(depth=300)),
+        # ---- coarse-category pool route (S5) ----------------------------
+        # Measured motivation: at turn 1 the target is inside our 300-candidate
+        # lexical pool only 80.5% of the time, at median rank 51, and only ~66%
+        # of those 300 are in the target's category at all. The evaluator's
+        # opening message names coarse_category(target's categories), so that
+        # string keys a pool the target is inside 200/200 (median 182 members).
+        # `catpool` unions that pool into the candidate set; depth=0 makes the
+        # reranker score all of it.
+        "catpool": AgentConfig(
+            retrieval=RetrievalConfig(use_category_pool=True),
+            rerank=RerankConfig(depth=0)),
+        # Does the pool make the reranker's own category signals redundant? The
+        # union is not category-pure - it still carries the 300 lexical
+        # candidates, a third of which are out-of-category - so these should
+        # still be doing work. Measured, not assumed.
+        "catpool_nocat": AgentConfig(rerank=RerankConfig(category_weight=0.0)),
+        "catpool_notail": AgentConfig(rerank=RerankConfig(tail_weight=0.0)),
+        "catpool_nocat_notail": AgentConfig(rerank=RerankConfig(category_weight=0.0, tail_weight=0.0)),
+        # Popularity re-swept *inside* the pool. Raising it over a lexical pool
+        # was rejected on branch claude/techjam-agent-analysis-hzm14g (gains on
+        # both public splits, loses on both generated sets). Inside a
+        # category-correct pool it is a different measurement.
+        "catpool_pop070": AgentConfig(
+            retrieval=RetrievalConfig(use_category_pool=True),
+            rerank=RerankConfig(depth=0, popularity_weight=0.70)),
+        "catpool_pop100": AgentConfig(
+            retrieval=RetrievalConfig(use_category_pool=True),
+            rerank=RerankConfig(depth=0, popularity_weight=1.00)),
+        # Sniper list sizing is not on main yet (branch
+        # claude/techjam-agent-analysis-hzm14g, public 0.923487 -> 0.940083).
+        # These rows pin it explicitly so the pool route can be measured against
+        # the sizing it will actually ship alongside, in one process.
+        # Pool-route RRF weight bracket.
+        "sn_cp_w20": AgentConfig(
+            first_recommend_turn=1, list_size_ramp=(1, 1, 1, 1, 10),
+            retrieval=RetrievalConfig(use_category_pool=True, weight_category_pool=2.0),
+            rerank=RerankConfig(depth=0)),
+        "sn_cp_w30": AgentConfig(
+            first_recommend_turn=1, list_size_ramp=(1, 1, 1, 1, 10),
+            retrieval=RetrievalConfig(use_category_pool=True, weight_category_pool=3.0),
+            rerank=RerankConfig(depth=0)),
+        "sn_cp_w03": AgentConfig(
+            first_recommend_turn=1, list_size_ramp=(1, 1, 1, 1, 10),
+            retrieval=RetrievalConfig(use_category_pool=True, weight_category_pool=0.3),
+            rerank=RerankConfig(depth=0)),
+        "sn_cp_w05": AgentConfig(
+            first_recommend_turn=1, list_size_ramp=(1, 1, 1, 1, 10),
+            retrieval=RetrievalConfig(use_category_pool=True, weight_category_pool=0.5),
+            rerank=RerankConfig(depth=0)),
+        "sn_cp_w07": AgentConfig(
+            first_recommend_turn=1, list_size_ramp=(1, 1, 1, 1, 10),
+            retrieval=RetrievalConfig(use_category_pool=True, weight_category_pool=0.7),
+            rerank=RerankConfig(depth=0)),
+        "sn_cp_w15": AgentConfig(
+            first_recommend_turn=1, list_size_ramp=(1, 1, 1, 1, 10),
+            retrieval=RetrievalConfig(use_category_pool=True, weight_category_pool=1.5),
+            rerank=RerankConfig(depth=0)),
     }
 
 

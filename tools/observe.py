@@ -104,13 +104,13 @@ def install_probes():
         _PROBE["route"] = route
         return route
 
-    # **kwargs rather than a fixed signature: Agent._respond() passes track=,
-    # embed= and qvec= (dual-track routing and the dense sentence-embedding
-    # signal) on top of route_hint= - a fixed signature raises TypeError inside
-    # Agent.respond()'s catch-all handler, so the turn silently returns an
-    # empty envelope and the traced session reports a false never_retrieved.
-    # Independently found and fixed both here and on state-encoder-eval
-    # (e484cbe); this is that fix, extended to cover any future new keyword.
+    # **kwargs rather than a fixed signature: Agent._respond() passes keywords
+    # the probe never reads (route_hint= here, track= on rerank()) - a fixed
+    # signature raises TypeError inside Agent.respond()'s catch-all handler, so
+    # the turn silently returns an empty envelope and the traced session reports
+    # a false never_retrieved. Independently found and fixed both here and on
+    # state-encoder-eval (e484cbe); this is that fix, extended to cover any
+    # future new keyword.
     def retrieve_probe(index, state, config=None, **kwargs):
         started = time.perf_counter()
         pool = original["retrieve"](index, state, config, **kwargs)

@@ -3,6 +3,13 @@
 Branch `dense_rerank` (from `stress_harness`). `RerankConfig.dense_weight`,
 `src/embed.py`.
 
+> **Status: the code this document measures no longer exists.** `src/embed.py`,
+> `tools/build_embeddings.py`, the `dense_*` sweep rows and every `dense_*` /
+> `use_dense` config knob were removed in change 20, because no configuration
+> measured here ever cleared the noise floor. The commands below therefore only
+> run against the branch this was written on. The document is kept as the
+> measurement record — see `docs/team/agent_changes.md` change 20.
+
 ## The hypothesis
 
 Every S6 rerank signal is exact-token: `span_weight * coverage`,

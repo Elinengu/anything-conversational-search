@@ -91,8 +91,14 @@ class TestContextProgramming(unittest.TestCase):
         plan = AdaptiveOrchestrator.align_strategy(ctx, user, candidates, config)
 
         self.assertEqual(plan.phase, DialogPhase.EXPLORING)
-        self.assertTrue(plan.recommendation_cutoff)
         self.assertEqual(plan.guidance_action, "proactive_clarification")
+        # The cutoff tracks first_recommend_turn, which the sniper ramp moved to
+        # 1: turn 1 now emits its single best guess rather than withholding.
+        self.assertFalse(plan.recommendation_cutoff)
+        self.assertEqual(plan.recommended_slate_size, 1)
+        held = AdaptiveOrchestrator.align_strategy(
+            ctx, user, candidates, AgentConfig(first_recommend_turn=3))
+        self.assertTrue(held.recommendation_cutoff, "cutoff no longer tracks the emit turn")
 
         # Turn 2: Buying track with clear leader -> Converging phase (fast path)
         state_buy = DialogState(session_id="s2")

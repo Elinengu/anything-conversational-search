@@ -9,12 +9,12 @@ frozen 50,000-item Amazon catalog.
 The committed default configuration keeps LLM reranking **off**. It makes no
 model API calls, requires no credentials, and reports zero token usage. On the
 repository's bundled frozen local evaluator, this offline configuration
-achieves a **0.923487 TechnicalScore** and **1.000 Hit Rate@10**.
+achieves a **0.954975 TechnicalScore** and **1.000 Hit Rate@10**.
 
 | System | Hit@10 | MRR | MTTC | Efficiency | TechnicalScore |
 |---|---:|---:|---:|---:|---:|
 | Supplied BM25 baseline | 0.125 | 0.068 | 9.81 | 0.119 | 0.1067 |
-| This project (offline default, frozen local evaluator) | **1.000** | **0.881** | **3.04** | **0.796** | **0.923487** |
+| This project (offline default, frozen local evaluator) | **1.000** | **0.961** | **2.67** | **0.834** | **0.954975** |
 
 The result above is recorded in [`results.json`](results.json) and can be
 reproduced with the commands in [Reproducing the results](#reproducing-the-results).
@@ -26,21 +26,49 @@ the official customer behavior. The stress customer paraphrases constraints and
 uses **gated browsing**: a browsing customer discloses information only when the
 agent asks for a specific `ask_attribute` rather than a broad `other` question.
 
-| Customer | LLM reranking | Sessions | Hit@10 | MRR | MTTC | TechnicalScore |
-|---|---|---:|---:|---:|---:|---:|
-| Official customer | Off — default | 200 | 1.000 | 0.8810 | 3.040 | 0.923487 |
-| Official customer | **On — gated** | 200 | **1.000** | **0.8930** | **3.045** | **0.927012** |
-| Stress: paraphrase + gated browsing | Off — default | 200 | 0.880 | 0.6628 | 4.410 | 0.770651 |
-| Stress: paraphrase + gated browsing | **On — gated** | 200 | 0.880 | **0.6734** | **4.405** | **0.773924** |
+| Customer | Sessions | Hit@10 | MRR | MTTC | TechnicalScore |
+|---|---:|---:|---:|---:|---:|
+| Official customer | 200 | 1.000 | 0.9609 | 2.665 | **0.954975** |
+| Stress: paraphrase + gated browsing | 200 | 0.990 | 0.8379 | 3.370 | **0.899070** |
 
-On the official customer, gated LLM reranking keeps Hit@10 at `1.000`, raises
-MRR by `0.0120`, and improves the score by **0.003525**. MTTC changes only
-slightly, from `3.040` to `3.045`. On the harder stress customer, it keeps
-Hit@10 at `0.880`, raises MRR by `0.0106`, reduces MTTC by `0.005`, and improves
-the score by **0.003273**. In both conditions, the measured gain comes mainly
-from better ordering of retrieved candidates. Under paraphrase and gated
-browsing, reranking alone does not recover the remaining retrieval and
-clarification misses.
+Both rows are the current committed default, which now combines two changes —
+**sniper list sizing** (one candidate per turn until turn 5) and the
+**coarse-category pool retrieval route**. Measured over the same 200 official
+sessions in one process:
+
+| configuration | TechnicalScore | gain |
+|---|---:|---:|
+| neither | 0.9235 | — |
+| category pool only | 0.9346 | +0.0111 |
+| sniper sizing only | 0.9401 | +0.0166 |
+| **both (ships)** | **0.9550** | **+0.0315** |
+
+The two gains sum to `0.0277` and together deliver `0.0315`, so they are
+**super-additive**: a one-candidate slate is only worth anything if that
+candidate is right, and the pool is what makes the turn-1 candidate good.
+Hit@10 does not move on any evaluated set; the whole gain is MRR
+(`0.881 → 0.961`) and MTTC (`3.04 → 2.67`). See `docs/team/agent_changes.md`
+changes 18 and 19.
+
+### Optional LLM reranking layer
+
+The repository also carries an opt-in LLM reranking layer, **off by default**
+(`llm_weight=0.0`), which needs a `DEEPSEEK_API_KEY`. It was measured against
+the agent as it stood *before* both changes above and has not been re-run,
+so these numbers are historical and are not comparable to the table above:
+
+| Customer | LLM reranking | Hit@10 | MRR | MTTC | TechnicalScore |
+|---|---|---:|---:|---:|---:|
+| Official customer | Off | 1.000 | 0.8810 | 3.040 | 0.923487 |
+| Official customer | On — gated | 1.000 | 0.8930 | 3.045 | 0.927012 |
+| Stress: paraphrase + gated browsing | Off | 0.880 | 0.6628 | 4.410 | 0.770651 |
+| Stress: paraphrase + gated browsing | On — gated | 0.880 | 0.6734 | 4.405 | 0.773924 |
+
+It was worth `+0.003525` on the official customer and `+0.003273` under stress,
+in both cases through better ordering of already-retrieved candidates rather
+than through finding anything new. Since both shipped changes take their gain
+from the same place — the rank a hit is scored at, and what is in the pool to
+rank — the layer is unlikely to still be additive, and it stays off.
 
 ## Project overview
 
@@ -122,7 +150,7 @@ message + ask_attribute + ranked parent_asin recommendations
 | `src/state.py` | Multi-turn state, constraints, declines, overrides, and phases |
 | `src/context_programming.py` | Context distillation and adaptive strategy selection |
 | `src/policy.py` | Fixed and information-gain clarification policies |
-| `src/retrieval.py` | Lexical, focused, anchor, structured, and optional dense routes |
+| `src/retrieval.py` | Lexical, focused, anchor, structured, and category-pool routes |
 | `src/rerank.py` | Constraint, facet, category, conflict, and popularity scoring |
 | `src/phrasing.py` | Natural, pool-aware clarification wording |
 | `evaluator/local_evaluator.py` | Frozen local simulator and official metric calculation |
@@ -152,7 +180,6 @@ notebook workflow. It can be opened in VS Code or any Python editor.
 |---|---|---|
 | None | The submitted configuration is entirely local and deterministic. | — |
 | DeepSeek `deepseek-chat` API | Optional, ambiguity-gated listwise reranking experiment through an OpenAI-compatible chat-completions endpoint. | No; off by default |
-| `BAAI/bge-small-en-v1.5` | Optional ONNX sentence embeddings for dense retrieval or reranking experiments. | No; off by default |
 
 The optional DeepSeek layer is **off by default** and fails closed: if it is
 disabled, lacks a key, times out, or returns invalid output, the lexical ranking
@@ -170,15 +197,16 @@ The default pipeline uses only the Python standard library:
 - `urllib` for the disabled-by-default DeepSeek client; and
 - `unittest` for automated tests.
 
-Optional dense-search experiments use:
-
-- `numpy` for vector storage and cosine scoring;
-- `onnxruntime` for local encoder inference; and
-- `tokenizers` for BGE tokenisation.
-
-PyTorch, pandas, scikit-learn, and Hugging Face Transformers are not runtime
-dependencies. `huggingface_hub` is only an optional build-time route for
-obtaining a different embedding model.
+There are no third-party runtime dependencies at all: `requirements.txt` pins
+nothing. NumPy, ONNX Runtime, and `tokenizers` were previously listed for an
+optional `BAAI/bge-small-en-v1.5` sentence-embedding signal; that signal never
+beat the lexical pipeline on any split and has been removed, along with
+`src/embed.py` and `tools/build_embeddings.py`. The measurements are kept in
+[`docs/team/dense_rerank.md`](docs/team/dense_rerank.md),
+[`docs/team/dense_route.md`](docs/team/dense_route.md), and
+[`docs/team/branch_state_encoder_eval_changes.md`](docs/team/branch_state_encoder_eval_changes.md).
+PyTorch, pandas, scikit-learn, and Hugging Face Transformers are not
+dependencies either.
 
 ### Datasets and assets
 
@@ -189,7 +217,6 @@ obtaining a different embedding model.
 | `data/generated_test_set.jsonl` | Deterministically generated supplemental evaluation sessions. | 200 sessions |
 | `data/generated_adversarial_set.jsonl` | Generated adversarial sessions for robustness checks. | 200 sessions |
 | `data/hard_set.jsonl` | Six difficult retrieval/ranking buckets generated from the catalog. | 96 sessions |
-| Optional BGE ONNX artifacts | Local encoder, tokenizer, and catalog-vector matrix used only by dense configurations. | Not committed |
 
 The source data is **Amazon Reviews 2023**, published by McAuley Lab at UCSD.
 The competition package contains product text and structured metadata, not real
@@ -229,20 +256,7 @@ wc -l data/catalog.jsonl
 
 The command should print `50000`.
 
-### 4. Optional dense-search dependencies
-
-Skip this step when reproducing the submitted offline result. To run the
-`dense_*` experiment configurations:
-
-```bash
-python3 -m pip install -r requirements.txt
-```
-
-Dense configurations also require the corresponding model and embedding
-artifacts under `data/embeddings/`. They self-disable if either the artifacts or
-libraries are absent. See `tools/build_embeddings.py` for the one-time build.
-
-### 5. Enable the optional LLM reranker
+### 4. Enable the optional LLM reranker
 
 LLM reranking is disabled by default. The named `llm_rerank_gated`
 configuration already contains the measured settings, including
@@ -307,10 +321,10 @@ This evaluates all 200 public sessions and writes the detailed output to
 
 ```text
 Hit Rate@10:    1.000000
-MRR:            0.880956
-MTTC:           3.040000
-Efficiency:     0.796000
-TechnicalScore: 0.923487
+MRR:            0.960917
+MTTC:           2.665000
+Efficiency:     0.833500
+TechnicalScore: 0.954975
 Token usage:    0
 ```
 
@@ -365,8 +379,9 @@ The observer writes an offline HTML viewer and per-session traces under
 The evaluator was not modified. Changes were selected on the development split,
 checked on the untouched holdout split, and challenged on generated and hard
 sets. The repository records unsuccessful experiments as well as successful
-ones; for example, unconditional dense retrieval and neural reranking were not
-made defaults when they failed to improve consistently across splits.
+ones; for example, dense sentence-embedding retrieval and reranking were never
+made defaults, because they failed to improve consistently across splits, and
+were eventually deleted rather than carried as dead configuration.
 
 The latest measured customer results are summarised in
 [Latest customer evaluation results](#latest-customer-evaluation-results). The
@@ -392,9 +407,10 @@ not be interpreted as a solved real-world shopping problem.
   in the local evaluator.
 - **Popularity is only a tie-break signal, but can still introduce bias.** New,
   niche, or lightly reviewed products may be disadvantaged.
-- **Semantic search is not part of the default.** The robust fallback is lexical,
-  so heavy paraphrasing can still hurt retrieval and ranking. Dense and LLM
-  routes improve some stress cases but introduce new accuracy trade-offs.
+- **Semantic search is not part of the pipeline.** Retrieval and reranking are
+  lexical, so heavy paraphrasing can still hurt both. A dense embedding route
+  was built, measured, and removed; the optional LLM reranker improves some
+  stress cases but introduces new accuracy trade-offs.
 - **The system is text-only and catalog-specific.** It does not use product
   images, availability, live pricing, or cross-category behavioral signals.
 - **The in-memory index targets this 50,000-item benchmark.** A production-scale
@@ -402,8 +418,8 @@ not be interpreted as a solved real-world shopping problem.
   and stricter latency and memory controls.
 
 Given more time, the team would run human conversation studies, evaluate on a
-larger untouched paraphrase set, calibrate a gated lexical/dense hybrid on truly
-unseen data, audit popularity and category bias, add grounded explanations for
+larger untouched paraphrase set, re-open the gated lexical/dense hybrid only
+with a calibration set that is genuinely unseen, audit popularity and category bias, add grounded explanations for
 recommendations, and move the index to a persistent service suitable for live
 catalog updates.
 
@@ -415,7 +431,7 @@ log in [`docs/team/agent_changes.md`](docs/team/agent_changes.md).
 | Team member | Main contributions |
 |---|---|
 | **Eline Ngu Xiang Ee (`Elinengu`)** | Project setup and integration; observer tooling; category-tail, stoplist, negative-facet, pair-span, slate-ramp, popularity, structured-state, adaptive orchestration, robustness fixes, and optional DeepSeek reranking work; experiment analysis and documentation. |
-| **Kwong Weng** | Elimination-scan recommendation strategy; retrieval-recall fixes; natural clarification phrasing; realism/stress harness; dual-track experiments; optional BGE embedding, dense retrieval, and dense reranking infrastructure; testing and technical documentation. |
+| **Kwong Weng** | Elimination-scan recommendation strategy; retrieval-recall fixes; natural clarification phrasing; realism/stress harness; dual-track experiments; the BGE embedding, dense retrieval, and dense reranking experiments (measured, then removed); testing and technical documentation. |
 | **`corainexia`** | BM25 field-weight tuning; facet-agreement and category-agreement reranking; customer-query facet extraction. |
 | **`xiaotong0329`** | Intent-router logic; multi-route anchor retrieval; dynamic context programming and track-aware early-recommendation gating. |
 
@@ -442,6 +458,6 @@ docs/          Competition contract, evaluation configuration, and team notes
 | Estimated API cost | $0.00 |
 | Required dependencies | Python 3.10+ standard library |
 
-The optional DeepSeek and dense-embedding configurations are not requirements
-for the offline default. DeepSeek reranking must be explicitly enabled even when
-a valid key exists in the repository-root `.env` file.
+The optional DeepSeek configuration is not a requirement for the offline
+default. DeepSeek reranking must be explicitly enabled even when a valid key
+exists in the repository-root `.env` file.

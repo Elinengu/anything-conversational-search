@@ -95,8 +95,12 @@ default only because it currently wins on held-out data.
 ## Extension points
 
 - **A new retrieval route** implements `(index, state) -> [(asin, score)]` and is
-  fused by adding one `_rrf()` call in `retrieval.retrieve()`. A dense route
-  would attach here.
+  fused by adding one `_rrf()` call in `retrieval.retrieve()`. A dense
+  sentence-embedding route did attach here (`src/embed.py`, bge-small over ONNX
+  Runtime) and was removed after it failed to clear the noise floor on any
+  split — see `docs/team/dense_route.md` and
+  `docs/team/branch_state_encoder_eval_changes.md`. Any future attempt is
+  bound by the same no-network constraint as the neural reranker below.
 - **A new clarification policy** implements `select(state, candidates) -> str` and
   `question(attribute) -> str`, and is passed via `AgentConfig(policy=...)`.
 - **A neural reranker** implements the same signature as `rerank.rerank()` and is

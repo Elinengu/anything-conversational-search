@@ -5,6 +5,13 @@ and cross-encoder work from branches `dense_rerank` / `semantic-rerank-experimen
 the live state machine and the paraphrase/browse-gated stress harness, neither of which
 existed when those branches were originally measured.
 
+> **Status: the code this document measures no longer exists.** `src/embed.py`,
+> `tools/build_embeddings.py`, the `dense_*` sweep rows and every `dense_*` /
+> `use_dense` config knob were removed in change 20, because no configuration
+> measured here ever cleared the noise floor. The commands below therefore only
+> run against the branch this was written on. The document is kept as the
+> measurement record — see `docs/team/agent_changes.md` change 20.
+
 ---
 
 ## 0. Plain-English: what is actually different from `main`, and why

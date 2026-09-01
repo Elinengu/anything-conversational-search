@@ -4,6 +4,13 @@ Branch `dense_rerank` (chain: `main <- dual_tracking <- stress_harness <- dense_
 `RetrievalConfig.use_dense`, `src/retrieval.py`, `src/embed.py`,
 `AgentConfig.browsing_retrieval`.
 
+> **Status: the code this document measures no longer exists.** `src/embed.py`,
+> `tools/build_embeddings.py`, the `dense_*` sweep rows and every `dense_*` /
+> `use_dense` config knob were removed in change 20, because no configuration
+> measured here ever cleared the noise floor. The commands below therefore only
+> run against the branch this was written on. The document is kept as the
+> measurement record — see `docs/team/agent_changes.md` change 20.
+
 ## The hypothesis
 
 `docs/team/stress_harness.md` and `docs/team/dense_rerank.md` between them locate

@@ -47,11 +47,6 @@ from src.context_programming import (  # noqa: E402
 )
 from src.state import DialogState, SessionPhase  # noqa: E402
 
-try:  # optional dense sentence-embedding signal - needs onnxruntime + tokenizers
-    from src.embed import load_embedding_index  # noqa: E402
-except Exception:  # pragma: no cover
-    load_embedding_index = None  # type: ignore[assignment]
-
 
 @dataclass
 class AgentConfig:
@@ -61,32 +56,57 @@ class AgentConfig:
     rerank: RerankConfig = field(default_factory=RerankConfig)
     #: Left unset so the Agent can build the default policy against its own index.
     policy: object | None = None
-    # Recommending before the customer has disclosed anything locks in a poor
-    # reciprocal rank, because the session ends on the first hit at any position.
-    first_recommend_turn: int = 3
-    # Shortlist size per turn; the last entry applies to all later turns.
-    # The first slate is deliberately narrow. Emitting a list ends the session
-    # the moment the target appears and freezes MRR at that position, while a
-    # wrong list costs only a turn - so revealing ten candidates on turn 3 banks
-    # whatever rank the target holds *then*, and showing four defers to turn 4,
-    # when the next disclosed constraint has re-ranked it higher. The
-    # elimination scan makes the deferral free of coverage risk: the candidates
-    # held back are the top of the survivor list next turn (see _shortlist).
-    # Measured, one process, four sets (dev / holdout / generated / hard):
+    # Turn from which a slate is emitted. Held at 3 while the first slate was
+    # four wide, because a wide early list locks in a poor reciprocal rank: the
+    # session ends on the first hit at any position. A one-item slate inverts
+    # that - an early wrong guess costs a turn (0.02) while an early right one
+    # banks rank 1 - so the sniper ramp below guesses from turn 1.
+    first_recommend_turn: int = 1
+    # Shortlist size per turn; the last entry applies to all later turns,
+    # indexed by ``turn - first_recommend_turn``.
+    #
+    # Sniper sizing: one candidate per turn, widening to 10 from turn 5. The
+    # evaluator ends a session the moment the target appears in a slate and
+    # scores its position *within that turn's list only* - earlier slates are
+    # never scored (evaluator/local_evaluator.py, `ranked.index(target) + 1`).
+    # So a one-item slate converts every eventual hit into rank 1. Moving a hit
+    # from rank r to rank 1 is worth 0.30*(1 - 1/r); an extra turn of MTTC costs
+    # 0.20/10 = 0.02, so rank is worth roughly 13x a turn and the trade is
+    # lopsided in favour of narrowing. The elimination scan is what makes the
+    # singles cumulative rather than repetitive: each turn drops everything
+    # already shown, so four singles plus the wide turns walk a deeper set of
+    # distinct candidates than one 10-item slate ever reveals - Hit@10 does not
+    # pay for the MRR.
+    #
+    # Measured, one process, four sets (dev / holdout / generated / hard).
+    # The previous regime, first_recommend_turn=3 with a 4-wide opening slate:
     #   (10,)    0.9233 / 0.9048 / 0.9181 / 0.7944   flat, the pre-ramp floor
     #   (3,10)   0.9254 / 0.9146 / 0.9212 / 0.7968
-    #   (4,10)   0.9268 / 0.9096 / 0.9197 / 0.7981   <- ships
+    #   (4,10)   0.9268 / 0.9096 / 0.9197 / 0.7981   <- previously shipped
     #   (5,10)   0.9295 / 0.9100 / 0.9210 / 0.8001
-    # First-slate sizes 3, 4 and 5 all beat the flat ramp on all four sets, so
-    # this sits mid-plateau rather than at any split's argmax - (5,10) has the
-    # better mean, but choosing it after the fact is how you buy noise.
-    # Narrowing a *second* turn is worse, not more of the same good thing:
-    # (5,5,10) scores 0.9272 / 0.9044 / 0.9187 / 0.7934, regressing holdout and
-    # hard below the floor. Each session holds four constraints disclosed at up
-    # to two per turn, so by turn 4-5 no further evidence is coming and holding
-    # narrow only spends turns. Cost of the ramp: generated-set Hit@10 0.995 ->
-    # 0.990, one session that runs out of turns. See docs/team/agent_changes.md.
-    list_size_ramp: tuple[int, ...] = (4, 10)
+    #   (5,5,10) 0.9272 / 0.9044 / 0.9187 / 0.7934   narrowing twice regressed
+    # Sniper sizing with first_recommend_turn=1, widening at turn N:
+    #   N=5      0.9521 / 0.9220 / 0.9322 / 0.8135   <- ships
+    #   N=6      0.9469 / 0.9222 / 0.9342 / 0.8131
+    #   N=7      0.9468 / 0.9257 / 0.9354 / 0.8129
+    # All three beat every row of the old regime on all four sets; among
+    # themselves the spread is 0.001 in the mean, which is noise. N=5 is chosen
+    # on hit rate rather than on score: it is the only variant that costs no
+    # session anywhere (Hit@10 1.000 / 1.000 / 0.990 / 0.885, identical to the
+    # old default), because widening earlier leaves more wide turns as the
+    # safety net. N=6 and N=7 each drop one dev session.
+    #
+    # Carrying the singles through the STAGNATING phase as well
+    # (stagnation_slate_size=1) makes every hit rank 1 - dev MRR 0.967 against a
+    # 0.967 hit rate - but costs three dev sessions of hit rate for it, netting
+    # -0.0146. The wide stagnation slate stays. See docs/team/agent_changes.md.
+    list_size_ramp: tuple[int, ...] = (1, 1, 1, 1, 10)
+    # Slate size the STAGNATING orchestration phase emits, overriding the ramp
+    # (src/context_programming.py, Phase 3). A stalled session has stopped
+    # producing evidence, so the branch was written to go wide and bank whatever
+    # rank the target holds. 10 is the historical value and the ramp's own wide
+    # entry; set it to 1 to keep sniper sizing through stagnation as well.
+    stagnation_slate_size: int = 10
     # Optional confidence gate: emit earlier than first_recommend_turn when the top
     # candidate clearly leads the pool. 0.0 disables it.
     # 0.15-0.50 all beat 0.0 on dev and holdout alike; the curve is flat, so this
@@ -163,21 +183,6 @@ class Agent:
         # browse-gated loss (measured). expected_broad_answers=4.0 is what
         # branch dual_tracking shipped for the same job (docs/team/agent_changes.md).
         self._browsing_policy = InfoGainPolicy(self.facets, expected_broad_answers=4.0)
-        # Dense sentence-embedding index, shared by the S5 dense retrieval route
-        # and the S6 dense_weight term. Loaded only when some config asks for it
-        # (rerank.dense_weight > 0, or retrieval.use_dense); missing artifact /
-        # deps -> None and both stages run BM25-only exactly as before.
-        self.embed = None
-        needs_embed = (
-            self.config.rerank.dense_weight > 0.0
-            or self.config.retrieval.use_dense
-        )
-        if needs_embed and load_embedding_index is not None:
-            try:
-                candidate = load_embedding_index(catalog_path=catalog_path)
-                self.embed = candidate if candidate.available else None
-            except Exception:
-                self.embed = None
         # Cheap to construct even when disabled - see AgentConfig.llm above.
         self.llm = LLMReranker(self.config.llm)
         self._states: dict[str, DialogState] = {}
@@ -229,23 +234,10 @@ class Agent:
         is_buying = (route.name == "buying") if route else False
         track_name = route.name if route else "browsing"
 
-        # One query vector per turn, shared by every dense consumer: the S5
-        # dense retrieval route and the S6 dense_weight rerank term. None
-        # unless a config asked for embeddings (self.embed stays None then).
-        qvec = None
-        if self.embed is not None:
-            try:
-                qvec = self.embed.encode_query(state.full_text())
-            except Exception:
-                qvec = None
-
-        candidates = retrieve(
-            self.index, state, self.config.retrieval,
-            track=track_name, embed=self.embed, qvec=qvec,
-        )
+        candidates = retrieve(self.index, state, self.config.retrieval)
         candidates = rerank(
             self.index, state, candidates, self.config.rerank,
-            track=track_name, embed=self.embed, qvec=qvec, llm=self.llm,
+            track=track_name, llm=self.llm,
         )
         state.observe_pool(candidates)
 
@@ -267,13 +259,10 @@ class Agent:
                     state,
                     self.config.retrieval,
                     route_hint=plan.retrieval_route,
-                    track=track_name,
-                    embed=self.embed,
-                    qvec=qvec,
                 )
                 candidates = rerank(
                     self.index, state, candidates, self.config.rerank,
-                    track=track_name, embed=self.embed, qvec=qvec, llm=self.llm,
+                    track=track_name, llm=self.llm,
                 )
                 state.observe_pool(candidates, advance=False)
             self._apply_plan_to_state(state, plan)

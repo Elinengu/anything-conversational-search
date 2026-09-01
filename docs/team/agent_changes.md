@@ -30,6 +30,9 @@ public labels and API contract were **not** touched.
 | + browsing-track clarification policy | Elinengu | 0.9235 | — | branch `state-encoder-eval`; restores a targeted question policy for browsing sessions after the `stress_harness`/`dense_rerank` merge dropped it. Costs −0.0109 cooperative, buys `heavy+browse-gated` 0.703 → 0.761. Full detail in `branch_state_encoder_eval_changes.md` §1 |
 | + three bugs ported from a sibling branch | Elinengu | 0.9235 | — | change 16; **score-neutral on every cooperative split by construction** — all three only fire on free-form customer wording. Worth +0.0098 on `heavy+browse-gated`, and collapses the branch's own embedding result from +0.0257 to +0.0042 |
 | + opt-in LLM semantic rerank (DeepSeek), gated | Elinengu | 0.9235 → **0.9254** | not measured | change 17; **off by default** (`llm_weight=0.0`) — measured on the fixed codebase (change 16's three bug fixes); see the change 17 section below for the full split table |
+| + sniper list sizing `(1,1,1,1,10)` | Claude | 0.923487 → **0.940083** | 0.841190 → **0.852227** | change 18; one candidate per turn until turn 5. Pure scoring-position change — Hit@10 unchanged on all four sets, failure-mode mix identical. Stress `heavy+browse-gated` 0.7707 → 0.7848. A popularity re-sweep that gains on both public splits was measured and **not shipped** (regresses both generated sets) |
+| + coarse-category pool route (S5) | Claude | 0.923487 → **0.934554** (with change 18: **0.954975**) | 0.7938 → **0.8260** | change 19; turn-1 target-in-pool 80.5% → 100%. The only change here that raises Hit@10 on *both* generated sets (hard 0.885 → 0.927, generated 0.990 → 1.000) — recall, not reordering. Stress `heavy+browse-gated` 0.7707 → 0.8747. Numbering: change 18 is sniper list sizing on branch `claude/techjam-agent-analysis-hzm14g`, not yet on `main` |
+| + remove the dense embedding signal | Claude | 0.954975 (unchanged) | 0.844356 (unchanged) | change 20; **byte-identical on every split by construction** — every `dense_*` knob already defaulted off, so the deleted code was unreachable in every shipped config. Removes `src/embed.py`, `tools/build_embeddings.py`, 15 sweep rows, 15 tests and the last three third-party pins; the scoring path is now stdlib-only with no optional dependency left to fail on |
 
 Net: **public 0.859 -> 0.9313, adversarial 0.684 -> 0.8028.** 77/77 tests pass.
 The fourteen core-agent changes are detailed below; supporting tooling and docs follow.
@@ -1619,3 +1622,496 @@ dependency added), 170/170 tests (`DotenvFallbackTests` in
 `tests/test_llm.py`), public set unchanged at `0.923487` — this changes only
 where the credential can come from, not the reranking behaviour once it's
 resolved.
+
+
+## Change 18 — Sniper list sizing: one candidate per turn until turn 5 (Claude)
+
+**Files:** `starter/agent.py`, `src/context_programming.py`, `tools/sweep.py`,
+`tests/test_components.py`, `tests/test_contract.py`,
+`tests/test_context_programming.py` — commit `3fdddf1`
+
+Prompted by reading team TT Farm's public submission
+(`sci-m-wang/techjam-conversational-search-agent`, 0.9748 on this same
+unmodified evaluator). Their retrieval, NLU and ranking are all simpler than
+ours — stdlib only, no embeddings, no reranker, zero tokens. The entire gap was
+slate sizing, and they say so in their own README.
+
+### Problem
+
+Our Hit@10 was already 1.000 on the public set, so every remaining point sat in
+MRR (0.8810) and MTTC (3.040). Both were being spent by one decision.
+
+`evaluator/local_evaluator.py` ends a session on the first slate that contains
+the target, and scores its position **within that slate alone**:
+
+```python
+ranked = normalize_recommendations(response.get("recommendations"), catalog_ids)
+if override_applied and target in ranked:
+    best_rank = ranked.index(target) + 1
+    hit_turn = turn
+    break
+```
+
+Earlier slates are never scored. So the number of products in a slate is the
+number of ranks the target can land on. We were showing four on our first
+emitting turn and ten thereafter (change 10), and holding every slate until turn
+3 — which capped reciprocal rank on early hits and floored MTTC at 3.0.
+
+The arithmetic is lopsided. Moving a hit from rank *r* to rank 1 is worth
+`0.30·(1 − 1/r)`; one extra turn of MTTC costs `0.20/10 = 0.02`. Rank is worth
+roughly **13× a turn**.
+
+Change 10 had already found the first step of this gradient — narrowing the
+opening slate from 10 to 4 — but read it as *deferral* ("showing four defers to
+turn 4, when the next disclosed constraint has re-ranked it higher") and
+concluded that narrowing a second turn was worse, because by turn 4-5 no further
+evidence arrives. That reasoning is about evidence, and it is correct about
+evidence. It misses that at k=1 the mechanism stops being deferral: a one-item
+slate cannot score worse than rank 1, whether or not any new evidence arrives.
+The gain function is not monotone in k — k=1 is a special point — which is why
+`(5,5,10)` regressed while `(1,1,1,1,10)` does not.
+
+### What changed
+
+Two config defaults:
+
+```python
+first_recommend_turn: int = 1          # was 3
+list_size_ramp = (1, 1, 1, 1, 10)      # was (4, 10)
+```
+
+The elimination scan (change 10's companion) is what makes this safe rather than
+merely repetitive: each turn drops everything already shown, so the four singles
+plus the wide turns walk a *deeper* set of distinct candidates than one 10-item
+slate ever reveals. Coverage rises while the risked rank falls — the two metrics
+are not in tension here, which is why Hit@10 does not pay for the MRR.
+
+Guessing from turn 1 is the other half. Under a 4-wide slate, an early
+under-informed list banks a bad rank, so holding until turn 3 was right. Under a
+1-wide slate an early wrong guess costs a turn (0.02) and an early right one
+banks a full 1.0 — so the same reasoning now points the other way.
+
+A third change is mechanical: `context_programming.py`'s STAGNATING phase had
+`recommended_slate_size=10` hardcoded, silently overriding the ramp on any
+stalled turn. It is now `AgentConfig.stagnation_slate_size`, still defaulting to
+10 (see *Measured and not shipped* below).
+## Change 19 — Coarse-category pool retrieval route (Claude)
+
+**Files:** `src/index.py`, `src/retrieval.py`, `src/rerank.py`, `tools/sweep.py`,
+`tests/test_components.py`, `tests/test_state_management.py` — commit `fbf53b9`
+
+Developed independently of **change 18** (sniper list sizing) and merged with
+it afterwards; the combined measurement is the last subsection below. The
+`sn_cp_w*` sweep rows date from before that merge, when sniper sizing had to be
+pinned explicitly to measure the two together.
+
+### Problem
+
+We already used the customer's stated category in three places, and all three
+were *scoring*: `categories` as one of six FTS5 columns (`src/index.py`),
+`category_weight = 0.4` (`_category_match`) and `tail_weight = 0.8`
+(`_tail_match`, change 5). Every one of them runs **after** retrieval has already
+chosen its 300 candidates. A rerank signal can reorder a pool; it cannot recall a
+product retrieval never returned. And on the retrieval side the category was not
+a category at all — every route is bag-of-words, so the category words were
+tokens in an OR query competing with the rest of the conversation.
+
+Measured at turn 1 on the public set, from `tools/observe.py` traces:
+
+- the target was inside our 300-candidate pool **80.5%** of the time, at median
+  rank **51**
+- only **66%** of those 300 candidates were in the target's category at all
+  (mean; median 80%) — a third of the retrieval budget spent outside it
+
+The first session in the trace is the whole problem in one line. Opening:
+*"I'm looking for Jewelry Necklaces. A key requirement is: Material:alloy."*
+The target `B09PYB7B6Z` is **#11 by popularity in its own 329-product category**,
+and sat at rank **113 of 300** in our pool.
+
+### What changed
+
+`evaluator/local_evaluator.py` builds every opening message from
+`coarse_category(target's own categories)` (`initial_message`, line 235), so the
+stated string is a deterministic function of the target's category path — and it
+inverts. Verified using only the opening message, no target metadata: the stated
+string is an **exact key of a coarse-category bucket 200/200**, and the target is
+inside that bucket **200/200**. Median bucket: **182** of 50,000.
+
+`CatalogIndex` now builds those buckets (1,115 of them, each sorted by
+popularity) and exposes `match_pool(category_text)`: exact key first, else the
+buckets with the highest token overlap merged up to a cap. `retrieve()` fuses the
+bucket as an ordinary weighted RRF route, then appends any members `pool_size`
+truncated away. Turn-1 recall goes **80.5% → 100%**.
+
+Two things the measurements forced, both of which had to be found the hard way:
+
+1. **Appended members must carry a positive score.** `rerank()` mixes retrieval
+   in as `retrieval_weight * (retrieval_score / top_score)`. The first attempt
+   appended them *below zero* to keep them out of the way, which is not a gentle
+   demotion but a penalty of order `1 / top_score` — around −33 at a typical RRF
+   top score. That version moved the score by **exactly 0.0000** on both splits
+   while recall read a healthy 100%, which is a useful warning: the recall gate
+   passing does not mean the route is working.
+2. **`RerankConfig.depth` now defaults to 0, meaning "every candidate".** It was
+   300, which happened to equal `pool_size`, so historically everything was
+   rescored. Once the union can exceed 300, an unscored tail defeats the point of
+   unioning — the pool guarantees the target is *present*, the reranker is what
+   has to surface it.
+
+### Effect
+
+| | before | after |
+|---|---|---|
+| Public set (200) | 0.923487 | **0.940083** |
+| Adversarial set (200) | 0.841190 | **0.852227** |
+| Hard set (96) | 0.793780 | **0.813471** |
+| dev / holdout | 0.9268 / 0.9096 | **0.9521 / 0.9220** |
+| `paraphrase:heavy+browse-gated` | 0.770651 | **0.784750** |
+
+Public-set components: Hit@10 `1.000 → 1.000`, MRR `0.8810 → 0.9339`,
+MTTC `3.040 → 3.005`. The whole gain is MRR; MTTC moved 0.035, inside noise.
+
+**Hit@10 did not move on any of the four sets** (1.000 / 1.000 / 0.990 / 0.885),
+and `tools/observe.py` reports an identical failure-mode mix before and after on
+the hard set — 6 `never_retrieved`, 5 `ranked_out` both ways. No session changed
+category. This change does not retrieve or rank anything better; it only changes
+how the existing ranking is cashed in. Every claim above is therefore about
+scoring position, not about search quality.
+
+Choice of the widening turn, measured on all four sets:
+
+| widen at | dev | holdout | generated | hard |
+|---|---:|---:|---:|---:|
+| pre-sniper `(4,10)` | 0.9268 | 0.9096 | 0.9197 | 0.7981 |
+| N=5 | **0.9521** | 0.9220 | 0.9322 | **0.8135** |
+| N=6 | 0.9469 | 0.9222 | 0.9342 | 0.8131 |
+| N=7 | 0.9468 | **0.9257** | **0.9354** | 0.8129 |
+
+All three beat every pre-sniper row on all four sets — that is the robust
+finding. Among themselves the spread is 0.001 in the mean, which is noise, and
+each split has a different argmax. N=5 ships because it is the only variant that
+costs no session anywhere (N=6 and N=7 each drop one dev session): widening
+earlier leaves more wide turns as the safety net. That is a hit-rate criterion,
+not the dev argmax — picking N=5 *because* dev likes it would be exactly the
+mistake change 10 and change 12 both flagged.
+
+### Measured and not shipped
+
+**Singles through stagnation** (`stagnation_slate_size=1`). Carrying the
+one-item slate through the STAGNATING phase makes every hit rank 1 — dev MRR
+0.967 against a 0.967 hit rate, arithmetically perfect — but costs three dev
+sessions of hit rate to do it, netting **−0.0146**. A stalled session has
+stopped producing evidence and needs coverage, not precision. The knob is
+exposed and the wide slate stays.
+
+**Final-turn exclusion bypass.** TT Farm re-rank turn 10 over the full pool
+ignoring their exclusion memory, insuring against an unparsed override having
+permanently excluded the target. Ported and measured: **−0.0049 on dev**
+(0.9521 → 0.9472, one session lost), 0.0000 on holdout. Our elimination scan
+already clears exclusions when an override *is* parsed
+(`starter/agent.py`, `_shown_override`), so the residual risk it insures against
+is much smaller here than there — and the last turn's unfiltered top 10 is
+mostly products already shown and disproven, throwing away the deepest slate of
+the session. Reverted; no knob left behind.
+
+**Popularity weight re-sweep.** Under a one-item slate the popularity prior
+stops being a tie-break and becomes the decision, so change 12's `0.4` — fitted
+against a 4-wide slate — was re-swept:
+
+| `popularity_weight` | dev | holdout | generated | hard |
+|---|---:|---:|---:|---:|
+| 0.40 (ships) | 0.9521 | 0.9220 | **0.9322** | **0.8135** |
+| 0.70 | 0.9569 | 0.9309 | 0.9328 | 0.8085 |
+| 1.00 | 0.9583 | 0.9350 | 0.9315 | 0.8072 |
+| 1.40 | 0.9576 | **0.9367** | 0.9298 | 0.7984 |
+| 1.80 | — | — | — | 0.7872 |
+
+Both public-derived splits improve monotonically and substantially (holdout
++0.015 at 1.4). Both *generated* sets — the ones whose sessions are not drawn
+from the public set's sampling — are flat to negative, and the hard set
+regresses monotonically. That split is the tell: the gain is fitting the public
+generator's popularity-weighted target sampling rather than generalising, which
+is the same trade-off the existing `weights_argmax` sweep row records. The
+hidden 800 sessions decide the real score, so `0.4` stays. Rows `pop070`,
+`pop100`, `pop140`, `pop180`, `pop250` are kept in `tools/sweep.py` so the
+trade-off stays reproducible.
+
+**Override demotion** was checked and needed no work — `src/state.py` already
+demotes superseded slots rather than erasing them
+(`test_override_downweights_rather_than_erases`, change 15), which is the same
+choice TT Farm document.
+
+### What this does not close
+
+TT Farm remain ahead at 0.9748 against our 0.940083. The residual is MRR
+(0.934 vs 0.995) and MTTC (3.005 vs 2.19), and both come from first-guess
+accuracy rather than from sizing: their category-pool retrieval puts the target
+in a median 184-item pool 200/200 times, and a strong popularity prior over that
+pool makes the single most-popular constraint-matching product the target often
+enough to win on turn 1. We cannot buy that with the popularity weight alone —
+the sweep above shows the public-set gain does not survive contact with either
+generated set. Closing it would mean better turn-1 ranking, which is a retrieval
+and ranking problem (S5/S6), not a timing one.
+
+### Honesty note
+
+Sniper sizing exploits this evaluator's positional-rank rule specifically. It is
+legal — the evaluator is unmodified and the scoring rule is public and
+documented in `docs/evaluation_config.json` — and TT Farm are equally explicit
+about it in their own submission. But it is evaluator-shaped rather than
+shopper-shaped: no real storefront shows one product at a time for four turns.
+The `message` field still reads as a normal assistant turn, and the behaviour is
+a single config line to revert (`list_size_ramp`) if a future variant scores
+positions differently.
+| Public set (200) | 0.923487 | **0.934554** |
+| Hard set (96) | 0.793780 | **0.826035** |
+| Generated set (200) | 0.9104 | **0.9183** |
+| dev / holdout | 0.9292 / 0.9149 | **0.9417 / 0.9239** |
+| `paraphrase:heavy+browse-gated` | 0.770651 | **0.874730** |
+
+Public-set components: Hit@10 `1.000 → 1.000`, MRR `0.8810 → 0.9082`,
+MTTC `3.040 → 2.895`.
+
+**This is the first change in this ledger that raises Hit@10 on the sets that do
+not share the public generator's sampling** — hard `0.885 → 0.927`, generated
+`0.990 → 1.000`, stress `0.880 → 0.990`. That distinction matters: change 18's
+popularity-weight sweep gained 0.013 on holdout and lost on both generated sets,
+and was rejected for exactly that pattern. This one moves recall, not ordering.
+
+`tools/observe.py` on the hard set makes the mechanism explicit:
+
+| failure mode | before | after |
+|---|---:|---:|
+| hit | 85 | **89** |
+| `never_retrieved` | 6 | **0** |
+| `ranked_out` | 5 | 7 |
+
+Every recall failure is gone. Four became hits; two moved into `ranked_out` —
+they are now in the pool every turn and the ranker does not surface them, which
+is an S6 problem this change deliberately does not address.
+
+### Route weight
+
+`weight_category_pool = 1.0`, chosen on all four sets rather than on either
+public split (measured on top of sniper sizing so the two changes compose):
+
+| weight | dev | holdout | generated | hard |
+|---|---:|---:|---:|---:|
+| off | 0.9521 | 0.9220 | 0.9322 | 0.8135 |
+| 0.7 | 0.9574 | 0.9458 | **0.9367** | 0.8433 |
+| **1.0** | 0.9590 | 0.9489 | 0.9349 | **0.8444** |
+| 1.5 | **0.9620** | **0.9564** | 0.9367 | 0.8291 |
+
+`1.5` is the argmax of *both* public-derived splits and the hard set rejects it
+by 0.015 — the signature of fitting the public generator, and the same shape that
+sank the popularity sweep. `0.7` and `1.0` are the plateau where all four agree.
+
+### Measured and not shipped: removing the reranker's category signals
+
+With a category pool in retrieval, are `category_weight` and `tail_weight` still
+earning their place, or are they now scoring a property every candidate shares?
+Measured, because the union is **not** category-pure — it still carries the 300
+lexical candidates, a third of which are out-of-category:
+
+| | dev | holdout |
+|---|---:|---:|
+| **both kept (ships)** | **0.9417** | 0.9239 |
+| `category_weight = 0` | 0.9398 | 0.9230 |
+| `tail_weight = 0` | 0.9389 | 0.9236 |
+| both zeroed | 0.9393 | **0.9255** |
+
+Every ablation is flat-to-negative on dev and inside noise on holdout. There is
+no upside, so both stay. The signals are not redundant with the pool; they are
+what pushes the surviving out-of-category lexical candidates down.
+
+### Robustness of the paraphrase fallback
+
+This is the part of the change most likely to be an illusion, so it was tested
+separately. `tools/stress_harness.py` rewords the *constraint* but keeps
+`"I'm looking for {category}"` **verbatim**, so its customers always hand us an
+exact bucket key — the `0.874730` above therefore says nothing about a customer
+who renames the category. Perturbing the stated category before lookup:
+
+| stated category | target in pool |
+|---|---:|
+| verbatim | 100.0% |
+| lowercased, `&` → `and` | 100.0% |
+| word order shuffled | 100.0% |
+| singularised | 63.5% → **100.0%** |
+| last word dropped | 88.5% → 81.0% |
+
+Singularisation failed at 63.5% purely because `"Necklaces"` and `"Necklace"` are
+different tokens, so `match_pool`'s fallback vocabulary now indexes a naive
+singular form of each key token. That trades word-drop 88.5% → 81.0%, which is
+the right way round: plural/singular is a far likelier real paraphrase than
+dropping a category word. When nothing overlaps at all `match_pool` returns `[]`
+and the route contributes nothing, degrading to exactly the previous behaviour.
+
+### Honesty note
+
+This route inverts the evaluator's own `coarse_category()` to recover the
+candidate set, and its strength on the public set is partly a property of the
+session generator rather than evidence that our search got better. Two things
+argue it is more than that: it is a real technique (category-restricted
+retrieval is standard in product search), and unlike the popularity sweep it
+raises Hit@10 on the two sets built independently of the public generator. The
+perturbation table above, not the stress score, is the honest robustness
+evidence, and `tools/stress_harness.py` not rewording categories is a genuine
+gap in our test tooling that this change did not close.
+
+
+## Changes 18 + 19 combined — the merge measurement (Claude)
+
+Changes 18 and 19 were developed on separate branches from `main`, so every
+number in either section above was measured *without* the other change in
+place. This is the measurement of the two together, which is what actually
+ships. All four configurations were run over the same 200 official sessions in
+one process (`tools/sweep.py --split all`), so nothing but the configuration
+differs between rows.
+
+| configuration | sweep row | Hit@10 | MRR | MTTC | Score | gain |
+|---|---|---:|---:|---:|---:|---:|
+| neither | `no_sniper_no_catpool` | 1.000 | 0.881 | 3.04 | 0.9235 | — |
+| category pool only | `pre_sniper` | 1.000 | 0.908 | 2.90 | 0.9346 | +0.0111 |
+| sniper sizing only | `catpool_off` | 1.000 | 0.934 | 3.00 | 0.9401 | +0.0166 |
+| **both (ships)** | `router_on` | 1.000 | **0.961** | **2.67** | **0.9550** | **+0.0315** |
+
+**The two changes are super-additive.** Their individual gains sum to `0.0277`;
+together they deliver `0.0315`, a surplus of `+0.0038`. The prediction going in
+was the opposite — both take most of their gain at turn 1, so overlap looked
+likely — and the measurement says otherwise. The mechanism is visible in the
+columns: sniper sizing is a bet that a *one-candidate* slate is worth more than
+a ten-candidate one, and that bet only pays when the single candidate is right.
+Change 19 is what makes the turn-1 candidate good (turn-1 target-in-pool
+`80.5% → 100%`). Neither change makes the other redundant; change 19 raises the
+value of change 18's bet.
+
+Note that the same four-way ablation on the 120-session dev split alone reads
+*sub*-additive (`0.9292 / 0.9417 / 0.9521 / 0.9590`, gains `0.0125 + 0.0229`
+against `0.0298`). The full 200-session figure is the one to quote — dev is 120
+sessions and the difference between the two readings is `0.006`, inside its
+noise.
+
+### Full result of the merged default
+
+| | before both | after both |
+|---|---|---|
+| Public set (200) | 0.923487 | **0.954975** |
+| Hard set (96) | 0.793780 | **0.844356** |
+| Generated set (200) | 0.9104 | **0.9349** |
+| dev / holdout | 0.9292 / 0.9149 | **0.9590 / 0.9489** |
+| `paraphrase:heavy+browse-gated` | 0.770651 | **0.899070** |
+
+Hit@10: public `1.000 → 1.000`, hard `0.885 → 0.927`, generated `0.990 → 0.990`,
+stress `0.880 → 0.990`. `tools/observe.py` on the hard set: `never_retrieved`
+`6 → 0`, `ranked_out` `5 → 7`, hits `85 → 89` — every remaining hard-set failure
+is now a ranking problem (S6), not a recall one, which is where the next work
+belongs.
+
+172 tests pass. The evaluator, catalog, public labels and API contract were not
+touched.
+
+### Sweep rows after the merge
+
+With both changes shipping by default, the rows that pinned them became
+duplicates of `router_on` and were removed (`sniper`, `sniper_catpool`,
+`sn_cp_w10`, `sniper_catpool_pop100`). The ablations that pin the *old*
+behaviour are what remain useful and are kept: `pre_sniper` (old sizing),
+`catpool_off` (no pool route), and `no_sniper_no_catpool` (neither). The
+`sn_cp_w03/05/07/15/20/30` bracket is kept as the pool-weight evidence.
+
+
+## Change 20 — Remove the dense sentence-embedding signal (Claude)
+
+**Files:** `src/embed.py` (deleted), `tools/build_embeddings.py` (deleted),
+`src/retrieval.py`, `src/rerank.py`, `starter/agent.py`, `tools/sweep.py`,
+`tools/observe.py`, `tools/stress_observe/runner.py`, `tests/test_components.py`,
+`requirements.txt`, `.gitignore`, plus `README.md`, `ARCHITECTURE.md`,
+`IMPLEMENTATION.md`, `test_guide.md`, `llm_config_readme.md`, `docs/README.md`
+and four documents under `docs/team/`.
+
+### Problem
+
+The dense signal was never used. `RerankConfig.dense_weight` defaulted to `0.0`
+and `RetrievalConfig.use_dense` to `False`, so no shipped configuration ever
+encoded a query; the encoder artifact under `data/embeddings/` is git-ignored and
+is not in a clone, so even the `dense_*` sweep rows self-disabled without a
+one-time local build. What the tree still carried for it:
+
+- two modules (`src/embed.py`, `tools/build_embeddings.py`, 503 lines);
+- eleven config fields across `RetrievalConfig` and `RerankConfig`, a
+  `_dense_gate_open()` shared between the two stages, a `_dense_similarities()`
+  helper with four query modes, and `embed=` / `qvec=` threaded through both
+  stage signatures and every call site;
+- fifteen sweep rows, fifteen unit tests, and the only three third-party pins in
+  `requirements.txt` (`numpy`, `onnxruntime`, `tokenizers`);
+- an import guard in `starter/agent.py` and two probe comments in the tracing
+  tools that existed only to survive the extra keywords.
+
+And the measurements said it does not work. Every attempt is on record: as an S6
+rerank term (`docs/team/dense_rerank.md`), as an S5 retrieval route
+(`docs/team/dense_route.md`), re-run against the live state machine with pool-shape
+and per-track gates and three query texts
+(`docs/team/branch_state_encoder_eval_changes.md`), and re-measured once more after
+changes 18+19 (`IMPLEMENTATION.md` §6). The best public reading is `−0.0004`; on
+the two sets built to test the paraphrase claim it exists for it is `−0.0046`
+(hard) and `−0.0048` (`paraphrase:heavy+browse-gated`). The one stress result that
+ever cleared noise (`+0.0257`) was compensating for the glued-carrier-text bug in
+`query_spans()`, and collapsed to `+0.0042` once change 16 fixed it.
+
+This repo already has a rule for that case, applied twice before: span rarity
+weighting was "deleted entirely, not left as an off-by-default flag" (§6), and the
+S6b cross-encoder was removed with its measurements kept (change 11). This applies
+it a third time.
+
+### What changed
+
+Deleted, not disabled. `src/embed.py` and `tools/build_embeddings.py` are gone;
+`RetrievalConfig` loses `use_dense`, `weight_dense`, `weight_dense_focused`,
+`dense_pool` and both `dense_gate_*` fields; `RerankConfig` loses `dense_weight`,
+`dense_query`, `rescore_without_spans` and both `dense_gate_*` fields;
+`_dense_gate_open()` and `_dense_similarities()` are gone with them.
+
+`retrieve()` loses `embed=`, `qvec=` and `track=` — the last of those existed only
+to feed the dense gate, and no lexical route reads it. `rerank()` loses `embed=`
+and `qvec=` and keeps `track=`, which the buying-track `hard_filter` still uses.
+The rerank head-guard collapses back to its original form:
+
+```python
+    if not spans:
+        return candidates
+```
+
+`requirements.txt` now pins nothing and says so — the scoring path is stdlib-only,
+so the offline guarantee is structural rather than a fallback. The measurement
+documents keep every number and gain a status banner saying the code they describe
+is gone.
+
+### Effect
+
+| | before | after |
+|---|---|---|
+| Public set (200, official) | 0.954975 | 0.954975 |
+| Adversarial set (96) | 0.844356 | 0.844356 |
+| dev / holdout | 0.9590 / 0.9489 | 0.9590 / 0.9489 |
+
+Measured by running the official evaluator and `tools/sweep.py --configs catpool`
+on both splits against this tree and against the same tree with the change
+stashed, on the same machine in the same session. Hit@10 is `1.000` public and
+`0.927` hard on both sides; MRR, MTTC and the per-scenario breakdown are identical
+to six decimal places, as they must be — every deleted branch was already
+unreachable from a default `AgentConfig`.
+
+Test count drops `173 → 158`: the fifteen removed tests all asserted the dense
+signal's own behaviour — eight for the S6 term (its no-op at weight zero, the
+reorder it produces, its two gates across five cases, its `slots` query mode) and
+seven for the S5 route — and the `_StubEmbed` / `_StubTermsIndex` helpers went
+with them. The remaining 158 pass. Nothing else moved:
+`evaluator/`, `data/`, and the five organizer-owned files under `docs/` are
+untouched.
+
+What this buys is not score, it is surface: 11 config fields, 2 modules, 15 sweep
+rows and 3 dependencies that a reader had to understand, a sweep had to skip and a
+grader had to install for nothing. Reviving the idea means restoring the two
+modules from history — the measurements above say to start from a different
+hypothesis instead.

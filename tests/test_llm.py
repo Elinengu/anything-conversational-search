@@ -58,8 +58,19 @@ class AvailabilityTests(unittest.TestCase):
             self.assertFalse(LLMReranker(LLMConfig(enabled=False)).available)
 
     def test_enabled_but_no_key_is_unavailable(self) -> None:
-        with mock.patch.dict("os.environ", {}, clear=True):
+        # Both sources must be silenced, not just the environment: since the
+        # .env fallback was added, clearing os.environ alone left this test
+        # passing only on machines without a real key file - i.e. it failed for
+        # anyone set up the way llm_config_readme.md tells them to set up.
+        with mock.patch.dict("os.environ", {}, clear=True), \
+                mock.patch("src.llm._read_dotenv", return_value=""):
             self.assertFalse(LLMReranker(LLMConfig(enabled=True)).available)
+
+    def test_dotenv_alone_is_enough_to_be_available(self) -> None:
+        """The environment being empty is not itself a reason to be unavailable."""
+        with mock.patch.dict("os.environ", {}, clear=True), \
+                mock.patch("src.llm._read_dotenv", return_value="sk-from-dotenv"):
+            self.assertTrue(LLMReranker(LLMConfig(enabled=True)).available)
 
     def test_enabled_with_key_is_available(self) -> None:
         with mock.patch.dict("os.environ", {"DEEPSEEK_API_KEY": "sk-test"}):

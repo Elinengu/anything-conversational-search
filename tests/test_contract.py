@@ -80,10 +80,22 @@ class ContractTests(unittest.TestCase):
         state = self.agent._states["session-d"]
         self.assertEqual(state.turn_count, 0, "state bled across sessions")
 
-    def test_no_recommendations_before_evidence(self) -> None:
+    def test_opening_turn_risks_only_one_candidate(self) -> None:
+        """Turn 1 guesses, but with a single candidate.
+
+        The agent used to hold every slate until turn 3, because a wide early
+        list banks whatever rank the target held at the time. Under sniper
+        sizing that reasoning inverts: a one-item slate can only ever score
+        rank 1, so an early guess is cheap (a turn) and an early hit is worth
+        the full reciprocal rank. What must not happen is a *wide* opening
+        slate on no evidence.
+        """
         self.agent.reset("session-e", {})
-        first = self.agent.respond("session-e", "I'm looking for necklaces, but I'm still exploring.", 1, 10)
-        self.assertEqual(first["recommendations"], [], "recommended before any constraint was disclosed")
+        first = self.agent.respond(
+            "session-e", "I'm looking for necklaces, but I'm still exploring.", 1, 10)
+        self.assertLessEqual(
+            len(first["recommendations"]), 1,
+            "risked more than one candidate before any constraint was disclosed")
 
     def test_top_k_is_respected(self) -> None:
         self.agent.reset("session-f", {})

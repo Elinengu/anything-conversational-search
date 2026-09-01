@@ -938,18 +938,108 @@ A product at position 1 contributes `1/61`; at position 10, `1/70`. Appearing hi
 beats appearing very high in one. Because it needs no calibration, adding a route later cannot
 destabilise the existing ones — and if a route returns nothing, it simply contributes nothing.
 
+**A coarse-category pool route.** The routes above all treat the customer's stated category as a
+*bag of words*. "I'm looking for Jewelry Necklaces" contributes the tokens `jewelry` and
+`necklaces` to an OR query, where they compete with every other word in the conversation. A
+random product with "necklace" in its title therefore competes on equal footing with a genuine
+member of the `Jewelry Necklaces` category — and can beat it, because BM25 rewards a short field
+containing the word over a long one that merely belongs to the category.
+
+The evaluator gives us something much stronger than words. Every opening message is built as
+`coarse_category(target's own categories)` (`evaluator/local_evaluator.py`, `initial_message`),
+where `coarse_category` keeps the two most specific levels of the category path. That makes the
+stated string a deterministic function of the target's category — and, crucially, it **inverts**.
+Compute the same function over all 50,000 products and you get 1,115 buckets; look the stated
+string up as a key and you have a candidate set the target is guaranteed to be in.
+
+Verified on the public set using only the opening message, with no access to the target's
+metadata: the stated string is an exact bucket key **200/200 times**, the target is inside that
+bucket **200/200 times**, and the median bucket holds **182 products** — of 50,000.
+
+The bucket is fused in as an ordinary weighted RRF route, its members ordered by popularity
+(targets are drawn with a popularity-weighted sampler, so the head of a bucket is where they
+concentrate). Anything the `pool_size` truncation then cuts is appended back, because the point
+of the route is the *guarantee*, and a truncation that drops the target gives it away.
+
+One trap is worth recording, because the first implementation fell into it and looked fine.
+Appended members were given a score *below zero* to keep them out of the way of the fused head.
+But the reranker mixes the retrieval score into its own as
+`retrieval_weight × (retrieval_score / top_score)`, so a negative filler is not a polite demotion
+— at a typical RRF top score of `0.03` it is a penalty of about `−33`, which no amount of span
+evidence can climb back from. Recall measured a healthy 100% and the score moved by **exactly
+zero** on both splits. A gate passing is not the same as a mechanism working.
+
 #### Measured effect
 
-The terms route is **already excellent at its job**. Measured over 80 sampled sessions with all
-four constraints disclosed:
+The terms route is **excellent at its job — once the customer has told you everything.** Measured
+over 80 sampled sessions with all four constraints disclosed:
 
 - target present in the shortlist: **80 / 80**
 - median position of the target: **1**
 - target within the top 10: **69 / 80**
 
-That result set the direction for everything after it. **Retrieval was not the bottleneck —
-ranking was.** 80/80 of the targets were being found; 11 of them were simply ordered badly. So
-effort moved to §S6, and a planned dense-vector retrieval route was cancelled as unnecessary.
+That result set the direction for a long time: **retrieval was not the bottleneck — ranking was**,
+so effort moved to §S6 and a planned dense-vector route was cancelled as unnecessary.
+
+It was true, and it was measured at the wrong moment. Those 80 sessions were scored with *all
+four constraints already disclosed* — the end of a conversation. Re-measured at **turn 1**, when
+the customer has said one sentence and the agent must already make its first guess, the same
+retrieval looks completely different:
+
+| turn-1 candidate pool | size | target present | target's rank |
+|---|---|---|---|
+| lexical routes only | 300 | **80.5%** | median 51 |
+| with the category pool | median 315 | **100%** | — |
+
+Only **66%** of those 300 candidates were even in the target's category. Session `public_0001`
+is the whole problem in one line: the customer says *"I'm looking for Jewelry Necklaces. A key
+requirement is: Material:alloy."*, and the target is **#11 by popularity inside its own
+329-product category** while sitting at rank **113 of 300** in our pool.
+
+Recall was never fixed — it was measured late. Turn-1 recall is a different quantity from
+end-of-session recall, and with §S7's one-candidate-per-turn sizing the agent is *spending* its
+first guess exactly where recall is worst.
+
+Effect of the category pool route:
+
+| set | before | after |
+|---|---|---|
+| public (200) | 0.923487 | **0.934554** |
+| hard (96) | 0.793780 | **0.826035** |
+| generated (200) | 0.9104 | **0.9183** |
+| dev / holdout | 0.9292 / 0.9149 | **0.9417 / 0.9239** |
+| `paraphrase:heavy+browse-gated` | 0.770651 | **0.874730** |
+
+Hit@10 on public stays at `1.000`; the public gain is MRR `0.8810 → 0.9082` and MTTC
+`3.040 → 2.895`. The result that matters most is on the *other* sets, which do not share the
+public generator's sampling: Hit@10 rises on hard (`0.885 → 0.927`), on generated
+(`0.990 → 1.000`) and under stress (`0.880 → 0.990`). `tools/observe.py` on the hard set shows
+`never_retrieved` going **6 → 0**, with two of those six landing in `ranked_out` (5 → 7) — they
+are now in the pool every turn and §S6 fails to surface them, which is a ranking problem this
+route deliberately does not touch.
+
+The route weight is `1.0`, and it was **not** chosen on the public splits. `1.5` is the argmax of
+both dev and holdout and the hard set rejects it by `0.015` — the same shape as the rejected
+popularity sweep in §6. `0.7` and `1.0` are the plateau where all four sets agree.
+
+Finally, the honest limit. This inverts a function the *evaluator* uses to write its own prompts,
+so part of its public-set strength is a property of the session generator rather than of our
+search. A customer who renames the category never produces an exact bucket key, and
+`tools/stress_harness.py` cannot test that — it rewords the constraint and keeps
+`"I'm looking for {category}"` verbatim. Perturbing the stated category directly:
+
+| stated category | target still in pool |
+|---|---|
+| verbatim | 100.0% |
+| lowercased, `&` → `and` | 100.0% |
+| word order shuffled | 100.0% |
+| singularised | 63.5% → **100.0%** |
+| last word dropped | 88.5% → 81.0% |
+
+Singularisation failed at 63.5% for a dull reason — `"Necklaces"` and `"Necklace"` are different
+tokens — so the fallback vocabulary now indexes a naive singular form of each key token, trading
+the word-drop case down to 81%. When nothing overlaps, `match_pool` returns nothing and the route
+contributes nothing, which is the previous behaviour exactly.
 
 #### Ideas for this stage
 
@@ -958,14 +1048,32 @@ effort moved to §S6, and a planned dense-vector retrieval route was cancelled a
 - **Weight words by recency.** Every word in the conversation currently counts equally, whether
   said on turn 1 or turn 5. Later disclosures are more specific and arguably deserve more weight —
   a cheap experiment on top of the existing `Utterance.weight` machinery.
-- **A category route.** The opening message names a coarse category ("Jewelry Necklaces") that
-  currently contributes only as loose words. A dedicated route restricted to that branch of the
-  category tree would suppress cross-category noise. (See also §S6, where the same idea may work
-  better as a ranking signal.)
-- **Dense retrieval, if recall ever becomes the bottleneck.** A local sentence-embedding route
-  would catch paraphrases that share no words. It was cut because recall is 80/80, and it would
-  compromise the no-network guarantee — but if the private sessions paraphrase heavily, recall
-  could fall and this becomes relevant again.
+- **~~A category route.~~ Done — see "A coarse-category pool route" above.** The parenthetical
+  ("the same idea may work better as a ranking signal") turned out to be the trap, not the
+  shortcut: the ranking-signal version already existed as `category_weight` and `tail_weight`
+  (§S6) and could not help, because a ranking signal reorders a pool and cannot recall a product
+  retrieval never returned. Both are still worth keeping — ablating either is flat-to-negative,
+  since the fused pool is not category-pure — but the recall half had to be a retrieval route.
+  Worth `+0.011` public and `+0.032` hard.
+- **Give the pool route a stemmer.** The paraphrase fallback matches raw tokens plus a naive
+  singular form (strip a trailing `s`). That covers plural/singular and nothing else — no
+  British/American spellings, no synonyms ("jewellery", "pendant"). A real stemmer would extend
+  the guarantee to customers who rename the category. (Scoring bucket *keys* with the `src/embed.py`
+  encoder was the other candidate; that encoder has since been deleted — see "The two optional
+  layers" below — so a stemmer or an explicit synonym table is what is left, and either is stdlib.)
+  This is the single biggest robustness gap the route leaves.
+- **Teach `tools/stress_harness.py` to reword the category.** It paraphrases the constraint and
+  keeps `"I'm looking for {category}"` verbatim, so it cannot measure the gap above — the stress
+  score for the pool route is optimistic by construction and the perturbation table had to stand
+  in for it. A `category-drift` stressor would make that number real.
+- **~~Dense retrieval, if recall ever becomes the bottleneck.~~ Built, measured, removed.** A
+  local sentence-embedding route catches paraphrases that share no words, and it was built
+  (`src/embed.py`, `RetrievalConfig.use_dense`) after this bullet was first written. It recovered
+  **none** of the `never_retrieved` tail it was aimed at and was slightly negative overall
+  (`docs/team/dense_route.md`, `docs/team/branch_state_encoder_eval_changes.md` §3d), so change 20
+  deleted it rather than keep it as an off-by-default flag. If the private sessions paraphrase
+  heavily enough for recall to fall, the idea becomes relevant again — but it starts from the
+  measurements above, not from a knob.
 
 ---
 
@@ -1073,12 +1181,13 @@ matches the conversation so far.
 
 Two design choices keep this from ever costing the guaranteed offline score. First, it is
 *fused*, not a replacement: the model's suggested order becomes one more additive term in
-`rerank()`'s scoring formula (`RerankConfig.llm_weight`, same shape as `dense_weight`), so
+`rerank()`'s scoring formula (`RerankConfig.llm_weight`, the same shape the removed
+`dense_weight` term had), so
 a bad reorder from the model can only nudge the ranking, never override the lexical
 evidence outright. Second, it is *gated*: `RerankConfig.llm_gate_margin` reads
 `state.leader_margin` — the previous turn's gap between the top two candidates — and only
-calls the model when that gap is small (`< 0.05`, the same signal `dense_gate_over_general`
-already uses). A pool with a clear lexical leader has nothing to gain from a second,
+calls the model when that gap is small (`< 0.05`, the same pool-shape signal the removed
+`dense_gate_over_general` used). A pool with a clear lexical leader has nothing to gain from a second,
 nondeterministic opinion; an undecided one is exactly where a semantic read can break a
 tie exact-token matching cannot see. `RerankConfig.llm_weight = 0.0` by default, so nothing
 about the shipped agent's offline guarantee changes — every existing test and config still
@@ -1180,8 +1289,8 @@ costs. So the agent should be patient.
 
 #### What changed
 
-**Hold until turn 3.** No recommendations on turns 1-2, when the customer has disclosed little.
-Measured on holdout:
+**Hold until turn 3 — since superseded.** For a long time the agent showed nothing on turns 1-2,
+when the customer has disclosed little. Measured on holdout at the time:
 
 | First recommendation on | Score |
 |---|---|
@@ -1189,8 +1298,12 @@ Measured on holdout:
 | **turn 3** | **0.8349** |
 | turn 4 | 0.8196 |
 
-Turn 3 wins on both splits. Turn 2 is too eager; turn 4 wastes turns after the evidence has
-arrived.
+Turn 3 won on both splits: turn 2 was too eager, turn 4 wasted turns after the evidence had
+arrived. That table was measured while the first slate was four candidates wide, and the "too
+eager" penalty is precisely the cost of banking a bad rank early. Once the slate narrowed to a
+*single* candidate (see "Sniper sizing" below) there is no bad rank left to bank, and the
+conclusion inverts — `first_recommend_turn` now ships at `1`. The table is kept because it is the
+evidence that the emit turn and the slate width are one decision, not two.
 
 **Confidence gating.** A fixed turn number is crude — sometimes the answer is obvious on turn 2.
 `_confident()` allows early recommendation when the top candidate clearly leads:
@@ -1216,8 +1329,9 @@ buy noise. Mid-plateau is the defensible choice — the same reasoning applies t
 plateau.
 
 **Narrow the first slate.** `list_size_ramp` says how many candidates each turn reveals; the last
-entry applies to every later turn. It shipped flat at `(10,)` for a long time, and is now `(4, 10)`
-— four candidates on turn 3, ten from turn 4.
+entry applies to every later turn. It shipped flat at `(10,)` for a long time, then `(4, 10)` —
+four candidates on turn 3, ten from turn 4. It now ships at `(1, 1, 1, 1, 10)`; this paragraph
+explains the `(4, 10)` step, and "Sniper sizing" below explains the rest of the way.
 
 Showing *fewer* products scores better, which sounds backwards until you line up three facts about
 the evaluator. The session ends the instant the target appears in a shown list. The rank it held
@@ -1246,10 +1360,67 @@ its midpoint rather than `5`, which happens to top two columns. The decision rul
 `4` was measured, which is the point: choosing the winner after seeing the table is how you buy
 noise, exactly as with the `0.20` margin above.
 
-Narrowing a *second* turn is not more of the same good thing. `(5, 5, 10)` scores
+Narrowing a *second* turn seemed not to be more of the same good thing. `(5, 5, 10)` scores
 `0.9272 / 0.9044 / 0.9187 / 0.7934`, dropping holdout and hard below the flat floor. Each session
 holds four constraints and the customer discloses at most two per turn, so by turn 4-5 no further
-evidence is coming and waiting longer spends turns without buying rank.
+evidence is coming and waiting longer spends turns without buying rank. That reasoning is about
+*evidence*, and about evidence it is correct — which is exactly why it pointed the wrong way, as
+the next section explains.
+
+**Sniper sizing: one candidate per turn.** The argument above treats a narrow slate as a way of
+*deferring* commitment until better evidence arrives. Read that way, narrowing past the point where
+evidence stops arriving is pointless, and `(5, 5, 10)` is the proof.
+
+But deferral is not the only thing narrowing buys, and at a width of one it is not even the main
+thing. Count the ranks a slate can produce. A slate of ten can land the target on any of ten
+positions, worth anywhere from `RR = 1.0` down to `RR = 0.1`. A slate of five can land it on five.
+**A slate of one can only ever land it on rank 1.** That is not a bet that pays off better when the
+evidence improves — it is a bet that cannot lose on rank at all, whether or not another constraint
+is ever disclosed.
+
+So the value of narrowing is not smooth in the slate width. It improves gradually from ten down to
+about four for the deferral reason, and then there is a step at one, where a different mechanism
+takes over. `(5, 5, 10)` sits in the flat part of that curve and pays two turns for nothing;
+`(1, 1, 1, 1, 10)` reaches the step.
+
+The elimination scan is what keeps this from being a coverage disaster. Products already shown are
+excluded from later slates, so four singles followed by a ten-wide turn reveal **fourteen distinct
+products**, not ten — a *deeper* walk than the flat ramp ever took, taken in smaller steps. The
+usual precision/coverage tension does not apply, because the narrow slates are not throwing
+candidates away; they are only spreading the same walk across more turns. This is why Hit@10 does
+not pay for the MRR gain, on any dataset.
+
+And once the slate is one candidate wide, holding it back until turn 3 stops making sense. An early
+guess that misses costs one turn — `0.02` of score. An early guess that hits banks `RR = 1.0`. So
+`first_recommend_turn` moves from `3` to `1`, and the agent opens by naming its single best guess.
+
+Where to widen back to ten, measured on all four sets:
+
+| widen at turn | dev | holdout | generated | hard |
+|---|---|---|---|---|
+| pre-sniper `(4, 10)` | 0.9268 | 0.9096 | 0.9197 | 0.7981 |
+| **5** | **0.9521** | 0.9220 | 0.9322 | **0.8135** |
+| 6 | 0.9469 | 0.9222 | 0.9342 | 0.8131 |
+| 7 | 0.9468 | **0.9257** | **0.9354** | 0.8129 |
+
+Every sniper row beats every pre-sniper row on every set — that is the finding. Between the three,
+the spread is `0.001` in the mean and each column has a different winner, which is the signature of
+noise rather than of a real ordering. `5` ships, but *not* because dev likes it: it is the only one
+of the three that costs no session on any set, because widening earlier leaves more wide turns as a
+safety net. Choosing on hit rate rather than on score is the same discipline as the `0.20` margin
+and the `4`-wide slate above — with the difference that here the tie-break is a metric, not a
+midpoint.
+
+Two neighbouring versions of the idea were measured and rejected, and both are instructive.
+`src/context_programming.py`'s STAGNATING phase overrides the ramp with its own ten-wide slate when
+a session stops producing evidence; carrying the singles through it too (`stagnation_slate_size=1`)
+makes *every* hit rank 1 — dev MRR `0.967` against a dev hit rate of `0.967`, arithmetically as
+good as the metric goes — and still loses `0.0146`, because it costs three dev sessions of hit rate
+to get there. A stalled session is the one case where coverage is worth more than rank. Separately,
+re-ranking the final turn over the full pool while *ignoring* the exclusion memory — insurance
+against an unparsed override having wrongly excluded the target — costs `0.0049` on dev, because
+our scan already un-excludes on a parsed override and the unfiltered top ten is mostly products
+already shown and disproven.
 
 **Track-aware margin.** `confidence_margin` is one number for every session, but the two tracks
 disclose at different rates: a buying session states one hard requirement on turn 1 and two more
@@ -1275,6 +1446,17 @@ public, MRR `0.8513 → 0.8690` (×0.30 = +0.0053) against MTTC `2.975 → 3.040
 (0.885): this buys rank, not coverage. One cost worth naming — on the 200-session generated set
 Hit@10 slips `0.995 → 0.990`, a single session that now runs out of turns.
 
+Sniper sizing (`first_recommend_turn` `3 → 1`, `list_size_ramp` `(4, 10) → (1, 1, 1, 1, 10)`):
+public `0.923487 → 0.940083`, adversarial `0.841190 → 0.852227`, hard `0.793780 → 0.813471`,
+dev `0.9268 → 0.9521`, holdout `0.9096 → 0.9220`, and `paraphrase:heavy+browse-gated`
+`0.770651 → 0.784750`. On public the entire gain is MRR — `0.8810 → 0.9339` (×0.30 = +0.0159) —
+with MTTC essentially flat at `3.040 → 3.005`, so unlike the `(4, 10)` step this one does not even
+pay the ~13x toll: the turns the singles spend are bought back by guessing from turn 1 instead of
+turn 3. **Hit@10 moves on no dataset** (1.000 / 1.000 / 0.990 / 0.885 before and after), and
+`tools/observe.py` reports an identical failure-mode split on the hard set either way — six
+`never_retrieved`, five `ranked_out`. Nothing is retrieved better and nothing is ranked better;
+what changed is only how much of the existing ranking the scoring rule lets us keep.
+
 Track-aware margin (PR #7, `buying_confidence_margin = 0.08`): public `0.930502 → 0.931302`,
 adversarial `0.801978 → 0.802811`, dev `0.9418 → 0.9428`, holdout `0.9136 → 0.9141`. MRR does not
 move on any split — the gain is entirely MTTC, exactly the confidence-gating mechanism above,
@@ -1293,7 +1475,10 @@ the `src/context_programming.py` module shipped alongside it.
   occurred. On sessions heading for a miss it still shows the same list every turn from turn 3
   onward. Detecting stagnation — the shortlist stopped changing, the customer stopped disclosing —
   and switching to a different strategy would attack the 6% of sessions that currently miss
-  entirely.
+  entirely. Partly exercised since: the STAGNATING phase now keeps its wide ten-candidate slate
+  while the rest of the session runs on one-wide sniper slates, and that asymmetry is itself
+  measured — forcing the singles through stagnation costs `0.0146`, because a stalled session needs
+  coverage where a live one needs rank.
 - **~~Diversify a low-confidence list.~~ Tested, and it does not work.** This entry used to argue
   that spreading the list across distinct categories or brands would raise the chance of catching
   the target, on the grounds that a miss→hit is worth 2.6x a rank improvement. **That premise is
@@ -1305,12 +1490,24 @@ the `src/context_programming.py` module shipped alongside it.
   own metadata, so the crowded top of the list is a cluster formed *around the target*, which sits
   at its centre rather than being an outlier crowded out of it. `docs/team/ideas.md` Idea 3 records
   the full measurement.
-- **~~Vary list length with confidence.~~ Done — see "Narrow the first slate" above.** This entry
-  used to guess that "there is likely no benefit to showing fewer". The opposite is true, and for a
-  reason the guess missed: showing fewer is not about precision, it is about *when you commit*.
-  `list_size_ramp` now ships at `(4, 10)`, worth `+0.0040` on the public set. The remaining
-  unexercised part of the idea is making the width depend on measured confidence rather than on the
-  turn number — narrow while `_confident()` is false, ten once it is true.
+- **~~Vary list length with confidence.~~ Done twice — see "Narrow the first slate" and "Sniper
+  sizing" above.** This entry originally guessed that "there is likely no benefit to showing
+  fewer". The opposite is true, and for a reason the guess missed: showing fewer is not about
+  precision, it is about *when you commit*. `list_size_ramp` went to `(4, 10)` for `+0.0040`, and
+  then to `(1, 1, 1, 1, 10)` for a further `+0.0166` once it became clear that the width-one case
+  is a different mechanism rather than more of the same one. The remaining unexercised part is
+  still making the width depend on measured confidence rather than on the turn number — though the
+  headroom is now smaller, since a one-wide slate is already the best rank available and the only
+  question left is when to widen.
+- **Better turn-1 ranking is where the remaining headroom is.** With sizing solved, the residual
+  gap to the strongest published submission on this evaluator (0.9748) is MRR `0.934` vs `0.995`
+  and MTTC `3.005` vs `2.19` — both of which are first-guess accuracy, not timing. Their route is a
+  coarse category pool (median 184 products of 50,000, containing the target 200/200 times) plus a
+  strong popularity prior over that pool, which makes the most-popular constraint-matching product
+  the target often enough to win on turn 1. Raising our own `popularity_weight` reproduces part of
+  that on the public splits and **loses** on both generated sets (`docs/team/agent_changes.md`
+  change 18), so the honest version of this idea is an S5/S6 problem — a tighter category pool, or
+  a ranker trained on self-play sessions — not a weight to turn up.
 
 ---
 
@@ -1369,6 +1566,35 @@ policy that kept re-asking a question the customer had already declined.
 
 ---
 
+### The two turn-1 changes together
+
+§S5's category pool and §S7's sniper sizing were built separately and each
+measured with the other absent, so both tables above understate the shipped
+agent. Measured together over the same 200 official sessions in one process:
+
+| configuration | Hit@10 | MRR | MTTC | Score |
+|---|---|---|---|---|
+| neither | 1.000 | 0.881 | 3.04 | 0.9235 |
+| category pool only (§S5) | 1.000 | 0.908 | 2.90 | 0.9346 |
+| sniper sizing only (§S7) | 1.000 | 0.934 | 3.00 | 0.9401 |
+| **both** | 1.000 | **0.961** | **2.67** | **0.9550** |
+
+The gains are `+0.0111` and `+0.0166` alone, and `+0.0315` together — `0.0038`
+**more** than their sum. That is worth understanding, because the obvious guess
+is the opposite: both changes act on turn 1, so they ought to compete for the
+same headroom.
+
+They do not, because they are the two halves of one bet. Sniper sizing stakes
+the whole turn on a single candidate — it converts a hit into rank 1, but only
+if that one candidate is the target. The category pool is what decides whether
+it is: it takes the turn-1 pool from "target present 80.5% of the time at median
+rank 51" to "present 100% of the time" inside a set that is category-correct by
+construction. Making the bet bigger and making it more likely to win multiply
+rather than add. This is also why the §S7 tables, measured over the old
+retrieval, understate sniper sizing: it was being asked to bet on a worse
+candidate.
+
+
 ## 6. What was tried and rejected
 
 These are first-class results. They are the evidence that the shipped design was **chosen** rather
@@ -1388,6 +1614,12 @@ not repeat the experiment.
 | **Neural cross-encoder reranking (S6b)** | dev 0.9268 → 0.9211, hard 0.7981 → 0.7944 | Built, measured, removed. Loses on every split and every setting; the optimum semantic weight is zero. Code preserved on branch `semantic-rerank`. |
 | **No-span rescore, re-opened after change 12** | dev 0.941757 → 0.941757 (bit-identical), holdout 0.9136 → 0.9188, hard 0.8020 → 0.8000 | Rejected a second time. Change 12 looked like it should revive it; dev did not move by a single digit, and everything that gained was on the gate split. See below. |
 | **Document-length tie-break** | dev 0.941757 → 0.943229, hard 0.801978 → 0.805064 at `w=0.10` only | Built in three forms, rejected. The hard-set gate is cleared at one weight with both neighbours failing — an argmax on noise, not a plateau. See below. |
+| **The dense embedding term, re-measured after changes 18+19** | public −0.0004, holdout +0.0007, hard **−0.0046**, paraphrase stress **−0.0048** | Rejected, then removed. Negative on the two sets built to test the paraphrase claim it existed for. `src/embed.py`, `tools/build_embeddings.py`, the `dense_*` sweep rows and the three third-party pins they needed are all deleted (change 20); the measurements stay here and in `docs/team/`. |
+| **LLM listwise rerank (DeepSeek), re-measured after changes 18+19** | public +0.0008 and +0.0017 on two runs of the same config, holdout −0.0005 | Rejected for now. Its run-to-run spread is the same size as its effect. Was worth +0.003525 before those changes. |
+| **Both optional layers together** | public −0.0011 | Rejected. Below either alone and below the baseline. |
+| **Raising `popularity_weight` under sniper sizing** | dev 0.9521 → 0.9583, holdout 0.9220 → 0.9350 at `w=1.0`; generated 0.9322 → 0.9315, hard 0.8135 → 0.8072 | Rejected. Both public-derived splits improve monotonically and substantially; both *generated* sets, whose sessions are not drawn from the public set's sampling, are flat to negative, and the hard set falls monotonically to 0.7872 by `w=1.8`. See below. |
+| **Singles through the STAGNATING phase** | dev 0.9521 → 0.9322 | Rejected. Makes every hit rank 1 (dev MRR 0.967 against a 0.967 hit rate) and still loses 0.0146, because it costs three dev sessions of hit rate. Knob kept as `AgentConfig.stagnation_slate_size`, defaulting to the wide slate. |
+| **Final-turn exclusion bypass** | dev 0.9521 → 0.9472, holdout 0.0000 | Rejected. Ported from a rival submission, where it insures against an unparsed override permanently excluding the target. Our elimination scan already un-excludes on a parsed override, so the last turn's unfiltered top ten is mostly products already shown and disproven — it spends the deepest slate of the session on them. |
 
 **Document length, and the difference between a signal and a shippable signal.** The
 near-miss anatomy asks a narrow question: when the target sits at rank 2-10 behind an
@@ -1521,6 +1753,191 @@ cannot return.
 
 ---
 
+### Raising `popularity_weight` under sniper sizing
+
+Change 12 fitted `popularity_weight = 0.4` while the first slate was four candidates wide, where
+the popularity prior only ever broke ties among candidates that already matched the disclosed
+constraints. Under a one-candidate slate the prior stops breaking ties and starts *making the
+decision*, so the value was re-swept from scratch:
+
+| `popularity_weight` | dev (120) | holdout (80) | generated (200) | hard (96) |
+|---|---|---|---|---|
+| **0.40 (ships)** | 0.9521 | 0.9220 | **0.9322** | **0.8135** |
+| 0.70 | 0.9569 | 0.9309 | 0.9328 | 0.8085 |
+| 1.00 | 0.9583 | 0.9350 | 0.9315 | 0.8072 |
+| 1.40 | 0.9576 | **0.9367** | 0.9298 | 0.7984 |
+| 1.80 | — | — | — | 0.7872 |
+
+Read the columns, not the rows. Both public-derived splits climb steadily — holdout gains `0.015`
+at `w = 1.4`, which is a large move by this project's standards and comfortably outside the ±0.02
+noise band on a *directional* basis, since every step goes the same way. Both generated sets go the
+other way, and the hard set falls monotonically across the whole range.
+
+That pattern is the diagnosis. Public sessions draw their hidden targets with a popularity-weighted
+sampler, so a stronger popularity prior is partly *predicting the sampler* rather than predicting
+the customer. `dev` and `holdout` are two slices of the same 200 sessions and share that bias; the
+generated and hard sets are built differently and do not. When a change gains only on the splits
+that share a known bias, the gain is the bias.
+
+The hidden 800 sessions decide the real score, so `0.4` stays. Rows `pop070`, `pop100`, `pop140`,
+`pop180` and `pop250` are kept in `tools/sweep.py` so the trade-off can be re-run rather than
+re-argued — the same treatment `weights_argmax` already gets.
+
+A rival submission scoring `0.9748` on this evaluator does run a strong popularity prior (weight
+`1.0` against a coverage term of `1.5`) and reaches MTTC `2.19` largely because of it. This sweep
+is the reason we do not simply copy it: the part of that design that transfers is the sizing, and
+the part that does not is the prior.
+
+### The reranker does not run on turn 1
+
+Found while tracing the dense term, and larger than that result. `rerank()`
+returns its input untouched when `state.query_spans()` is empty
+(`src/rerank.py`), and `query_spans()` deliberately skips turn 1 — the opening
+line is the simulator's own framing, not quoted product copy
+(`src/state.py`). So on turn 1 **every S6 signal is inert**: span coverage,
+facet agreement, category overlap, the category tail, popularity and the dense
+cosine alike. Turn-1 ordering is whatever S5 retrieval produced, full stop.
+
+That is measurable: with the dense term on, the target's rank changes on turn 1
+in **zero** of 200 sessions, while it moves on 16.7% of later turns.
+
+Two things follow. It explains why §S5's category pool moved turn 1 so far
+(`0.9235 → 0.9346` on its own) while rerank-side weight tuning never could —
+retrieval is the only stage that runs there. And it means the agent's single
+most valuable turn, the one §S7's sniper sizing stakes a whole slate on, is
+ranked by the least evidence-aware stage in the pipeline. Making the reranker
+run on turn 1 — with the opening's category words treated as the weak evidence
+they are, rather than skipped — is the most promising untried lever left.
+
+### The two optional layers, re-measured on the merged agent
+
+> **Since removed.** The dense half of this section is a record, not a
+> description of the code: `src/embed.py`, `tools/build_embeddings.py`, the
+> `dense_*` sweep rows and the `RerankConfig` / `RetrievalConfig` dense knobs
+> were deleted in change 20 on the strength of exactly these numbers. The LLM
+> layer is unchanged and still ships off by default. Everything below is left as
+> measured.
+
+Both optional signals — the dense sentence-embedding term (§S5/§S6) and the
+opt-in LLM listwise reranker (§S6) — were measured before changes 18 and 19.
+Both were re-run afterwards, with the encoder artifact rebuilt and a live API
+key, and both were verified actually firing first (`EmbeddingIndex.available`
+and `LLMReranker.available` both `True`) — a missing artifact or key makes
+either layer a silent no-op that scores *identically to the baseline*, which is
+indistinguishable from "measured and did not help" unless you check.
+
+Public set, 200 sessions, one process:
+
+| configuration | Hit@10 | MRR | MTTC | Score | vs baseline |
+|---|---|---|---|---|---|
+| **neither (ships)** | 1.000 | 0.961 | 2.67 | **0.9550** | — |
+| dense embedding term | 1.000 | 0.964 | 2.73 | 0.9546 | −0.0004 |
+| LLM rerank, gated | 1.000 | 0.967 | 2.71 | 0.9558 | +0.0008 |
+| both together | 1.000 | 0.962 | 2.73 | 0.9539 | −0.0011 |
+
+Every row is within `0.002` of the baseline, and both layers raise MRR while
+losing more to MTTC than they gain — they reorder the head slightly better and
+take an extra fraction of a turn to do it.
+
+The prediction going in was that both would be worth **less** than before, and
+they are. Both fire on *ambiguous* pools — the LLM gate is literally
+`state.leader_margin < 0.05` — and change 19 removed most of that ambiguity by
+taking turn-1 recall from 80.5% to 100% and public MRR from 0.881 to 0.961.
+The LLM layer was worth `+0.003525` on the older agent; it is worth `+0.0008`
+on this one. The cheap deterministic fix took the ground the expensive layer
+was standing on.
+
+Two results are firmer than the public column:
+
+- **The LLM row is not reproducible to the precision of its own effect.** The
+  same configuration scored `0.9567` and `0.9558` on two runs. The API is not
+  deterministic at `temperature=0.0`, so its run-to-run spread (`0.0009`) is the
+  size of the effect being claimed. On holdout it is `−0.0005`. There is no
+  measurement here that survives its own noise.
+
+  Traced, the layer is not broken — it is starved. Instrumenting the gate and
+  the calls over 40 sessions: the gate is **evaluated** only 59 times across
+  ~110 turns (the missing ~40 are turn 1, where the reranker does not run at
+  all — see above), **opens** 27 of those 59, and every one of the 27 calls
+  succeeds: valid JSON, usable ids, 22 of them reordering something. But only
+  **4 of 27 change the top-1** — and §S7's sniper sizing shows a *single*
+  candidate on turns 1-4, so reordering positions 2-8 of an 8-item window is
+  invisible to the score by construction. Three filters multiply: inert on turn
+  1, gate shut on half the rest, and only position 1 ever shown.
+
+  Across the full 200 sessions the target's rank moves on 18 of 531 turns
+  (3.4%) — **9 up and 9 down**, mean `+0.01`; session outcomes 2 better, 6
+  worse. A coin flip, for the same reason the dense term loses: the customer
+  quotes verbatim spec strings from the target's own metadata, so deciding
+  between two products that both contain `"Imported; Zipper closure"` is not a
+  language problem. The model reads the same product text the IDF span matcher
+  reads and has no extra information to be smarter with.
+
+  Prompt truncation was checked as a possible cause and mostly ruled out: 86%
+  of hard constraints fall inside the 220-character candidate window (median
+  match position 80, median product blob 678 chars); only 6.5% are cut off.
+  Worth widening, but not the reason.
+
+  The useful conclusion is about *placement*, not about the model. We pointed a
+  language model at the one job on this task where exact string matching is
+  already optimal. Its comparative advantage is understanding a **reworded**
+  customer — parsing free text into constraints, or choosing the next question
+  — which is where `tools/stress_harness.py` shows the agent actually losing,
+  and which is where the strongest published submission on this evaluator
+  points its own model.
+- **The dense term is negative exactly where it was supposed to help.** It
+  exists for paraphrase recall — the one signal that scores meaning rather than
+  exact tokens. On the hard set it is `−0.0046` and under the
+  `paraphrase:heavy+browse-gated` stress customer `−0.0048`. Traced against the
+  same run with the term off, over 527 comparable turns: the target's rank is
+  **unchanged on 83.3%**, pushed **down on 10.6%** and up on only **6.1%**
+  (mean `+0.39` ranks, downward); session outcomes 10 better, 16 worse.
+
+  The reason is not the query text, which was the first guess: encoding the
+  compact active slots instead of the full conversation (`dense_rr_slots`,
+  boilerplate stripped) scores `0.9538`, *worse* than the `0.9546` with it, and
+  lowering the weight to `0.2` returns `0.9556` — the optimum weight is zero.
+
+  The reason is what the customer says. The evaluator builds constraints by
+  regex over the target's *own* metadata and quotes them verbatim, so they are
+  strings like `"Imported; Rubber sole."` and
+  `"78% Cotton, 20% Polyester, 2% Elastane; Imported."` — **exact identifiers,
+  not descriptions**. A sentence embedding is built to make near-synonyms
+  collide, which is precisely the wrong operation on a unique literal string.
+  In `public_0031` the customer quotes that fabric composition, which is nearly
+  a fingerprint for one product; the dense term blurs it into "skinny jeans",
+  promotes `Levi's Women's Slimming Skinny Jeans` to rank 1 and demotes the
+  actual target to 2. In `public_0016`, `"Imported; Rubber sole"` encodes as
+  *rugged boot* and the most prototypical combat boots displace the target.
+  The term substitutes **topical** similarity for **literal** discrimination —
+  and topical similarity is what §S5's category pool already supplies, more
+  precisely and for free. It is competing with change 19 and losing.
+
+  This is the second independent semantic reranker to fail this way: §6's
+  cross-encoder (change 11) concluded "the optimum semantic weight is zero" for
+  the same reason, on a different model family. If the hidden set paraphrases
+  heavily the trade could invert — that is what the term was insurance for — but
+  nothing we can measure shows it paying, and an insurance policy that is
+  measurably negative on both paraphrase sets is not insurance. Change 20 stopped
+  paying the premium: the term is deleted rather than carried at weight zero, on
+  the same rule that deleted span rarity (§S6) and the cross-encoder (change 11) —
+  a code path no measurement justifies does not earn its place. Reviving it means
+  restoring it from history, not flipping a flag.
+
+The LLM layer stays off by default, which also keeps the submission's offline,
+zero-token guarantee intact — now structurally, since with the encoder gone the
+scoring path has no third-party dependency left to fail on.
+
+**A bug found while measuring, worth fixing before anyone enables the layer:**
+`src/llm.py` never reads the `usage` object the API returns, and
+`starter/agent.py` reports `{"prompt_tokens": 0, "completion_tokens": 0}`
+unconditionally. With the LLM layer on, the agent spends tokens and reports
+zero — and `reported_token_usage` is one of the metrics the competition
+collects (`docs/evaluation_config.json`). It is harmless today because the
+layer ships off and the offline path genuinely uses no tokens, but it would be
+a misreport the moment anyone turns it on for a scored run.
+
+
 ## 7. Results
 
 ### How the score was built up
@@ -1535,6 +1952,11 @@ cannot return.
 *(An early prototype of the state-and-questions step measured 0.7811 before the code was
 reorganised into modules; 0.7799 is the same policy re-measured in the final structure. The small
 difference comes from boilerplate word handling added in §S1.)*
+
+*(This table is the historical build-up through §S7's confidence gating and is not re-measured on
+every change. The current figure is **0.940083** on the public set — Hit@10 `1.000`, MRR `0.9339`,
+MTTC `3.005` — recorded in `results.json` and reproduced by `python3 -m evaluator.local_evaluator`.
+The per-change ledger from here to that number is `docs/team/agent_changes.md`.)*
 
 ### Dev versus holdout
 
