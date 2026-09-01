@@ -53,22 +53,39 @@ changes 18 and 19.
 ### Optional LLM reranking layer
 
 The repository also carries an opt-in LLM reranking layer, **off by default**
-(`llm_weight=0.0`), which needs a `DEEPSEEK_API_KEY`. It was measured against
-the agent as it stood *before* both changes above and has not been re-run,
-so these numbers are historical and are not comparable to the table above:
+(`llm_weight=0.0`), which needs a `DEEPSEEK_API_KEY`. It has been re-measured on
+the current default — both shipped changes in place, a live API key, and
+`LLMReranker.available` verified `True` first, since a missing key makes the
+layer a silent no-op that scores identically to the baseline. Same 200 official
+sessions, one process:
 
 | Customer | LLM reranking | Hit@10 | MRR | MTTC | TechnicalScore |
 |---|---|---:|---:|---:|---:|
-| Official customer | Off | 1.000 | 0.8810 | 3.040 | 0.923487 |
-| Official customer | On — gated | 1.000 | 0.8930 | 3.045 | 0.927012 |
-| Stress: paraphrase + gated browsing | Off | 0.880 | 0.6628 | 4.410 | 0.770651 |
-| Stress: paraphrase + gated browsing | On — gated | 0.880 | 0.6734 | 4.405 | 0.773924 |
+| Official customer | Off (ships) | 1.000 | 0.961 | 2.67 | 0.9550 |
+| Official customer | On — gated | 1.000 | 0.967 | 2.71 | 0.9558 |
 
-It was worth `+0.003525` on the official customer and `+0.003273` under stress,
-in both cases through better ordering of already-retrieved candidates rather
-than through finding anything new. Since both shipped changes take their gain
-from the same place — the rank a hit is scored at, and what is in the pool to
-rank — the layer is unlikely to still be additive, and it stays off.
+**This is why it stays off: `+0.0008` is inside the layer's own run-to-run
+spread.** The same configuration scored `0.9567` and `0.9558` on two runs — the
+DeepSeek API is not deterministic even at `temperature=0.0` — so the spread
+(`0.0009`) is the size of the effect being claimed, and on the holdout split the
+layer is `−0.0005`. There is no reading here that survives its own noise, and a
+nondeterministic layer that cannot demonstrate a gain is not worth the
+credentials, the network dependency, the latency and the API cost it adds.
+
+The mechanism behind the flat result is that the layer is starved rather than
+broken: the gate opens on about half the turns it is evaluated on, every call it
+makes returns usable JSON, but only 4 of 27 opened calls change the top-1 — and
+sniper sizing shows a *single* candidate on turns 1–4, so reordering positions
+2–8 is invisible to the score by construction.
+
+It was worth `+0.003525` on the older agent (`0.923487 → 0.927012`), before the
+two shipped changes; those changes take their gain from the same place — the
+rank a hit is scored at, and what is in the pool to rank — and change 19 in
+particular removed most of the pool ambiguity the gate fires on (turn-1 recall
+`80.5% → 100%`, public MRR `0.881 → 0.961`). **The layer has not been re-measured
+against the stress customer on the current agent**, so no stress figure is quoted
+here; the only one on record (`+0.003273`) is against the pre-change agent and is
+not comparable to the table above. See `IMPLEMENTATION.md` §6 for the full trace.
 
 ## Project overview
 
@@ -385,11 +402,13 @@ were eventually deleted rather than carried as dead configuration.
 
 The latest measured customer results are summarised in
 [Latest customer evaluation results](#latest-customer-evaluation-results). The
-gated DeepSeek reranker remains off by default even though it substantially
-improves the official-customer run: it requires user-supplied credentials and
-network access, adds latency and API cost, and is less reproducible than the
-offline path. The stress result also shows that an LLM reranker cannot by itself
-repair every paraphrase-driven retrieval or clarification failure.
+gated DeepSeek reranker remains off by default: re-measured on the current
+agent it is worth `+0.0008` on the official customer and `−0.0005` on holdout,
+both inside its own run-to-run spread, and it still requires user-supplied
+credentials and network access, adds latency and API cost, and is less
+reproducible than the offline path. Its earlier `+0.003525` was measured against
+a weaker agent, and the deterministic changes that closed that gap are what took
+it away.
 
 ## Limitations and reflection
 
