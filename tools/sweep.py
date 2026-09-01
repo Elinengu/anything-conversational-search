@@ -280,6 +280,15 @@ def build_configs(catalog: str) -> dict[str, AgentConfig]:
             use_router=True,
             llm=LLMConfig(enabled=True),
             rerank=RerankConfig(llm_weight=1.0, llm_gate_margin=0.05)),
+        # Both optional layers at once, on the merged (change 18 + 19) default.
+        # They are independent signals over the same head: the dense term scores
+        # meaning per candidate, the LLM term reorders the top llm_depth
+        # listwise. Measured together because each was only ever measured alone,
+        # and both fire on ambiguous pools - which change 19 made rarer.
+        "dense_llm": AgentConfig(
+            use_router=True,
+            llm=LLMConfig(enabled=True),
+            rerank=RerankConfig(dense_weight=1.0, llm_weight=1.0, llm_gate_margin=0.05)),
         # The pre-pool lexical-only retrieval, kept as the ablation baseline.
         "catpool_off": AgentConfig(
             retrieval=RetrievalConfig(use_category_pool=False),

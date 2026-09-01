@@ -1607,6 +1607,9 @@ not repeat the experiment.
 | **Neural cross-encoder reranking (S6b)** | dev 0.9268 → 0.9211, hard 0.7981 → 0.7944 | Built, measured, removed. Loses on every split and every setting; the optimum semantic weight is zero. Code preserved on branch `semantic-rerank`. |
 | **No-span rescore, re-opened after change 12** | dev 0.941757 → 0.941757 (bit-identical), holdout 0.9136 → 0.9188, hard 0.8020 → 0.8000 | Rejected a second time. Change 12 looked like it should revive it; dev did not move by a single digit, and everything that gained was on the gate split. See below. |
 | **Document-length tie-break** | dev 0.941757 → 0.943229, hard 0.801978 → 0.805064 at `w=0.10` only | Built in three forms, rejected. The hard-set gate is cleared at one weight with both neighbours failing — an argmax on noise, not a plateau. See below. |
+| **The dense embedding term, re-measured after changes 18+19** | public −0.0004, holdout +0.0007, hard **−0.0046**, paraphrase stress **−0.0048** | Rejected. Negative on the two sets built to test the paraphrase claim it exists for. |
+| **LLM listwise rerank (DeepSeek), re-measured after changes 18+19** | public +0.0008 and +0.0017 on two runs of the same config, holdout −0.0005 | Rejected for now. Its run-to-run spread is the same size as its effect. Was worth +0.003525 before those changes. |
+| **Both optional layers together** | public −0.0011 | Rejected. Below either alone and below the baseline. |
 | **Raising `popularity_weight` under sniper sizing** | dev 0.9521 → 0.9583, holdout 0.9220 → 0.9350 at `w=1.0`; generated 0.9322 → 0.9315, hard 0.8135 → 0.8072 | Rejected. Both public-derived splits improve monotonically and substantially; both *generated* sets, whose sessions are not drawn from the public set's sampling, are flat to negative, and the hard set falls monotonically to 0.7872 by `w=1.8`. See below. |
 | **Singles through the STAGNATING phase** | dev 0.9521 → 0.9322 | Rejected. Makes every hit rank 1 (dev MRR 0.967 against a 0.967 hit rate) and still loses 0.0146, because it costs three dev sessions of hit rate. Knob kept as `AgentConfig.stagnation_slate_size`, defaulting to the wide slate. |
 | **Final-turn exclusion bypass** | dev 0.9521 → 0.9472, holdout 0.0000 | Rejected. Ported from a rival submission, where it insures against an unparsed override permanently excluding the target. Our elimination scan already un-excludes on a parsed override, so the last turn's unfiltered top ten is mostly products already shown and disproven — it spends the deepest slate of the session on them. |
@@ -1777,6 +1780,66 @@ A rival submission scoring `0.9748` on this evaluator does run a strong populari
 `1.0` against a coverage term of `1.5`) and reaches MTTC `2.19` largely because of it. This sweep
 is the reason we do not simply copy it: the part of that design that transfers is the sizing, and
 the part that does not is the prior.
+
+### The two optional layers, re-measured on the merged agent
+
+Both optional signals — the dense sentence-embedding term (§S5/§S6) and the
+opt-in LLM listwise reranker (§S6) — were measured before changes 18 and 19.
+Both were re-run afterwards, with the encoder artifact rebuilt and a live API
+key, and both were verified actually firing first (`EmbeddingIndex.available`
+and `LLMReranker.available` both `True`) — a missing artifact or key makes
+either layer a silent no-op that scores *identically to the baseline*, which is
+indistinguishable from "measured and did not help" unless you check.
+
+Public set, 200 sessions, one process:
+
+| configuration | Hit@10 | MRR | MTTC | Score | vs baseline |
+|---|---|---|---|---|---|
+| **neither (ships)** | 1.000 | 0.961 | 2.67 | **0.9550** | — |
+| dense embedding term | 1.000 | 0.964 | 2.73 | 0.9546 | −0.0004 |
+| LLM rerank, gated | 1.000 | 0.967 | 2.71 | 0.9558 | +0.0008 |
+| both together | 1.000 | 0.962 | 2.73 | 0.9539 | −0.0011 |
+
+Every row is within `0.002` of the baseline, and both layers raise MRR while
+losing more to MTTC than they gain — they reorder the head slightly better and
+take an extra fraction of a turn to do it.
+
+The prediction going in was that both would be worth **less** than before, and
+they are. Both fire on *ambiguous* pools — the LLM gate is literally
+`state.leader_margin < 0.05` — and change 19 removed most of that ambiguity by
+taking turn-1 recall from 80.5% to 100% and public MRR from 0.881 to 0.961.
+The LLM layer was worth `+0.003525` on the older agent; it is worth `+0.0008`
+on this one. The cheap deterministic fix took the ground the expensive layer
+was standing on.
+
+Two results are firmer than the public column:
+
+- **The LLM row is not reproducible to the precision of its own effect.** The
+  same configuration scored `0.9567` and `0.9558` on two runs. The API is not
+  deterministic at `temperature=0.0`, so its run-to-run spread (`0.0009`) is the
+  size of the effect being claimed. On holdout it is `−0.0005`. There is no
+  measurement here that survives its own noise.
+- **The dense term is negative exactly where it was supposed to help.** It
+  exists for paraphrase recall — the one signal that scores meaning rather than
+  exact tokens. On the hard set it is `−0.0046` and under the
+  `paraphrase:heavy+browse-gated` stress customer `−0.0048`. Change 19 appears
+  to be the reason: a category-correct pool already excludes the cross-category
+  neighbours that semantic similarity used to rescue, so the dense term now
+  mostly reorders within a set that is already right, occasionally pushing the
+  target down.
+
+Both stay off by default, which also keeps the submission's offline, zero-token
+guarantee intact.
+
+**A bug found while measuring, worth fixing before anyone enables the layer:**
+`src/llm.py` never reads the `usage` object the API returns, and
+`starter/agent.py` reports `{"prompt_tokens": 0, "completion_tokens": 0}`
+unconditionally. With the LLM layer on, the agent spends tokens and reports
+zero — and `reported_token_usage` is one of the metrics the competition
+collects (`docs/evaluation_config.json`). It is harmless today because the
+layer ships off and the offline path genuinely uses no tokens, but it would be
+a misreport the moment anyone turns it on for a scored run.
+
 
 ## 7. Results
 
