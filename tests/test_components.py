@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import collections
 import unittest
 
 from src.facets import extract
 from src.policy import ALLOWED_ATTRIBUTES, FixedPolicy, InfoGainPolicy
-from src.rerank import RerankConfig, rerank
+from src.rerank import RerankConfig, _llm_gate_open, rerank
 from src.retrieval import RetrievalConfig, retrieve
 from src.router import classify, detect_turn_intent, extract_opening_facets
 from src.state import PRE_OVERRIDE_WEIGHT, DialogState
@@ -1000,3 +1001,70 @@ class PhrasingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TurnOneLLMReachabilityTests(unittest.TestCase):
+    """The LLM must be able to run on turn 1, and only when asked to.
+
+    Turn 1 is the one turn where S6 is otherwise inert: rerank() returns its
+    input untouched when query_spans() is empty, and query_spans() skips the
+    opening deliberately (it is the simulator's framing, not quoted product
+    copy). It is also the turn sniper sizing stakes a whole slate on.
+    """
+
+    class _StubLLM:
+        available = True
+
+        def __init__(self) -> None:
+            self.stats = collections.Counter()
+            self.queries: list[str] = []
+
+        def rank(self, query_text, candidates):
+            self.queries.append(query_text)
+            return [item["asin"] for item in candidates][::-1]
+
+    def _state(self):
+        state = DialogState(session_id="t1")
+        state.observe(1, "I'm looking for Jewelry Necklaces. A key requirement is: Material:alloy.")
+        return state
+
+    def _index(self):
+        return _StubIndex({
+            "A1": {"parent_asin": "A1", "text": "alloy necklace", "categories": ["Jewelry", "Necklaces"]},
+            "A2": {"parent_asin": "A2", "text": "silver necklace", "categories": ["Jewelry", "Necklaces"]},
+        })
+
+    def test_turn_one_has_no_spans(self) -> None:
+        """The premise. If this ever changes, the rest of this class is moot."""
+        self.assertEqual(self._state().query_spans(), [])
+
+    def test_llm_does_not_run_on_turn_one_by_default(self) -> None:
+        llm = self._StubLLM()
+        candidates = [("A1", 1.0), ("A2", 0.9)]
+        out = rerank(self._index(), self._state(), candidates,
+                     RerankConfig(llm_weight=1.0), llm=llm)
+        self.assertEqual(out, candidates, "the shipped default must be untouched")
+        self.assertEqual(llm.queries, [])
+
+    def test_llm_without_spans_reaches_turn_one(self) -> None:
+        llm = self._StubLLM()
+        candidates = [("A1", 1.0), ("A2", 0.9)]
+        out = rerank(self._index(), self._state(), candidates,
+                     RerankConfig(llm_weight=1.0, llm_without_spans=True), llm=llm)
+        self.assertEqual(len(llm.queries), 1, "the model was never consulted")
+        self.assertEqual([asin for asin, _ in out], ["A2", "A1"],
+                         "the model's order did not reach the result")
+
+    def test_the_gate_is_open_on_turn_one(self) -> None:
+        """leader_margin is 0.0 before any pool is observed, so an unobserved
+        pool reads as maximally ambiguous. Asserted rather than left to luck."""
+        self.assertEqual(self._state().leader_margin, 0.0)
+        self.assertTrue(_llm_gate_open(self._state(), RerankConfig(llm_gate_margin=0.05)))
+
+    def test_llm_query_opening_sends_the_category_too(self) -> None:
+        llm = self._StubLLM()
+        rerank(self._index(), self._state(), [("A1", 1.0), ("A2", 0.9)],
+               RerankConfig(llm_weight=1.0, llm_without_spans=True, llm_query="opening"),
+               llm=llm)
+        self.assertIn("Necklaces", llm.queries[0],
+                      "the opening query should carry the category, not just the slot value")

@@ -228,3 +228,6 @@ data/embeddings/
 # OS cruft
 .DS_Store
 **/.DS_Store
+
+# LLM response cache (tools/llm_variance.py --llm-cache)
+runs/llm_cache/

@@ -228,3 +228,87 @@ class RankTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UsageAccountingTests(unittest.TestCase):
+    """reported_token_usage is a metric the competition collects, so a layer
+    that spends tokens must say so. This was hardcoded to zero before."""
+
+    def _client(self):
+        with mock.patch.dict("os.environ", {"DEEPSEEK_API_KEY": "sk-test"}):
+            return LLMReranker(LLMConfig(enabled=True))
+
+    def test_usage_starts_at_zero(self) -> None:
+        self.assertEqual(self._client().usage,
+                         {"prompt_tokens": 0, "completion_tokens": 0})
+
+    def test_usage_accumulates_what_the_provider_reports(self) -> None:
+        client = self._client()
+        body = {"choices": [{"message": {"content": '["A1"]'}}],
+                "usage": {"prompt_tokens": 120, "completion_tokens": 7}}
+        with _patched_urlopen(result=_FakeResponse(body)):
+            client.rank("q", [{"asin": "A1", "text": "t"}])
+            client.rank("q2", [{"asin": "A1", "text": "t"}])
+        self.assertEqual(client.usage, {"prompt_tokens": 240, "completion_tokens": 14})
+
+    def test_a_response_without_usage_is_not_an_error(self) -> None:
+        client = self._client()
+        body = {"choices": [{"message": {"content": '["A1"]'}}]}
+        with _patched_urlopen(result=_FakeResponse(body)):
+            self.assertEqual(client.rank("q", [{"asin": "A1", "text": "t"}]), ["A1"])
+        self.assertEqual(client.usage, {"prompt_tokens": 0, "completion_tokens": 0})
+
+
+class CacheTests(unittest.TestCase):
+    def test_a_cache_hit_replays_without_calling_or_recounting_tokens(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict("os.environ", {"DEEPSEEK_API_KEY": "sk-test"}):
+                client = LLMReranker(LLMConfig(enabled=True, cache_dir=tmp))
+            body = {"choices": [{"message": {"content": '["A2","A1"]'}}],
+                    "usage": {"prompt_tokens": 100, "completion_tokens": 5}}
+            items = [{"asin": "A1", "text": "t1"}, {"asin": "A2", "text": "t2"}]
+            with _patched_urlopen(result=_FakeResponse(body)):
+                first = client.rank("q", items)
+            # A second call must not need the network at all.
+            with _patched_urlopen(raises=AssertionError("network was used")):
+                second = client.rank("q", items)
+            self.assertEqual(first, ["A2", "A1"])
+            self.assertEqual(second, first)
+            # The tokens were spent once; counting them twice would inflate a
+            # metric the competition collects.
+            self.assertEqual(client.usage, {"prompt_tokens": 100, "completion_tokens": 5})
+            self.assertEqual(client.stats["cache_hits"], 1)
+
+
+class ExtractionTests(unittest.TestCase):
+    """Arm B: reading the opening, which is the job the model is better at."""
+
+    def _client(self):
+        with mock.patch.dict("os.environ", {"DEEPSEEK_API_KEY": "sk-test"}):
+            return LLMReranker(LLMConfig(enabled=True))
+
+    def test_extracts_structured_search_material(self) -> None:
+        payload = ('{"category": "necklaces", "constraints": ["alloy"], '
+                   '"expanded_terms": ["pendant", "chain"]}')
+        body = {"choices": [{"message": {"content": payload}}]}
+        with _patched_urlopen(result=_FakeResponse(body)):
+            out = self._client().extract("I'm looking for Jewelry Necklaces.")
+        self.assertEqual(out["category"], "necklaces")
+        self.assertEqual(out["constraints"], ["alloy"])
+        self.assertIn("pendant", out["expanded_terms"])
+
+    def test_every_failure_is_None_not_an_exception(self) -> None:
+        client = self._client()
+        with _patched_urlopen(raises=TimeoutError("slow")):
+            self.assertIsNone(client.extract("anything"))
+        with _patched_urlopen(result=_FakeResponse(
+                {"choices": [{"message": {"content": "not json"}}]})):
+            self.assertIsNone(client.extract("anything"))
+        with _patched_urlopen(result=_FakeResponse(
+                {"choices": [{"message": {"content": "{}"}}]})):
+            self.assertIsNone(client.extract("anything"), "an empty parse is no opinion")
+
+    def test_unavailable_client_never_calls(self) -> None:
+        with mock.patch.dict("os.environ", {}, clear=True), \
+                mock.patch("src.llm._read_dotenv", return_value=""):
+            self.assertIsNone(LLMReranker(LLMConfig(enabled=True)).extract("x"))

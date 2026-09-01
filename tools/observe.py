@@ -848,6 +848,50 @@ def render_viewer(records: list[dict], summary: dict, tag: str) -> str:
 # Entry point
 # --------------------------------------------------------------------------------
 
+def _print_turn1(records: list[dict]) -> None:
+    """Where the target sits on turn 1, before the score dilutes it.
+
+    Turn 1 is the turn sniper sizing stakes a whole slate on and the only turn
+    where S6 is otherwise inert, so a turn-1 change should be read here first
+    and in the score second.
+
+    ``intent_override`` sessions are reported separately because the evaluator
+    ignores any hit until the override lands: 12 of the 23 sessions that
+    already hold the target at rank 1 on turn 1 are override sessions and score
+    nothing for it, so the reachable ceiling is lower than the raw rate looks.
+    """
+    buckets = {"rank 1": 0, "rank 2-3": 0, "rank 4-10": 0, "beyond 10": 0, "not in pool": 0}
+    override_at_1 = scored_at_1 = total = 0
+    for record in records:
+        turns = record.get("turns") or []
+        if not turns:
+            continue
+        total += 1
+        rank = ((turns[0].get("rerank") or {}).get("target_rank"))
+        if rank is None:
+            buckets["not in pool"] += 1
+        elif rank == 1:
+            buckets["rank 1"] += 1
+            if record.get("scenario_type") == "intent_override":
+                override_at_1 += 1
+            else:
+                scored_at_1 += 1
+        elif rank <= 3:
+            buckets["rank 2-3"] += 1
+        elif rank <= 10:
+            buckets["rank 4-10"] += 1
+        else:
+            buckets["beyond 10"] += 1
+    if not total:
+        return
+    print("\n  turn-1 target position:")
+    for label, count in buckets.items():
+        print(f"    {label:<12} {count:>4}  ({100 * count / total:5.1f}%)")
+    print(f"    of the rank-1 sessions, {scored_at_1} can score on turn 1 and "
+          f"{override_at_1} cannot (intent_override: hits are ignored until the "
+          f"override lands)")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--catalog", default="data/catalog.jsonl")
@@ -863,6 +907,10 @@ def main() -> None:
     parser.add_argument("--limit", type=int, help="first N sessions after filtering")
     parser.add_argument("--top", type=int, default=10, help="candidates recorded per turn")
     parser.add_argument("--no-markdown", action="store_true", help="skip the per-session .md files")
+    parser.add_argument(
+        "--turn1", action="store_true",
+        help="summarise turn-1 ranking accuracy - the metric a turn-1 change targets, "
+             "which the score only reflects indirectly")
     parser.add_argument(
         "--verify",
         action="store_true",
@@ -984,6 +1032,8 @@ def main() -> None:
     for label, count in summary["diagnosis_counts"].items():
         print(f"  {label:<18} {count:>4}  {DIAGNOSES[label]}")
     print(f"  turns left on the table: {summary['turns_left_on_table']}")
+    if args.turn1:
+        _print_turn1(tracer.records)
     print(f"\n  open {run_dir / 'viewer.html'}")
 
 

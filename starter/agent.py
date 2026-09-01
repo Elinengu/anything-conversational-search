@@ -205,6 +205,9 @@ class Agent:
                 self.embed = None
         # Cheap to construct even when disabled - see AgentConfig.llm above.
         self.llm = LLMReranker(self.config.llm)
+        # Running total already handed to the evaluator, so each turn reports
+        # only what that turn spent rather than the session's cumulative sum.
+        self._reported: dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0}
         self._states: dict[str, DialogState] = {}
         # Long-term user profile store across sessions (Dynamic Context Programming)
         self.profile_store = LongTermProfileStore()
@@ -266,7 +269,7 @@ class Agent:
 
         candidates = retrieve(
             self.index, state, self.config.retrieval,
-            track=track_name, embed=self.embed, qvec=qvec,
+            track=track_name, embed=self.embed, qvec=qvec, llm=self.llm,
         )
         candidates = rerank(
             self.index, state, candidates, self.config.rerank,
@@ -295,6 +298,7 @@ class Agent:
                     track=track_name,
                     embed=self.embed,
                     qvec=qvec,
+                    llm=self.llm,
                 )
                 candidates = rerank(
                     self.index, state, candidates, self.config.rerank,
@@ -489,12 +493,24 @@ class Agent:
         """
         return sum(1 for span in state.query_spans() if "preference for" not in span)
 
-    @staticmethod
-    def _envelope(message: str, attribute: str | None, recommendations: list[dict]) -> dict:
+    def _envelope(self, message: str, attribute: str | None, recommendations: list[dict]) -> dict:
         return {
             "message": message,
             "ask_attribute": attribute,
             "recommendations": recommendations,
-            # No model is used on the offline path, so the honest count is zero.
-            "usage": {"prompt_tokens": 0, "completion_tokens": 0},
+            # Zero on the offline path, which is the shipped default and where
+            # no model is consulted at all. When an optional layer IS enabled it
+            # must report what it actually spent: reported_token_usage is a
+            # metric the competition collects (docs/evaluation_config.json), so
+            # a hardcoded zero here was a misreport waiting to happen.
+            "usage": self._spent(),
         }
+
+    def _spent(self) -> dict:
+        """Provider-reported tokens spent so far this session, as a delta."""
+        total = dict(getattr(self.llm, "usage", None) or
+                     {"prompt_tokens": 0, "completion_tokens": 0})
+        delta = {key: max(0, total.get(key, 0) - self._reported.get(key, 0))
+                 for key in ("prompt_tokens", "completion_tokens")}
+        self._reported = total
+        return delta

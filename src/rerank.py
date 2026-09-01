@@ -200,6 +200,18 @@ class RerankConfig:
     # prompt. Bounds latency, cost and prompt size; the model can only ever
     # reorder within this window; it never promotes a candidate ranked below it.
     llm_depth: int = 8
+    # Let the LLM run on a turn that produced no verbatim spans - which in
+    # practice means turn 1, since query_spans() deliberately skips the opening
+    # (it is the simulator's framing, not quoted product copy). Turn 1 is the
+    # only turn where the whole S6 stage is otherwise inert, and the one that
+    # sniper sizing stakes a full slate on, so it is the one place the LLM adds
+    # the FIRST evidence-aware pass rather than second-guessing a lexical one.
+    # Off by default: every existing row and the shipped score stay identical.
+    llm_without_spans: bool = False
+    # Query text handed to the ranking call. "slots" is authoritative_text() -
+    # the active structured slots, e.g. just "alloy". "opening" is the opening
+    # line, which on turn 1 also carries the category ("Jewelry Necklaces").
+    llm_query: str = "slots"
 
 
 def _dense_similarities(
@@ -406,7 +418,7 @@ def _dense_gate_open(state: DialogState, config: RerankConfig, track: str | None
     return True
 
 
-def _llm_gate_open(state: DialogState, config: RerankConfig) -> bool:
+def _llm_gate_open(state: DialogState, config: RerankConfig, llm_stats=None) -> bool:
     """True -> the LLM layer is eligible to fire this turn (RerankConfig.llm_gate_margin).
 
     Mirrors ``_dense_gate_open``: consults the *previous* turn's observed pool
@@ -415,9 +427,16 @@ def _llm_gate_open(state: DialogState, config: RerankConfig) -> bool:
     (always eligible) - the caller still needs ``llm_weight > 0.0`` and an
     available ``llm`` for anything to actually happen.
     """
+    if llm_stats is not None:
+        llm_stats["gate_evaluated"] += 1
     if config.llm_gate_margin <= 0.0:
+        if llm_stats is not None:
+            llm_stats["gate_open"] += 1
         return True
-    return state.leader_margin < config.llm_gate_margin
+    open_now = state.leader_margin < config.llm_gate_margin
+    if llm_stats is not None:
+        llm_stats["gate_open" if open_now else "gate_closed"] += 1
+    return open_now
 
 
 def _llm_rerank(
@@ -441,7 +460,9 @@ def _llm_rerank(
         items.append({"asin": asin, "text": product["text"] if product else ""})
 
     try:
-        order = llm.rank(state.authoritative_text(), items)
+        query = (state.opening if config.llm_query == "opening" else "") \
+            or state.authoritative_text()
+        order = llm.rank(query, items)
     except Exception:
         order = None
     if not order:
@@ -485,7 +506,14 @@ def rerank(
         and getattr(embed, "available", False)
         and _dense_gate_open(state, config, track)
     )
-    if not spans and not (dense_active and config.rescore_without_spans):
+    llm_active = (
+        config.llm_weight > 0.0
+        and llm is not None
+        and getattr(llm, "available", False)
+        and _llm_gate_open(state, config, getattr(llm, "stats", None))
+    )
+    if not spans and not (dense_active and config.rescore_without_spans) \
+            and not (llm_active and config.llm_without_spans):
         return candidates
 
     sims: dict[str, float] = {}
@@ -614,13 +642,7 @@ def rerank(
 
     scored.sort(key=lambda item: (-item[1], item[0]))
 
-    if (
-        config.llm_weight > 0.0
-        and llm is not None
-        and getattr(llm, "available", False)
-        and scored
-        and _llm_gate_open(state, config)
-    ):
+    if llm_active and scored:
         scored = _llm_rerank(scored, state, index, config, llm)
 
     return scored + tail + banished

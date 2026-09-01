@@ -35,6 +35,7 @@ from src.state import DialogState
 
 if TYPE_CHECKING:  # avoid a hard numpy dependency on the BM25-only path
     from src.embed import EmbeddingIndex
+    from src.llm import LLMReranker
 
 
 RRF_K = 60.0
@@ -123,6 +124,23 @@ class RetrievalConfig:
     # 1.5 is the argmax of both public-derived splits and the hard set rejects
     # it, which is the signature of fitting the public generator's sampling.
     # 0.7 and 1.0 are the plateau where all four sets agree.
+    # ---- Arm B: LLM query-expansion route --------------------------------
+    # One extraction call on the opening turn turns the customer's sentence
+    # into {category, constraints, expanded_terms}; the terms become a fourth
+    # RRF route. Placed in retrieval, not reranking, for three reasons: it is
+    # the only stage that runs on turn 1 (rerank returns early with no spans);
+    # RRF already exists because route scores are not comparable, so a weak
+    # route degrades instead of dominating; and it composes with the category
+    # pool rather than competing - the pool decides which category, this
+    # decides which words. Any failure yields no route at all, leaving the
+    # fused pool byte-identical to this being off.
+    #
+    # This is the job a language model beats exact-token matching at. Ranking
+    # is not: the evaluator quotes constraints verbatim from the target's own
+    # metadata, and the ranking layer measured 9-up/9-down accordingly.
+    use_llm_terms: bool = False
+    weight_llm_terms: float = 0.8
+
     use_category_pool: bool = True
     #: RRF weight for the pool route. Pool members are ranked by popularity,
     #: which is the right prior here - targets are drawn with a
@@ -139,6 +157,31 @@ def _rrf(ranked: list[tuple[str, float]], weight: float, sink: dict[str, float])
         sink[parent_asin] = sink.get(parent_asin, 0.0) + weight / (RRF_K + position + 1)
 
 
+def _llm_term_route(
+    index: CatalogIndex, state: DialogState, llm: "LLMReranker", limit: int
+) -> list[tuple[str, float]]:
+    """Arm B: BM25 over the terms the model read out of the opening.
+
+    Extraction runs once per session, on the opening, and the result is cached
+    on the state - later turns reuse it rather than paying a call per turn.
+    """
+    expansion = getattr(state, "_llm_expansion", None)
+    if expansion is None:
+        expansion = llm.extract(state.opening) or {}
+        try:
+            state._llm_expansion = expansion
+        except Exception:
+            pass
+    terms_text = " ".join([
+        str(expansion.get("category") or ""),
+        *[str(v) for v in expansion.get("constraints", [])],
+        *[str(v) for v in expansion.get("expanded_terms", [])],
+    ]).strip()
+    if not terms_text:
+        return []
+    return index.search_terms(terms_text, limit=limit)
+
+
 def retrieve(
     index: CatalogIndex,
     state: DialogState,
@@ -147,6 +190,7 @@ def retrieve(
     embed: "EmbeddingIndex | None" = None,
     qvec: Any = None,
     track: str | None = None,
+    llm: "LLMReranker | None" = None,
 ) -> list[tuple[str, float]]:
     """Return a fused candidate pool, best first.
 
@@ -205,6 +249,10 @@ def retrieve(
                      config.weight_dense_focused, fused)
         except Exception:
             pass
+
+    if config.use_llm_terms and llm is not None and getattr(llm, "available", False):
+        _rrf(_llm_term_route(index, state, llm, config.pool_size),
+             config.weight_llm_terms, fused)
 
     pool: list[str] = []
     if config.use_category_pool:

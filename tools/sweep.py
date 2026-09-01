@@ -280,6 +280,51 @@ def build_configs(catalog: str) -> dict[str, AgentConfig]:
             use_router=True,
             llm=LLMConfig(enabled=True),
             rerank=RerankConfig(llm_weight=1.0, llm_gate_margin=0.05)),
+        # ---- Arm A: let the LLM rank on turn 1 --------------------------
+        # Turn 1 is the only turn where S6 is otherwise inert (rerank returns
+        # early with no spans) and the turn sniper sizing stakes a full slate
+        # on, so it is the one place the LLM supplies the FIRST evidence-aware
+        # pass rather than second-guessing a lexical one.
+        "llm_t1": AgentConfig(
+            use_router=True, llm=LLMConfig(enabled=True),
+            rerank=RerankConfig(llm_weight=1.0, llm_gate_margin=0.05,
+                                llm_without_spans=True)),
+        # Turn 1's slots may be a single word ("alloy"); the opening also
+        # carries the category ("Jewelry Necklaces").
+        "llm_t1_opening": AgentConfig(
+            use_router=True, llm=LLMConfig(enabled=True),
+            rerank=RerankConfig(llm_weight=1.0, llm_gate_margin=0.05,
+                                llm_without_spans=True, llm_query="opening")),
+        # 6.5% of hard constraints fall beyond the 220-char candidate window.
+        "llm_t1_wide": AgentConfig(
+            use_router=True, llm=LLMConfig(enabled=True, candidate_chars=700),
+            rerank=RerankConfig(llm_weight=1.0, llm_gate_margin=0.05,
+                                llm_without_spans=True)),
+        # Separates "turn 1 helps" from "the gate was the constraint".
+        "llm_t1_nogate": AgentConfig(
+            use_router=True, llm=LLMConfig(enabled=True),
+            rerank=RerankConfig(llm_weight=1.0, llm_gate_margin=0.0,
+                                llm_without_spans=True)),
+        # ---- Arm B: the LLM as a parser feeding retrieval ----------------
+        # Judged on the paraphrase stress customer, not the public set: a
+        # cooperative customer quotes the catalog verbatim, so there is nothing
+        # there for a parser to add.
+        "llm_terms": AgentConfig(
+            use_router=True, llm=LLMConfig(enabled=True),
+            retrieval=RetrievalConfig(use_llm_terms=True)),
+        "llm_terms_w04": AgentConfig(
+            use_router=True, llm=LLMConfig(enabled=True),
+            retrieval=RetrievalConfig(use_llm_terms=True, weight_llm_terms=0.4)),
+        "llm_terms_w12": AgentConfig(
+            use_router=True, llm=LLMConfig(enabled=True),
+            retrieval=RetrievalConfig(use_llm_terms=True, weight_llm_terms=1.2)),
+        # Both arms - they act at different stages and may compose the way
+        # changes 18 and 19 did.
+        "llm_t1_terms": AgentConfig(
+            use_router=True, llm=LLMConfig(enabled=True),
+            retrieval=RetrievalConfig(use_llm_terms=True),
+            rerank=RerankConfig(llm_weight=1.0, llm_gate_margin=0.05,
+                                llm_without_spans=True)),
         # Both optional layers at once, on the merged (change 18 + 19) default.
         # They are independent signals over the same head: the dense term scores
         # meaning per candidate, the LLM term reorders the top llm_depth
