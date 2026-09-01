@@ -1840,6 +1840,37 @@ Two results are firmer than the public column:
   deterministic at `temperature=0.0`, so its run-to-run spread (`0.0009`) is the
   size of the effect being claimed. On holdout it is `−0.0005`. There is no
   measurement here that survives its own noise.
+
+  Traced, the layer is not broken — it is starved. Instrumenting the gate and
+  the calls over 40 sessions: the gate is **evaluated** only 59 times across
+  ~110 turns (the missing ~40 are turn 1, where the reranker does not run at
+  all — see above), **opens** 27 of those 59, and every one of the 27 calls
+  succeeds: valid JSON, usable ids, 22 of them reordering something. But only
+  **4 of 27 change the top-1** — and §S7's sniper sizing shows a *single*
+  candidate on turns 1-4, so reordering positions 2-8 of an 8-item window is
+  invisible to the score by construction. Three filters multiply: inert on turn
+  1, gate shut on half the rest, and only position 1 ever shown.
+
+  Across the full 200 sessions the target's rank moves on 18 of 531 turns
+  (3.4%) — **9 up and 9 down**, mean `+0.01`; session outcomes 2 better, 6
+  worse. A coin flip, for the same reason the dense term loses: the customer
+  quotes verbatim spec strings from the target's own metadata, so deciding
+  between two products that both contain `"Imported; Zipper closure"` is not a
+  language problem. The model reads the same product text the IDF span matcher
+  reads and has no extra information to be smarter with.
+
+  Prompt truncation was checked as a possible cause and mostly ruled out: 86%
+  of hard constraints fall inside the 220-character candidate window (median
+  match position 80, median product blob 678 chars); only 6.5% are cut off.
+  Worth widening, but not the reason.
+
+  The useful conclusion is about *placement*, not about the model. We pointed a
+  language model at the one job on this task where exact string matching is
+  already optimal. Its comparative advantage is understanding a **reworded**
+  customer — parsing free text into constraints, or choosing the next question
+  — which is where `tools/stress_harness.py` shows the agent actually losing,
+  and which is where the strongest published submission on this evaluator
+  points its own model.
 - **The dense term is negative exactly where it was supposed to help.** It
   exists for paraphrase recall — the one signal that scores meaning rather than
   exact tokens. On the hard set it is `−0.0046` and under the
