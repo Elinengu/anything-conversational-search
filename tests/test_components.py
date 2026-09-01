@@ -1039,18 +1039,42 @@ class TurnOneLLMReachabilityTests(unittest.TestCase):
         self.assertEqual(self._state().query_spans(), [])
 
     def test_llm_does_not_run_on_turn_one_by_default(self) -> None:
+        """The lexical reranker now runs on turn 1; the LLM still must not.
+
+        ``rerank_without_spans`` ships on, so turn 1 is no longer a no-op - but
+        that is the offline stage. Reaching the model needs ``llm_weight > 0``,
+        which is not a default, so the shipped agent stays offline and free.
+        """
+        llm = self._StubLLM()
+        rerank(self._index(), self._state(), [("A1", 1.0), ("A2", 0.9)],
+               RerankConfig(), llm=llm)
+        self.assertEqual(llm.queries, [], "the model was consulted without being asked for")
+
+    def test_lexical_rerank_does_run_on_turn_one_by_default(self) -> None:
+        """The shipped default rescores turn 1 - worth +0.0017 public, free."""
+        untouched = rerank(self._index(), self._state(), [("A1", 1.0), ("A2", 0.9)],
+                           RerankConfig(rerank_without_spans=False))
+        rescored = rerank(self._index(), self._state(), [("A1", 1.0), ("A2", 0.9)],
+                          RerankConfig())
+        self.assertEqual(untouched, [("A1", 1.0), ("A2", 0.9)])
+        self.assertNotEqual(rescored, untouched, "turn 1 was left unscored")
+
+    def test_a_later_span_less_turn_is_still_left_alone(self) -> None:
+        """Scoped to turn 1 on purpose: a declined "no preference" reply also
+        produces no spans, and rescoring it only re-sorts stale evidence.
+        Measured, unscoped vs turn-1-only: 0.9555 vs 0.9567."""
+        state = self._state()
+        state.observe(2, "I don't have a preference for material; please use your judgment.")
+        candidates = [("A1", 1.0), ("A2", 0.9)]
+        self.assertEqual(state.query_spans(), [], "premise: this turn has no spans")
+        self.assertEqual(rerank(self._index(), state, candidates, RerankConfig()),
+                         candidates)
+
+    def test_enabling_the_llm_reaches_turn_one(self) -> None:
         llm = self._StubLLM()
         candidates = [("A1", 1.0), ("A2", 0.9)]
         out = rerank(self._index(), self._state(), candidates,
                      RerankConfig(llm_weight=1.0), llm=llm)
-        self.assertEqual(out, candidates, "the shipped default must be untouched")
-        self.assertEqual(llm.queries, [])
-
-    def test_llm_without_spans_reaches_turn_one(self) -> None:
-        llm = self._StubLLM()
-        candidates = [("A1", 1.0), ("A2", 0.9)]
-        out = rerank(self._index(), self._state(), candidates,
-                     RerankConfig(llm_weight=1.0, llm_without_spans=True), llm=llm)
         self.assertEqual(len(llm.queries), 1, "the model was never consulted")
         self.assertEqual([asin for asin, _ in out], ["A2", "A1"],
                          "the model's order did not reach the result")
@@ -1064,7 +1088,7 @@ class TurnOneLLMReachabilityTests(unittest.TestCase):
     def test_llm_query_opening_sends_the_category_too(self) -> None:
         llm = self._StubLLM()
         rerank(self._index(), self._state(), [("A1", 1.0), ("A2", 0.9)],
-               RerankConfig(llm_weight=1.0, llm_without_spans=True, llm_query="opening"),
+               RerankConfig(llm_weight=1.0, llm_query="opening"),
                llm=llm)
         self.assertIn("Necklaces", llm.queries[0],
                       "the opening query should carry the category, not just the slot value")

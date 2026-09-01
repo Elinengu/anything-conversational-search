@@ -200,14 +200,27 @@ class RerankConfig:
     # prompt. Bounds latency, cost and prompt size; the model can only ever
     # reorder within this window; it never promotes a candidate ranked below it.
     llm_depth: int = 8
-    # Let the LLM run on a turn that produced no verbatim spans - which in
-    # practice means turn 1, since query_spans() deliberately skips the opening
-    # (it is the simulator's framing, not quoted product copy). Turn 1 is the
-    # only turn where the whole S6 stage is otherwise inert, and the one that
-    # sniper sizing stakes a full slate on, so it is the one place the LLM adds
-    # the FIRST evidence-aware pass rather than second-guessing a lexical one.
-    # Off by default: every existing row and the shipped score stay identical.
-    llm_without_spans: bool = False
+    # Run the WHOLE S6 stage on a turn that produced no verbatim spans - which
+    # means turn 1 - independently of any optional layer. Discovered by
+    # accident: a variance run of `llm_t1` in which every API call failed
+    # (HTTP 402) still scored 0.956313 against a 0.955 baseline, deterministic
+    # and free, because llm_without_spans had let the *lexical* terms
+    # (popularity, category, tail, retrieval) reach turn 1 even though the LLM
+    # contributed nothing. That effect has nothing to do with the model, so it
+    # gets its own flag rather than riding on one.
+    #
+    # Scoped to turn 1 specifically, not to "any span-less turn". Later turns
+    # can also produce no spans (a declined "no preference for X" reply), and
+    # rescoring those is worse than leaving them alone - there is no new
+    # evidence, so it only re-sorts on stale weights. Measured: unscoped 0.9555,
+    # turn-1-only 0.9567, baseline 0.9550.
+    #
+    # Ships ON: positive on all six measurements with no regression anywhere
+    # and Hit@10 unchanged - public 0.9550->0.9567, dev 0.9590->0.9615, holdout
+    # 0.9489->0.9494, hard 0.8444->0.8445, generated 0.9349->0.9352, stress
+    # 0.89907->0.90267 - at zero tokens and no network, so it costs the offline
+    # guarantee nothing.
+    rerank_without_spans: bool = True
     # Query text handed to the ranking call. "slots" is authoritative_text() -
     # the active structured slots, e.g. just "alloy". "opening" is the opening
     # line, which on turn 1 also carries the category ("Jewelry Necklaces").
@@ -512,8 +525,11 @@ def rerank(
         and getattr(llm, "available", False)
         and _llm_gate_open(state, config, getattr(llm, "stats", None))
     )
-    if not spans and not (dense_active and config.rescore_without_spans) \
-            and not (llm_active and config.llm_without_spans):
+    if (
+        not spans
+        and not (config.rerank_without_spans and state.turn_count <= 1)
+        and not (dense_active and config.rescore_without_spans)
+    ):
         return candidates
 
     sims: dict[str, float] = {}

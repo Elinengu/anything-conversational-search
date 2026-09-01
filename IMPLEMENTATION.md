@@ -1781,7 +1781,7 @@ A rival submission scoring `0.9748` on this evaluator does run a strong populari
 is the reason we do not simply copy it: the part of that design that transfers is the sizing, and
 the part that does not is the prior.
 
-### The reranker does not run on turn 1
+### The reranker does not run on turn 1 — fixed, and it was the win
 
 Found while tracing the dense term, and larger than that result. `rerank()`
 returns its input untouched when `state.query_spans()` is empty
@@ -1801,6 +1801,38 @@ most valuable turn, the one §S7's sniper sizing stakes a whole slate on, is
 ranked by the least evidence-aware stage in the pipeline. Making the reranker
 run on turn 1 — with the opening's category words treated as the weak evidence
 they are, rather than skipped — is the most promising untried lever left.
+
+**It was, and it is now the default** (`RerankConfig.rerank_without_spans`).
+Letting S6 rescore turn 1 is worth, on six independent measurements, with
+Hit@10 unchanged on every one and **at zero tokens and no network**:
+
+| set | before | after |
+|---|---|---|
+| public (200) | 0.955 | **0.9567** |
+| dev / holdout | 0.9590 / 0.9489 | **0.9615 / 0.9494** |
+| generated (200) | 0.9349 | **0.9352** |
+| hard (96) | 0.8444 | **0.8445** |
+| `paraphrase:heavy+browse-gated` | 0.89907 | **0.90267** |
+
+It is deliberately scoped to **turn 1**, not to "any turn without spans". Later
+turns can also produce none — a declined *"I don't have a preference for X"*
+reply — and rescoring those is worse than leaving them alone, because no new
+evidence arrived and the pass only re-sorts on stale weights. Measured:
+unscoped `0.9555`, turn-1-only `0.9567`, baseline `0.9550`. The unscoped version
+is *below* the turn-1 version, which is the whole justification for the extra
+condition.
+
+How it was found is worth recording, because it is an argument for the call
+counters in `src/llm.py` rather than for anyone's insight. A variance run of the
+turn-1 **LLM** configuration returned three byte-identical scores of `0.956313`
+and zero tokens. Identical results from a nondeterministic endpoint is
+impossible, and the counters said why: `rank_calls 1443, rank_failures 1443` —
+the DeepSeek balance had run out mid-session and every call was failing with
+HTTP 402, silently, exactly as the fail-closed contract promises. So that run
+was not measuring the LLM at all. It was measuring the *side effect* of the flag
+that let the LLM reach turn 1: the **lexical** terms reached it too. The
+accident isolated a free, deterministic `+0.0013` that had been hiding inside a
+paid, nondeterministic `+0.0024`.
 
 ### The two optional layers, re-measured on the merged agent
 
